@@ -197,13 +197,15 @@ async function warmAllCasinoTables() {
   _isWarming = true;
   try {
     const tableIds = Object.keys(GAME_MAP);
-    console.log(`[Stream Warmer] Starting background pre-warming for all ${tableIds.length} tables...`);
-    for (const tableId of tableIds) {
-      try {
-        await warmCasinoTable(tableId);
-      } catch (_) {}
-      // 800ms polite pause between warming each table across 4 distributed providers
-      await new Promise(r => setTimeout(r, 800));
+    console.log(`[Stream Warmer] Fast parallel pre-warming for all ${tableIds.length} tables...`);
+    // Warm in parallel batches of 4 (1 table per provider)
+    const batchSize = 4;
+    for (let i = 0; i < tableIds.length; i += batchSize) {
+      const batch = tableIds.slice(i, i + batchSize);
+      await Promise.allSettled(batch.map(id => warmCasinoTable(id)));
+      if (i + batchSize < tableIds.length) {
+        await new Promise(r => setTimeout(r, 250));
+      }
     }
     console.log(`[Stream Warmer] All ${tableIds.length} tables pre-warmed & ready in memory/Redis.`);
   } finally {
@@ -211,13 +213,13 @@ async function warmAllCasinoTables() {
   }
 }
 
-// Start warmer 2s after boot, recurring every 10 minutes for all tables so cache never expires
+// Start warmer 1s after boot, recurring every 10 minutes for all tables so cache never expires
 setTimeout(() => {
   warmAllCasinoTables().catch(() => {});
   setInterval(() => {
     warmAllCasinoTables().catch(() => {});
   }, 10 * 60 * 1000);
-}, 2000);
+}, 1000);
 
 // Health Check & Monitoring API (Real-Time Provider Observability)
 router.get('/health', async (req, res) => {
@@ -552,7 +554,11 @@ router.get('/player/:eventId', async (req, res) => {
       res.setHeader('Permissions-Policy', 'unload=*');
       return res.send(stale.html);
     }
-    return res.status(500).send(`Stream Proxy Error: ${err.message}`);
+
+    const game = GAME_MAP[eventId] || { name: 'Live Table' };
+    const offlineHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{margin:0;background:#07090e;color:#94a3b8;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center}.card{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:24px;max-width:320px}.title{font-size:14px;font-weight:600;color:#f8fafc;margin-bottom:6px}.sub{font-size:11px;color:#64748b;line-height:1.4}.badge{display:inline-block;margin-top:10px;padding:4px 10px;border-radius:9999px;background:rgba(245,158,11,0.1);color:#fbbf24;font-size:10px;font-weight:600;border:1px solid rgba(245,158,11,0.2)}</style></head><body><div class="card"><div class="title">${game.name}</div><div class="sub">This live dealer table is currently taking a scheduled break upstream.</div><div class="badge">TABLE OFFLINE UPSTREAM</div></div></body></html>`;
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.status(200).send(offlineHtml);
   } finally {
     inFlightPlayers.delete(eventId);
   }

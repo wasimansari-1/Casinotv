@@ -11,19 +11,19 @@ const redisClient = require('./redisClient');
 // Global System Configuration (Configurable via Environment Variables)
 // ============================================================================
 const CONFIG = {
-  // Provider concurrency: number of simultaneous requests allowed per provider (default: 2)
-  concurrency: Math.max(1, parseInt(process.env.PROVIDER_CONCURRENCY, 10) || 2),
-  // Minimum interval between requests to the same provider in ms (default: 800)
-  minIntervalMs: Math.max(200, parseInt(process.env.PROVIDER_MIN_INTERVAL_MS, 10) || 800),
-  // Maximum retries for temporary failures (default: 2)
-  maxRetries: Math.max(0, parseInt(process.env.PROVIDER_MAX_RETRIES, 10) || 2),
+  // Provider concurrency: number of simultaneous requests allowed per provider (default: 4)
+  concurrency: Math.max(1, parseInt(process.env.PROVIDER_CONCURRENCY, 10) || 4),
+  // Minimum interval between requests to the same provider in ms (default: 100)
+  minIntervalMs: Math.max(20, parseInt(process.env.PROVIDER_MIN_INTERVAL_MS, 10) || 100),
+  // Maximum retries for temporary failures (default: 1 fast retry)
+  maxRetries: Math.max(0, parseInt(process.env.PROVIDER_MAX_RETRIES, 10) || 1),
   // Exponential backoff delays in ms
   backoffMs: [
-    parseInt(process.env.PROVIDER_BACKOFF_1_MS, 10) || 2000,
-    parseInt(process.env.PROVIDER_BACKOFF_2_MS, 10) || 5000
+    parseInt(process.env.PROVIDER_BACKOFF_1_MS, 10) || 150,
+    parseInt(process.env.PROVIDER_BACKOFF_2_MS, 10) || 500
   ],
-  // Circuit breaker cooldown on HTTP 429 / repeated failures in ms (default: 10000 = 10s)
-  cooldownMs: parseInt(process.env.CIRCUIT_BREAKER_COOLDOWN_MS, 10) || 10000,
+  // Circuit breaker cooldown on HTTP 429 in ms (default: 5000 = 5s)
+  cooldownMs: parseInt(process.env.CIRCUIT_BREAKER_COOLDOWN_MS, 10) || 5000,
   // WatchLink default cache TTL in seconds (default: 900 = 15m)
   watchlinkTtlSec: parseInt(process.env.WATCHLINK_CACHE_TTL_SEC, 10) || 900
 };
@@ -31,6 +31,24 @@ const CONFIG = {
 let _cachedAgent = null;
 let _cachedProxyUrl = null;
 let _currentStickySession = Math.floor(Math.random() * 10) + 1; // Strict 1 to 10 pool of Webshare Indian Residential sessions
+const _tableSessionMap = new Map();
+
+function getSessionForTable(tableId) {
+  if (!tableId) return _currentStickySession;
+  if (!_tableSessionMap.has(tableId)) {
+    const hash = String(tableId).split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
+    _tableSessionMap.set(tableId, (hash % 10) + 1);
+  }
+  return _tableSessionMap.get(tableId);
+}
+
+function rotateTableSession(tableId, reason = '') {
+  const current = getSessionForTable(tableId);
+  const next = (current % 10) + 1;
+  _tableSessionMap.set(tableId, next);
+  console.log(`[StreamCore] Rotated proxy session for table ${tableId} (#${current} -> #${next}) Reason: ${reason || 'unspecified'}`);
+  return next;
+}
 
 function getEffectiveProxyUrl(proxyUrlStr, sessionOverride = null) {
   if (!proxyUrlStr) return null;
@@ -819,6 +837,7 @@ async function getWatchUrl(eventId) {
           const result = await providerManager.schedule(provKey, eventId, async () => {
             let token = await getAuthToken(provKey);
             let tokenRefreshed = false;
+            let tableSession = getSessionForTable(eventId);
 
             for (let attempt = 0; attempt <= maxRetries; attempt++) {
               const startTime = Date.now();
@@ -828,6 +847,7 @@ async function getWatchUrl(eventId) {
               try {
                 res = await proxyFetch(`${provider.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`, {
                   method: 'POST',
+                  session: tableSession,
                   headers: {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${token}`,
@@ -839,7 +859,7 @@ async function getWatchUrl(eventId) {
                     streamId: eventId,
                     timestamp: Date.now()
                   }),
-                  timeout: 10000
+                  timeout: 8000
                 });
 
                 data = await res.json().catch(() => null);
@@ -858,7 +878,7 @@ async function getWatchUrl(eventId) {
                     provider: provider.name,
                     provKey: provKey,
                     origin: provider.base,
-                    session: _currentStickySession,
+                    session: tableSession,
                     expiresAt: Date.now() + (ttlSec * 1000)
                   };
 
@@ -901,9 +921,9 @@ async function getWatchUrl(eventId) {
                   throw new Error(`Provider ${provider.name} rate-limited (HTTP 429)`);
                 }
 
-                // 3. IP Blocked: viewer_ip_blocked (Do not trip provider circuit breaker; rotate session and retry/failover)
+                // 3. IP Blocked: viewer_ip_blocked (Rotate THIS table's dedicated session and retry/failover)
                 if (data?.meta?.message === 'viewer_ip_blocked' || (res.status === 403 && JSON.stringify(data || '').includes('blocked'))) {
-                  rotateStickySession(`IP blocked on ${provider.name}`);
+                  tableSession = rotateTableSession(eventId, `IP blocked on ${provider.name}`);
                   providerManager.trackRequest(provKey, durationMs, false, 403, 'viewer_ip_blocked');
                   logAudit({
                     provider: provider.name,
@@ -913,10 +933,10 @@ async function getWatchUrl(eventId) {
                     durationMs,
                     retries: attempt,
                     circuitState: providerManager.getState(provKey),
-                    message: `viewer_ip_blocked on session. Rotated proxy session to #${_currentStickySession}`
+                    message: `viewer_ip_blocked on session #${tableSession}. Rotated session for table ${eventId}`
                   });
                   if (attempt < maxRetries) {
-                    console.log(`[StreamCore] Retrying table ${eventId} on ${provider.name} with fresh session #${_currentStickySession}...`);
+                    console.log(`[StreamCore] Retrying table ${eventId} on ${provider.name} with fresh session #${tableSession}...`);
                     continue;
                   }
                   throw new Error(`Provider ${provider.name} blocked residential IP`);
