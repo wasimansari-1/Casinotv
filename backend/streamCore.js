@@ -54,8 +54,13 @@ function getEffectiveProxyUrl(proxyUrlStr, sessionOverride = null) {
   if (!proxyUrlStr) return null;
   const rawSession = sessionOverride || _currentStickySession;
   const session = ((Math.abs(Number(rawSession) || 1) - 1) % 10) + 1; // Strict 1 to 10 pool
-  if (proxyUrlStr.includes('webshare.io') && proxyUrlStr.includes('-rotate')) {
-    return proxyUrlStr.replace('-rotate', `-${session}`);
+  if (proxyUrlStr.includes('webshare.io')) {
+    if (proxyUrlStr.includes('-rotate')) {
+      return proxyUrlStr.replace('-rotate', `-${session}`);
+    }
+    if (proxyUrlStr.includes('bbmraujs-in')) {
+      return proxyUrlStr.replace(/bbmraujs-in(?:-\w+)?/, `bbmraujs-in-${session}`);
+    }
   }
   return proxyUrlStr;
 }
@@ -565,9 +570,9 @@ class ProviderManager {
       m.lastFailureReason = errorMsg || `HTTP ${statusCode}`;
       m.consecutiveFailures++;
 
-      if (statusCode === 429 || (errorMsg && errorMsg.includes('viewer_ip_blocked'))) {
+      if (statusCode === 429) {
         m.rateLimitedRequests++;
-        this.tripCooldown(provKey, CONFIG.cooldownMs, errorMsg || 'Rate-Limited');
+        this.tripCooldown(provKey, CONFIG.cooldownMs, errorMsg || 'Rate-Limited (HTTP 429)');
       } else {
         this.recordFailure(provKey, statusCode, errorMsg);
       }
@@ -741,41 +746,44 @@ function resolveWatchLinkTtl(url, defaultTtlSec = CONFIG.watchlinkTtlSec) {
 }
 
 // Multi-Provider Casino WatchLink Resolution with Redis Deduplication, Smart Retry & Circuit Breaker
-async function getWatchUrl(eventId) {
+async function getWatchUrl(eventId, options = {}) {
   const cacheKey = `watchlink:${eventId}`;
+  const forceFresh = Boolean(options.forceFresh);
 
   // 1. Check Distributed Redis Cache (Shared across all PM2 workers)
-  const redisCached = await redisClient.get(cacheKey);
-  if (redisCached && redisCached.url && (Date.now() < (redisCached.expiresAt || 0))) {
-    providerManager.trackCacheHit(redisCached.provKey || 'startexch');
-    logAudit({
-      provider: redisCached.provider,
-      tableId: eventId,
-      statusCode: 200,
-      category: 'success',
-      durationMs: 0,
-      retries: 0,
-      circuitState: providerManager.getState(redisCached.provKey || 'startexch'),
-      message: 'WatchLink served directly from Redis distributed cache'
-    });
-    return redisCached;
-  }
+  if (!forceFresh) {
+    const redisCached = await redisClient.get(cacheKey);
+    if (redisCached && redisCached.url && (Date.now() < (redisCached.expiresAt || 0))) {
+      providerManager.trackCacheHit(redisCached.provKey || 'startexch');
+      logAudit({
+        provider: redisCached.provider,
+        tableId: eventId,
+        statusCode: 200,
+        category: 'success',
+        durationMs: 0,
+        retries: 0,
+        circuitState: providerManager.getState(redisCached.provKey || 'startexch'),
+        message: 'WatchLink served directly from Redis distributed cache'
+      });
+      return redisCached;
+    }
 
-  // 2. Check local in-memory cache fallback
-  const memCached = watchLinkCache.get(eventId);
-  if (memCached && Date.now() < memCached.expiresAt) {
-    providerManager.trackCacheHit(memCached.provKey || 'startexch');
-    logAudit({
-      provider: memCached.provider,
-      tableId: eventId,
-      statusCode: 200,
-      category: 'success',
-      durationMs: 0,
-      retries: 0,
-      circuitState: providerManager.getState(memCached.provKey || 'startexch'),
-      message: 'WatchLink served directly from in-memory cache'
-    });
-    return memCached;
+    // 2. Check local in-memory cache fallback
+    const memCached = watchLinkCache.get(eventId);
+    if (memCached && Date.now() < memCached.expiresAt) {
+      providerManager.trackCacheHit(memCached.provKey || 'startexch');
+      logAudit({
+        provider: memCached.provider,
+        tableId: eventId,
+        statusCode: 200,
+        category: 'success',
+        durationMs: 0,
+        retries: 0,
+        circuitState: providerManager.getState(memCached.provKey || 'startexch'),
+        message: 'WatchLink served directly from in-memory cache'
+      });
+      return memCached;
+    }
   }
 
   // 3. Single-flight deduplication across local asynchronous callers
@@ -877,7 +885,7 @@ async function getWatchUrl(eventId) {
                     url: data.data.url,
                     provider: provider.name,
                     provKey: provKey,
-                    origin: provider.base,
+                    origin: provider.casinoBase,
                     session: tableSession,
                     expiresAt: Date.now() + (ttlSec * 1000)
                   };
@@ -1227,9 +1235,18 @@ async function getLiveSportsEvents() {
   return _sportsEventsCache || [];
 }
 
+async function invalidateWatchUrl(eventId) {
+  const cacheKey = `watchlink:${eventId}`;
+  watchLinkCache.delete(eventId);
+  await redisClient.del(cacheKey).catch(() => {});
+}
+
 module.exports = {
   getAuthToken,
   getWatchUrl,
+  invalidateWatchUrl,
+  getSessionForTable,
+  rotateTableSession,
   getSportsWatchUrl,
   getLiveSportsEvents,
   GAME_MAP,

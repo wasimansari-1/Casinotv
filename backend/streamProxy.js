@@ -7,6 +7,8 @@ const cors = require('cors');
 const { 
   getAuthToken, 
   getWatchUrl, 
+  invalidateWatchUrl,
+  rotateTableSession,
   getSportsWatchUrl, 
   getLiveSportsEvents, 
   GAME_MAP, 
@@ -97,8 +99,8 @@ async function fetchFullTsSegment(targetUrl) {
   return task;
 }
 
-// Memory cache for modified player HTML (TTL 20 Seconds) to deduplicate rapid clicks while ensuring live WebRTC sid freshness
-const CASINO_CACHE_TTL = 20 * 1000;
+// Memory cache for modified player HTML (TTL 10 Minutes) to serve 17 tables instantly with zero API requests
+const CASINO_CACHE_TTL = 10 * 60 * 1000;
 const playerCache = new Map();
 const inFlightPlayers = new Map();
 const pingCache = new Map();
@@ -114,9 +116,9 @@ async function warmCasinoTable(eventId) {
   }
 
   try {
-    const watchData = await getWatchUrl(eventId);
+    const watchData = await getWatchUrl(eventId, { forceFresh: true });
     const watchUrl = typeof watchData === 'string' ? watchData : watchData.url;
-    const providerOrigin = watchData.origin ? (watchData.origin.endsWith('/') ? watchData.origin : `${watchData.origin}/`) : 'https://nice444.com/';
+    const providerOrigin = watchData.origin ? (watchData.origin.endsWith('/') ? watchData.origin : `${watchData.origin}/`) : 'https://casino.nice444.com/';
     const session = watchData.session || null;
 
     const pageRes = await proxyFetch(watchUrl, {
@@ -124,18 +126,33 @@ async function warmCasinoTable(eventId) {
       headers: {
         'User-Agent': UA,
         'Referer': providerOrigin,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
         'Sec-Fetch-Dest': 'iframe',
         'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'cross-site'
+        'Sec-Fetch-Site': 'cross-site',
+        'Upgrade-Insecure-Requests': '1'
       }
     });
 
     if (pageRes.ok) {
       let html = await pageRes.text();
+
+      // Strict validation: Don't cache blocked or invalid player HTML
+      if (html.includes('Access blocked') || html.includes('copied player') || !html.includes('cfg')) {
+        console.warn(`[Stream Warmer] Upstream rejected WatchLink ticket for ${eventId}. Rotating session...`);
+        await invalidateWatchUrl(eventId);
+        rotateTableSession(eventId, 'Warmer ticket rejected');
+        return false;
+      }
+
       html = transformPlayerHtml(html, watchUrl, false, eventId, providerOrigin, session);
       playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + CASINO_CACHE_TTL });
-      console.log(`[Stream Warmer] Pre-warmed & cached table ${eventId} in memory`);
+      await redisClient.set(`html:${eventId}`, html, Math.floor(CASINO_CACHE_TTL / 1000)).catch(() => {});
+      console.log(`[Stream Warmer] Pre-warmed & cached table ${eventId} in memory/Redis (TTL: 10m)`);
+
+      // Invalidate the single-use ticket from watchlink cache since it is now redeemed into HTML
+      await invalidateWatchUrl(eventId);
 
       // Pre-warm ping handshake to acquire and cache the valid JWT token in tableTokenCache!
       const cfgMatch = html.match(/<script type="application\/json" id="cfg">([^<]+)<\/script>/);
@@ -213,12 +230,12 @@ async function warmAllCasinoTables() {
   }
 }
 
-// Start warmer 1s after boot, recurring every 10 minutes for all tables so cache never expires
+// Start warmer 1s after boot, recurring every 8 minutes for all tables so cache never expires
 setTimeout(() => {
   warmAllCasinoTables().catch(() => {});
   setInterval(() => {
     warmAllCasinoTables().catch(() => {});
-  }, 10 * 60 * 1000);
+  }, 8 * 60 * 1000);
 }, 1000);
 
 // Health Check & Monitoring API (Real-Time Provider Observability)
@@ -404,7 +421,7 @@ router.get('/player/:eventId', async (req, res) => {
 
   // 1. Check local RAM cache first (serves in 0ms)
   const cached = playerCache.get(`casino_${eventId}`);
-  if (cached && Date.now() < cached.expiresAt) {
+  if (cached && Date.now() < cached.expiresAt && cached.html && !cached.html.includes('Access blocked')) {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -414,7 +431,7 @@ router.get('/player/:eventId', async (req, res) => {
 
   // 2. Check distributed Redis cache (shared across PM2 workers)
   const redisHtml = await redisClient.get(`html:${eventId}`);
-  if (redisHtml) {
+  if (redisHtml && typeof redisHtml === 'string' && redisHtml.includes('cfg') && !redisHtml.includes('Access blocked')) {
     playerCache.set(`casino_${eventId}`, { html: redisHtml, expiresAt: Date.now() + CASINO_CACHE_TTL });
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
@@ -440,9 +457,10 @@ router.get('/player/:eventId', async (req, res) => {
       try {
         console.log(`[Casino Player] Fetching player for ${eventId} (attempt ${attempt})`);
         
-        const watchData = await getWatchUrl(eventId);
+        // Force fresh WatchLink if previous attempt failed
+        const watchData = await getWatchUrl(eventId, { forceFresh: attempt > 1 });
         const watchUrl = typeof watchData === 'string' ? watchData : watchData.url;
-        const referer = watchData.origin ? (watchData.origin.endsWith('/') ? watchData.origin : `${watchData.origin}/`) : 'https://nice444.com/';
+        const referer = watchData.origin ? (watchData.origin.endsWith('/') ? watchData.origin : `${watchData.origin}/`) : 'https://casino.nice444.com/';
         const session = watchData.session || null;
 
         const pageRes = await proxyFetch(watchUrl, {
@@ -450,28 +468,48 @@ router.get('/player/:eventId', async (req, res) => {
           headers: {
             'User-Agent': UA,
             'Referer': referer,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
             'Sec-Fetch-Dest': 'iframe',
             'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'cross-site'
+            'Sec-Fetch-Site': 'cross-site',
+            'Upgrade-Insecure-Requests': '1'
           }
         });
 
         if (!pageRes.ok) {
           console.warn(`[Casino Player] Upstream returned status ${pageRes.status} for ${eventId}`);
+          await invalidateWatchUrl(eventId);
+          rotateTableSession(eventId, `Upstream status ${pageRes.status}`);
           if (attempt === 1) {
-            await new Promise(r => setTimeout(r, 400));
+            await new Promise(r => setTimeout(r, 300));
             continue;
           }
           throw new Error(`Upstream stream service returned ${pageRes.status}`);
         }
 
         let html = await pageRes.text();
+
+        // VALIDATION: Ensure upstream didn't return an Access Blocked or corrupted page
+        if (html.includes('Access blocked') || html.includes('copied player') || !html.includes('cfg')) {
+          console.warn(`[Casino Player] Upstream returned blocked/invalid player for ${eventId}`);
+          await invalidateWatchUrl(eventId);
+          rotateTableSession(eventId, 'Upstream ticket rejected');
+          if (attempt === 1) {
+            await new Promise(r => setTimeout(r, 300));
+            continue;
+          }
+          throw new Error('Upstream rejected player ticket');
+        }
+
         html = transformPlayerHtml(html, watchUrl, false, eventId, referer, session);
 
-        // Cache player HTML for 30 minutes in RAM and distributed Redis
+        // Cache player HTML for 10 minutes in RAM and distributed Redis
         playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + CASINO_CACHE_TTL });
         redisClient.set(`html:${eventId}`, html, Math.floor(CASINO_CACHE_TTL / 1000)).catch(() => {});
+
+        // Since this one-time ticket is now consumed into HTML, invalidate raw watchlink from cache
+        await invalidateWatchUrl(eventId);
 
         // Trigger asynchronous background pre-warming of the ping token so it is ready in RAM
         const cfgMatch = html.match(/<script type="application\/json" id="cfg">([^<]+)<\/script>/);
@@ -545,7 +583,7 @@ router.get('/player/:eventId', async (req, res) => {
   } catch (err) {
     // Resilient fallback: If upstream failed, serve previously cached HTML if available
     const stale = playerCache.get(`casino_${eventId}`);
-    if (stale && stale.html) {
+    if (stale && stale.html && !stale.html.includes('Access blocked')) {
       console.log(`[Casino Player] Serving stale cache fallback for table ${eventId}`);
       stale.expiresAt = Date.now() + 120000;
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -555,10 +593,10 @@ router.get('/player/:eventId', async (req, res) => {
       return res.send(stale.html);
     }
 
-    const game = GAME_MAP[eventId] || { name: 'Live Table' };
-    const offlineHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{margin:0;background:#07090e;color:#94a3b8;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;text-align:center}.card{background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:24px;max-width:320px}.title{font-size:14px;font-weight:600;color:#f8fafc;margin-bottom:6px}.sub{font-size:11px;color:#64748b;line-height:1.4}.badge{display:inline-block;margin-top:10px;padding:4px 10px;border-radius:9999px;background:rgba(245,158,11,0.1);color:#fbbf24;font-size:10px;font-weight:600;border:1px solid rgba(245,158,11,0.2)}</style></head><body><div class="card"><div class="title">${game.name}</div><div class="sub">This live dealer table is currently taking a scheduled break upstream.</div><div class="badge">TABLE OFFLINE UPSTREAM</div></div></body></html>`;
+    // Clean player fallback: Auto-retrying black screen with centered loader GIF (no synthetic error card)
+    const cleanPlayerHtml = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#64748b;font-family:sans-serif}.msg{text-align:center}</style><script>setTimeout(function(){location.reload();}, 3000);</script></head><body><div class="msg"><img src="/api/stream/player-assets/loader.gif" style="width:48px;height:48px;display:block;margin:0 auto 10px;opacity:0.7"><div style="color:#94a3b8;font-size:12px;font-weight:500;">Connecting live stream...</div></div></body></html>`;
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    return res.status(200).send(offlineHtml);
+    return res.status(200).send(cleanPlayerHtml);
   } finally {
     inFlightPlayers.delete(eventId);
   }
