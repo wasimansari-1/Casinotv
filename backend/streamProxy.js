@@ -12,7 +12,10 @@ const {
   GAME_MAP, 
   PROVIDERS, 
   UA,
-  proxyFetch
+  proxyFetch,
+  providerManager,
+  redisClient,
+  CONFIG
 } = require('./streamCore');
 
 const router = express.Router();
@@ -101,8 +104,15 @@ const inFlightPlayers = new Map();
 const pingCache = new Map();
 const tableTokenCache = new Map(); // eventId -> { token, wsUrl, streamId, expiresAt }
 
-// Helper: Pre-warm a single casino table in memory
+// Helper: Pre-warm a single casino table in memory with distributed lock
 async function warmCasinoTable(eventId) {
+  // Coordinate across PM2 cluster: only 1 worker warms this table at a time
+  const lockKey = `warmer:${eventId}`;
+  const acquired = await redisClient.acquireLock(lockKey, 300);
+  if (!acquired) {
+    return false;
+  }
+
   try {
     const watchData = await getWatchUrl(eventId);
     const watchUrl = typeof watchData === 'string' ? watchData : watchData.url;
@@ -204,6 +214,34 @@ setTimeout(() => {
     warmAllCasinoTables().catch(() => {});
   }, 15 * 60 * 1000);
 }, 3000);
+
+// Health Check & Monitoring API (Real-Time Provider Observability)
+router.get('/health', async (req, res) => {
+  const redisStatus = redisClient.getStatus();
+  const providerSummary = providerManager.getHealthSummary();
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    redis: redisStatus,
+    config: {
+      concurrency: CONFIG.concurrency,
+      minIntervalMs: CONFIG.minIntervalMs,
+      maxRetries: CONFIG.maxRetries,
+      cooldownMs: CONFIG.cooldownMs,
+      watchlinkTtlSec: CONFIG.watchlinkTtlSec
+    },
+    providers: providerSummary
+  });
+});
+
+router.get('/metrics', async (req, res) => {
+  res.json({
+    success: true,
+    timestamp: new Date().toISOString(),
+    providers: providerManager.getHealthSummary()
+  });
+});
 
 // 1. Get all supported Casino tables
 router.get('/tables', (req, res) => {
@@ -380,17 +418,25 @@ function transformPlayerHtml(html, watchUrl, isSports = false, eventId = '', pro
 router.get('/player/:eventId', async (req, res) => {
   const { eventId } = req.params;
 
-  // Check cache first (serves 1cr users directly from RAM in 1ms)
+  // 1. Check local RAM cache first (serves in 0ms)
   const cached = playerCache.get(`casino_${eventId}`);
   if (cached && Date.now() < cached.expiresAt) {
-    if (Date.now() > (cached.expiresAt - 60000)) {
-      warmCasinoTable(eventId).catch(() => {});
-    }
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Permissions-Policy', 'unload=*');
     return res.send(cached.html);
+  }
+
+  // 2. Check distributed Redis cache (shared across PM2 workers)
+  const redisHtml = await redisClient.get(`html:${eventId}`);
+  if (redisHtml) {
+    playerCache.set(`casino_${eventId}`, { html: redisHtml, expiresAt: Date.now() + CASINO_CACHE_TTL });
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Permissions-Policy', 'unload=*');
+    return res.send(redisHtml);
   }
 
   // Deduplicate in-flight requests for the same table
@@ -439,8 +485,9 @@ router.get('/player/:eventId', async (req, res) => {
         let html = await pageRes.text();
         html = transformPlayerHtml(html, watchUrl, false, eventId, referer, session);
 
-        // Cache player HTML for 30 minutes (serves millions of users directly from RAM in 1ms)
+        // Cache player HTML for 30 minutes in RAM and distributed Redis
         playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + CASINO_CACHE_TTL });
+        redisClient.set(`html:${eventId}`, html, Math.floor(CASINO_CACHE_TTL / 1000)).catch(() => {});
 
         // Trigger asynchronous background pre-warming of the ping token so it is ready in RAM
         const cfgMatch = html.match(/<script type="application\/json" id="cfg">([^<]+)<\/script>/);

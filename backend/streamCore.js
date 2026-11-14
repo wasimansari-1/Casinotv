@@ -5,6 +5,28 @@ const http = require('http');
 const https = require('https');
 const tls = require('tls');
 const { URL } = require('url');
+const redisClient = require('./redisClient');
+
+// ============================================================================
+// Global System Configuration (Configurable via Environment Variables)
+// ============================================================================
+const CONFIG = {
+  // Provider concurrency: number of simultaneous requests allowed per provider (default: 1)
+  concurrency: Math.max(1, parseInt(process.env.PROVIDER_CONCURRENCY, 10) || 1),
+  // Minimum interval between requests to the same provider in ms (default: 2000)
+  minIntervalMs: Math.max(500, parseInt(process.env.PROVIDER_MIN_INTERVAL_MS, 10) || 2000),
+  // Maximum retries for temporary failures (default: 2)
+  maxRetries: Math.max(0, parseInt(process.env.PROVIDER_MAX_RETRIES, 10) || 2),
+  // Exponential backoff delays in ms
+  backoffMs: [
+    parseInt(process.env.PROVIDER_BACKOFF_1_MS, 10) || 5000,
+    parseInt(process.env.PROVIDER_BACKOFF_2_MS, 10) || 15000
+  ],
+  // Circuit breaker cooldown on HTTP 429 / repeated failures in ms (default: 60000)
+  cooldownMs: parseInt(process.env.CIRCUIT_BREAKER_COOLDOWN_MS, 10) || 60000,
+  // WatchLink default cache TTL in seconds (default: 900 = 15m)
+  watchlinkTtlSec: parseInt(process.env.WATCHLINK_CACHE_TTL_SEC, 10) || 900
+};
 
 let _cachedAgent = null;
 let _cachedProxyUrl = null;
@@ -272,20 +294,45 @@ const sessionState = {
   cbtf: { token: null, expiresAt: 0, accountIndex: 0, inFlight: null }
 };
 
-// Unified Token Authenticator with Mutex and Account Failover
+// Unified Token Authenticator with Redis Caching and Distributed Mutex across PM2 Workers
 async function getAuthToken(providerKey = 'nice444', forceRefresh = false) {
   const provider = PROVIDERS[providerKey] || PROVIDERS.nice444;
   const state = sessionState[providerKey] || sessionState.nice444;
+  const redisAuthKey = `auth:${providerKey}`;
 
+  // 1. Check local in-memory cache
   if (!forceRefresh && state.token && Date.now() < state.expiresAt) {
     return state.token;
   }
 
+  // 2. Check distributed Redis cache (shared across all PM2 workers)
+  if (!forceRefresh) {
+    const cachedToken = await redisClient.get(redisAuthKey);
+    if (cachedToken && typeof cachedToken === 'string') {
+      state.token = cachedToken;
+      state.expiresAt = Date.now() + 3600 * 1000;
+      return cachedToken;
+    }
+  }
+
+  // 3. Mutex / Distributed lock for login
   if (state.inFlight) {
     return state.inFlight;
   }
 
   state.inFlight = (async () => {
+    // Acquire distributed lock so only 1 PM2 worker performs the login call
+    const lockAcquired = await redisClient.acquireLock(`auth_lock:${providerKey}`, 20);
+    if (!lockAcquired && !forceRefresh) {
+      await redisClient.waitForLock(`auth_lock:${providerKey}`, 10000, 300);
+      const tokenFromOtherWorker = await redisClient.get(redisAuthKey);
+      if (tokenFromOtherWorker) {
+        state.token = tokenFromOtherWorker;
+        state.expiresAt = Date.now() + 3600 * 1000;
+        return tokenFromOtherWorker;
+      }
+    }
+
     try {
       const accounts = provider.accounts;
       for (let i = 0; i < accounts.length; i++) {
@@ -314,6 +361,10 @@ async function getAuthToken(providerKey = 'nice444', forceRefresh = false) {
             state.expiresAt = Date.now() + 3600 * 1000 * 2;
             state.accountIndex = accIdx;
             console.log(`[Auth] Unified token obtained for ${provider.name} (${acc.user})`);
+
+            // Share auth token across all PM2 workers in Redis (TTL: 2 hours = 7200s)
+            await redisClient.set(redisAuthKey, state.token, 7200);
+
             return state.token;
           }
           console.warn(`[Auth] Login rejected for ${provider.name} (${acc.user}):`, data?.meta?.message || data);
@@ -324,6 +375,7 @@ async function getAuthToken(providerKey = 'nice444', forceRefresh = false) {
       throw new Error(`All accounts failed for provider ${provider.name}`);
     } finally {
       state.inFlight = null;
+      await redisClient.releaseLock(`auth_lock:${providerKey}`).catch(() => {});
     }
   })();
 
@@ -352,7 +404,7 @@ const GAME_MAP = {
 };
 
 // ============================================================================
-// Enterprise Provider Rate Limiter, Smart Retry & Circuit Breaker Engine
+// Enterprise Provider Rate Limiter, Smart Retry, Health & Circuit Breaker Engine
 // ============================================================================
 
 class ProviderManager {
@@ -370,9 +422,10 @@ class ProviderManager {
       key,
       name,
       queue: [],             // FIFO queue of requests
-      running: false,        // Concurrency = 1
+      activeCount: 0,        // Active concurrent requests (bounded by CONFIG.concurrency)
       lastRequestTime: 0,    // Timestamp of last completion
-      minIntervalMs: 2000,   // Configurable 2-second minimum interval between requests
+      minIntervalMs: CONFIG.minIntervalMs,
+      concurrency: CONFIG.concurrency,
       
       // Circuit Breaker state machine: CLOSED -> OPEN -> HALF_OPEN
       state: 'CLOSED',
@@ -381,7 +434,24 @@ class ProviderManager {
       probeInFlight: false,
 
       // Deduplication of simultaneous requests for the same table on this provider
-      inFlightByTable: new Map()
+      inFlightByTable: new Map(),
+
+      // Metrics & Usage Tracking
+      metrics: {
+        totalRequests: 0,
+        successfulRequests: 0,
+        failedRequests: 0,
+        rateLimitedRequests: 0,
+        cachedHits: 0,
+        consecutiveFailures: 0,
+        lastRequestAt: null,
+        lastSuccessAt: null,
+        lastFailureAt: null,
+        lastFailureReason: null,
+        totalLatencyMs: 0,
+        averageLatencyMs: 0,
+        healthScore: 100
+      }
     };
   }
 
@@ -416,7 +486,7 @@ class ProviderManager {
   }
 
   // Trip circuit breaker into cooldown (OPEN)
-  tripCooldown(provKey, durationMs = 60000, reason = '') {
+  tripCooldown(provKey, durationMs = CONFIG.cooldownMs, reason = '') {
     const prov = this.providers[provKey];
     if (!prov) return;
     prov.state = 'OPEN';
@@ -424,6 +494,9 @@ class ProviderManager {
     prov.consecutiveFailures++;
     prov.probeInFlight = false;
     console.warn(`[CircuitBreaker] [${prov.name}] TRIPPED -> OPEN for ${Math.round(durationMs / 1000)}s! Reason: ${reason}`);
+
+    // Notify Redis if active
+    redisClient.set(`circuit:${provKey}`, { state: 'OPEN', cooldownUntil: prov.cooldownUntil, reason }, Math.ceil(durationMs / 1000)).catch(() => {});
   }
 
   // Record success on circuit breaker
@@ -437,6 +510,8 @@ class ProviderManager {
     prov.consecutiveFailures = 0;
     prov.cooldownUntil = 0;
     prov.probeInFlight = false;
+
+    redisClient.set(`circuit:${provKey}`, { state: 'CLOSED' }, 86400).catch(() => {});
   }
 
   // Record failure
@@ -445,10 +520,87 @@ class ProviderManager {
     if (!prov) return;
     prov.consecutiveFailures++;
     if (prov.state === 'HALF_OPEN') {
-      this.tripCooldown(provKey, 60000, `Probe failed: ${errorMsg}`);
+      this.tripCooldown(provKey, CONFIG.cooldownMs, `Probe failed: ${errorMsg}`);
     } else if (prov.consecutiveFailures >= 3) {
-      this.tripCooldown(provKey, 60000, `3 consecutive failures: ${errorMsg}`);
+      this.tripCooldown(provKey, CONFIG.cooldownMs, `3 consecutive failures: ${errorMsg}`);
     }
+  }
+
+  // Metrics and API usage tracking
+  trackRequest(provKey, latencyMs, isSuccess, statusCode, errorMsg = '') {
+    const prov = this.providers[provKey];
+    if (!prov) return;
+    const m = prov.metrics;
+    m.totalRequests++;
+    m.lastRequestAt = new Date().toISOString();
+    m.totalLatencyMs += latencyMs;
+    m.averageLatencyMs = Math.round(m.totalLatencyMs / m.totalRequests);
+
+    if (isSuccess) {
+      m.successfulRequests++;
+      m.lastSuccessAt = new Date().toISOString();
+      m.consecutiveFailures = 0;
+      this.recordSuccess(provKey);
+    } else {
+      m.failedRequests++;
+      m.lastFailureAt = new Date().toISOString();
+      m.lastFailureReason = errorMsg || `HTTP ${statusCode}`;
+      m.consecutiveFailures++;
+
+      if (statusCode === 429 || (errorMsg && errorMsg.includes('viewer_ip_blocked'))) {
+        m.rateLimitedRequests++;
+        this.tripCooldown(provKey, CONFIG.cooldownMs, errorMsg || 'Rate-Limited');
+      } else {
+        this.recordFailure(provKey, statusCode, errorMsg);
+      }
+    }
+
+    // Health Score calculation (0 - 100)
+    if (prov.state === 'OPEN') {
+      m.healthScore = 0;
+    } else if (prov.state === 'HALF_OPEN') {
+      m.healthScore = 50;
+    } else {
+      const successRate = m.totalRequests > 0 ? (m.successfulRequests / m.totalRequests) * 100 : 100;
+      const penalty = Math.min(50, m.consecutiveFailures * 15);
+      m.healthScore = Math.max(10, Math.round(successRate - penalty));
+    }
+
+    // Synchronize to Redis hash if Redis is active
+    redisClient.hset(`metrics:${provKey}`, 'metrics', m).catch(() => {});
+  }
+
+  trackCacheHit(provKey) {
+    const prov = this.providers[provKey];
+    if (prov) {
+      prov.metrics.cachedHits++;
+      redisClient.hset(`metrics:${provKey}`, 'cachedHits', prov.metrics.cachedHits).catch(() => {});
+    }
+  }
+
+  getHealthSummary() {
+    const summary = {};
+    for (const [key, prov] of Object.entries(this.providers)) {
+      summary[key] = {
+        name: prov.name,
+        state: this.getState(key),
+        healthScore: prov.metrics.healthScore,
+        cooldownRemainingSec: prov.state === 'OPEN' ? Math.max(0, Math.round((prov.cooldownUntil - Date.now()) / 1000)) : 0,
+        consecutiveFailures: prov.consecutiveFailures,
+        totalRequests: prov.metrics.totalRequests,
+        successfulRequests: prov.metrics.successfulRequests,
+        failedRequests: prov.metrics.failedRequests,
+        rateLimitedRequests: prov.metrics.rateLimitedRequests,
+        cachedHits: prov.metrics.cachedHits,
+        averageLatencyMs: prov.metrics.averageLatencyMs,
+        lastSuccessAt: prov.metrics.lastSuccessAt,
+        lastFailureAt: prov.metrics.lastFailureAt,
+        lastFailureReason: prov.metrics.lastFailureReason,
+        concurrency: prov.concurrency,
+        minIntervalMs: prov.minIntervalMs
+      };
+    }
+    return summary;
   }
 
   // Schedule a task through the provider's dedicated FIFO queue
@@ -458,7 +610,7 @@ class ProviderManager {
       return Promise.reject(new Error(`Unknown provider ${provKey}`));
     }
 
-    // Deduplicate simultaneous requests for same table and provider
+    // In-process deduplication of simultaneous duplicate requests for same table and provider
     if (tableId && prov.inFlightByTable.has(tableId)) {
       console.log(`[ProviderQueue] [${prov.name}] Reusing in-flight request for table ${tableId}`);
       return prov.inFlightByTable.get(tableId);
@@ -481,7 +633,7 @@ class ProviderManager {
 
   _processQueue(provKey) {
     const prov = this.providers[provKey];
-    if (!prov || prov.running || prov.queue.length === 0) return;
+    if (!prov || prov.activeCount >= prov.concurrency || prov.queue.length === 0) return;
 
     const now = Date.now();
     const timeSinceLast = now - prov.lastRequestTime;
@@ -512,7 +664,7 @@ class ProviderManager {
     const nextItem = prov.queue.shift();
     if (!nextItem) return;
 
-    prov.running = true;
+    prov.activeCount++;
     if (prov.state === 'HALF_OPEN') {
       prov.probeInFlight = true;
     }
@@ -524,11 +676,13 @@ class ProviderManager {
       } catch (err) {
         nextItem.reject(err);
       } finally {
-        prov.running = false;
+        prov.activeCount--;
         prov.lastRequestTime = Date.now();
         setTimeout(() => this._processQueue(provKey), prov.minIntervalMs);
       }
-    })();
+    })().catch(err => {
+      try { nextItem.reject(err); } catch (_) {}
+    });
   }
 }
 
@@ -536,257 +690,339 @@ const providerManager = new ProviderManager();
 
 // Structured Audit Logging Function
 function logAudit({ provider, tableId, statusCode, category, durationMs, retries, circuitState, message }) {
-  const ts = new Date().toISOString();
   console.log(`[AUDIT] [${provider}] Table: ${tableId} | Status: ${statusCode || 'ERR'} | Cat: ${category} | Time: ${durationMs}ms | Retries: ${retries} | Circuit: ${circuitState} | ${message}`);
 }
 
-// 15-Minute In-Memory WatchLink Cache & Global In-Flight Mutex
-const WATCHLINK_CACHE_TTL = 15 * 60 * 1000;
+// In-Memory Fallback Cache & In-Flight Mutex
 const watchLinkCache = new Map();
 const inFlightWatchLinks = new Map();
 
-// Multi-Provider Casino WatchLink Resolution with Rate Limiting, Smart Retry & Circuit Breaker
+/**
+ * Resolve WatchLink TTL until actual upstream expiry.
+ * If URL contains a JWT token with `exp`, parses the exact remaining lifetime!
+ */
+function resolveWatchLinkTtl(url, defaultTtlSec = CONFIG.watchlinkTtlSec) {
+  try {
+    if (!url) return defaultTtlSec;
+    const u = new URL(url);
+    const token = u.searchParams.get('token') || u.searchParams.get('jwt') || u.searchParams.get('ticket');
+    if (token && token.includes('.')) {
+      const parts = token.split('.');
+      if (parts.length === 3) {
+        const payloadJson = Buffer.from(parts[1], 'base64').toString('utf8');
+        const payload = JSON.parse(payloadJson);
+        if (payload && payload.exp) {
+          const expMs = payload.exp * 1000;
+          const remainingSec = Math.floor((expMs - Date.now() - 30000) / 1000); // 30s safety buffer
+          if (remainingSec > 60) {
+            console.log(`[WatchLink Cache] Detected upstream JWT expiry. Caching until actual expiry: ${remainingSec}s (${Math.round(remainingSec / 60)} min)`);
+            return remainingSec;
+          }
+        }
+      }
+    }
+  } catch (_) {}
+  return defaultTtlSec;
+}
+
+// Multi-Provider Casino WatchLink Resolution with Redis Deduplication, Smart Retry & Circuit Breaker
 async function getWatchUrl(eventId) {
-  // 1. Check 15-Minute RAM Cache (Serves instantly in 0ms)
-  const cached = watchLinkCache.get(eventId);
-  if (cached && Date.now() < cached.expiresAt) {
+  const cacheKey = `watchlink:${eventId}`;
+
+  // 1. Check Distributed Redis Cache (Shared across all PM2 workers)
+  const redisCached = await redisClient.get(cacheKey);
+  if (redisCached && redisCached.url && (Date.now() < (redisCached.expiresAt || 0))) {
+    providerManager.trackCacheHit(redisCached.provKey || 'startexch');
     logAudit({
-      provider: cached.provider,
+      provider: redisCached.provider,
       tableId: eventId,
       statusCode: 200,
       category: 'success',
       durationMs: 0,
       retries: 0,
-      circuitState: providerManager.getState(cached.provKey || 'startexch'),
-      message: 'WatchLink served directly from 15m RAM cache'
+      circuitState: providerManager.getState(redisCached.provKey || 'startexch'),
+      message: 'WatchLink served directly from Redis distributed cache'
     });
-    return cached;
+    return redisCached;
   }
 
-  // 2. Global single-flight deduplication across all concurrent callers
+  // 2. Check local in-memory cache fallback
+  const memCached = watchLinkCache.get(eventId);
+  if (memCached && Date.now() < memCached.expiresAt) {
+    providerManager.trackCacheHit(memCached.provKey || 'startexch');
+    logAudit({
+      provider: memCached.provider,
+      tableId: eventId,
+      statusCode: 200,
+      category: 'success',
+      durationMs: 0,
+      retries: 0,
+      circuitState: providerManager.getState(memCached.provKey || 'startexch'),
+      message: 'WatchLink served directly from in-memory cache'
+    });
+    return memCached;
+  }
+
+  // 3. Single-flight deduplication across local asynchronous callers
   if (inFlightWatchLinks.has(eventId)) {
     return inFlightWatchLinks.get(eventId);
   }
 
   const task = (async () => {
-    const providerList = ['startexch', 'nice444', 'asstarplay', 'cbtf'];
-    const maxRetries = 2;
-    const backoffDelays = [5000, 15000]; // 5s then 15s exponential backoff
-    let lastError = null;
+    // 4. Distributed Mutex Lock (Avoid duplicate API calls across PM2 workers)
+    const lockKey = `watchlink:${eventId}`;
+    const acquiredLock = await redisClient.acquireLock(lockKey, 15);
 
-    for (const provKey of providerList) {
-      const provider = PROVIDERS[provKey];
-      if (!provider) continue;
-
-      // Skip provider if currently in cooldown (Circuit Breaker OPEN)
-      if (!providerManager.isAvailable(provKey)) {
-        logAudit({
-          provider: provider.name,
-          tableId: eventId,
-          statusCode: 429,
-          category: 'rate_limiting',
-          durationMs: 0,
-          retries: 0,
-          circuitState: 'OPEN',
-          message: 'Provider in cooldown, skipping to next provider'
-        });
-        continue;
-      }
-
-      try {
-        // Schedule through provider's independent FIFO queue (concurrency=1, 2s gap)
-        const result = await providerManager.schedule(provKey, eventId, async () => {
-          let token = await getAuthToken(provKey);
-          let tokenRefreshed = false;
-
-          for (let attempt = 0; attempt <= maxRetries; attempt++) {
-            const startTime = Date.now();
-            let res = null;
-            let data = null;
-
-            try {
-              res = await proxyFetch(`${provider.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`, {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Authorization': `Bearer ${token}`,
-                  'Origin': provider.casinoBase,
-                  'Referer': `${provider.casinoBase}/`,
-                  'User-Agent': UA
-                },
-                body: JSON.stringify({
-                  streamId: eventId,
-                  timestamp: Date.now()
-                }),
-                timeout: 10000
-              });
-
-              data = await res.json().catch(() => null);
-              const durationMs = Date.now() - startTime;
-              const circuitState = providerManager.getState(provKey);
-
-              // 1. Success 200 OK with valid URL
-              if (res.ok && data?.data?.url) {
-                providerManager.recordSuccess(provKey);
-                const watchData = {
-                  url: data.data.url,
-                  provider: provider.name,
-                  provKey: provKey,
-                  origin: provider.base,
-                  session: _currentStickySession,
-                  expiresAt: Date.now() + WATCHLINK_CACHE_TTL
-                };
-                watchLinkCache.set(eventId, watchData);
-                logAudit({
-                  provider: provider.name,
-                  tableId: eventId,
-                  statusCode: res.status,
-                  category: 'success',
-                  durationMs,
-                  retries: attempt,
-                  circuitState,
-                  message: `WatchLink acquired successfully: ${data.data.url.slice(0, 45)}...`
-                });
-                return watchData;
-              }
-
-              // 2. HTTP 429: Too Many Requests (Respect Retry-After)
-              if (res.status === 429) {
-                const retryAfterHeader = res.headers.get('retry-after');
-                let cooldownMs = 60000;
-                if (retryAfterHeader && !isNaN(parseInt(retryAfterHeader, 10))) {
-                  cooldownMs = parseInt(retryAfterHeader, 10) * 1000;
-                }
-                providerManager.tripCooldown(provKey, cooldownMs, 'HTTP 429 Too Many Requests');
-                logAudit({
-                  provider: provider.name,
-                  tableId: eventId,
-                  statusCode: 429,
-                  category: 'rate_limiting',
-                  durationMs,
-                  retries: attempt,
-                  circuitState: 'OPEN',
-                  message: `HTTP 429 rate limit. Tripped cooldown for ${Math.round(cooldownMs / 1000)}s`
-                });
-                throw new Error(`Provider ${provider.name} rate-limited (HTTP 429)`);
-              }
-
-              // 3. IP Blocked: viewer_ip_blocked
-              if (data?.meta?.message === 'viewer_ip_blocked' || (res.status === 403 && JSON.stringify(data || '').includes('blocked'))) {
-                providerManager.tripCooldown(provKey, 60000, `viewer_ip_blocked on session #${_currentStickySession}`);
-                rotateStickySession(`IP blocked on ${provider.name}`);
-                logAudit({
-                  provider: provider.name,
-                  tableId: eventId,
-                  statusCode: res.status,
-                  category: 'rate_limiting',
-                  durationMs,
-                  retries: attempt,
-                  circuitState: 'OPEN',
-                  message: `viewer_ip_blocked. Tripped cooldown 60s & rotated proxy session to #${_currentStickySession}`
-                });
-                throw new Error(`Provider ${provider.name} blocked residential IP`);
-              }
-
-              // 4. HTTP 401: Authentication expired
-              if (res.status === 401 || data?.meta?.status_code === 401) {
-                logAudit({
-                  provider: provider.name,
-                  tableId: eventId,
-                  statusCode: 401,
-                  category: 'authentication',
-                  durationMs,
-                  retries: attempt,
-                  circuitState,
-                  message: 'Token expired (401). Refreshing unified token...'
-                });
-                if (!tokenRefreshed) {
-                  tokenRefreshed = true;
-                  token = await getAuthToken(provKey, true);
-                  continue; // Retry once with fresh token
-                }
-                throw new Error(`Token refresh failed for ${provider.name}`);
-              }
-
-              // 5. Non-retryable client errors: 400, 403, 404
-              if (res.status >= 400 && res.status < 500) {
-                logAudit({
-                  provider: provider.name,
-                  tableId: eventId,
-                  statusCode: res.status,
-                  category: 'permission',
-                  durationMs,
-                  retries: attempt,
-                  circuitState,
-                  message: `Non-retryable status ${res.status}: ${data?.meta?.message || res.statusText}`
-                });
-                throw new Error(`Non-retryable HTTP ${res.status} from ${provider.name}`);
-              }
-
-              // 6. Retryable server errors: 500, 502, 503, 504
-              if (res.status >= 500) {
-                logAudit({
-                  provider: provider.name,
-                  tableId: eventId,
-                  statusCode: res.status,
-                  category: 'server_error',
-                  durationMs,
-                  retries: attempt,
-                  circuitState,
-                  message: `Upstream server error HTTP ${res.status}`
-                });
-                if (attempt < maxRetries) {
-                  const delay = backoffDelays[attempt] || 5000;
-                  console.log(`[SmartRetry] [${provider.name}] Retrying table ${eventId} in ${delay / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
-                  await new Promise(r => setTimeout(r, delay));
-                  continue;
-                }
-                providerManager.recordFailure(provKey, res.status, `Server error ${res.status}`);
-                throw new Error(`Provider ${provider.name} failed with HTTP ${res.status}`);
-              }
-
-              throw new Error(`Unexpected response from ${provider.name}: ${JSON.stringify(data || res.status)}`);
-
-            } catch (callErr) {
-              const durationMs = Date.now() - startTime;
-              const isNetworkError = callErr.message && (
-                callErr.message.includes('timeout') ||
-                callErr.message.includes('ECONNRESET') ||
-                callErr.message.includes('socket hang up') ||
-                callErr.message.includes('ETIMEDOUT')
-              );
-
-              if (isNetworkError && attempt < maxRetries) {
-                const delay = backoffDelays[attempt] || 5000;
-                logAudit({
-                  provider: provider.name,
-                  tableId: eventId,
-                  statusCode: 'NET_ERR',
-                  category: 'server_error',
-                  durationMs,
-                  retries: attempt,
-                  circuitState: providerManager.getState(provKey),
-                  message: `Network error (${callErr.message}). Retrying in ${delay / 1000}s...`
-                });
-                await new Promise(r => setTimeout(r, delay));
-                continue;
-              }
-
-              throw callErr;
-            }
-          }
-        });
-
-        if (result && result.url) {
-          return result;
+    if (!acquiredLock) {
+      console.log(`[Distributed Lock] Another PM2 worker is currently fetching table ${eventId}. Waiting for result...`);
+      const unlocked = await redisClient.waitForLock(lockKey, 12000, 250);
+      if (unlocked) {
+        const resultFromOtherWorker = await redisClient.get(cacheKey);
+        if (resultFromOtherWorker && resultFromOtherWorker.url) {
+          providerManager.trackCacheHit(resultFromOtherWorker.provKey || 'startexch');
+          return resultFromOtherWorker;
         }
-      } catch (provErr) {
-        lastError = provErr;
-        console.warn(`[Failover] Provider ${provider.name} unavailable for ${eventId}: ${provErr.message}. Failing over to next provider...`);
       }
     }
 
-    throw new Error(`Failed to obtain watch link for table ${eventId} from any provider: ${lastError ? lastError.message : 'All providers exhausted'}`);
+    try {
+      const providerList = ['startexch', 'nice444', 'asstarplay', 'cbtf'];
+      const maxRetries = CONFIG.maxRetries;
+      const backoffDelays = CONFIG.backoffMs;
+      let lastError = null;
+
+      for (const provKey of providerList) {
+        const provider = PROVIDERS[provKey];
+        if (!provider) continue;
+
+        // Skip provider if currently in cooldown (Circuit Breaker OPEN)
+        if (!providerManager.isAvailable(provKey)) {
+          logAudit({
+            provider: provider.name,
+            tableId: eventId,
+            statusCode: 429,
+            category: 'rate_limiting',
+            durationMs: 0,
+            retries: 0,
+            circuitState: 'OPEN',
+            message: 'Provider in cooldown, skipping to next provider'
+          });
+          continue;
+        }
+
+        try {
+          // Schedule through provider's dedicated FIFO queue
+          const result = await providerManager.schedule(provKey, eventId, async () => {
+            let token = await getAuthToken(provKey);
+            let tokenRefreshed = false;
+
+            for (let attempt = 0; attempt <= maxRetries; attempt++) {
+              const startTime = Date.now();
+              let res = null;
+              let data = null;
+
+              try {
+                res = await proxyFetch(`${provider.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`,
+                    'Origin': provider.casinoBase,
+                    'Referer': `${provider.casinoBase}/`,
+                    'User-Agent': UA
+                  },
+                  body: JSON.stringify({
+                    streamId: eventId,
+                    timestamp: Date.now()
+                  }),
+                  timeout: 10000
+                });
+
+                data = await res.json().catch(() => null);
+                const durationMs = Date.now() - startTime;
+                const circuitState = providerManager.getState(provKey);
+
+                // 1. Success 200 OK with valid URL
+                if (res.ok && data?.data?.url) {
+                  providerManager.trackRequest(provKey, durationMs, true, res.status);
+                  
+                  // Calculate exact TTL until actual token expiry
+                  const ttlSec = resolveWatchLinkTtl(data.data.url, CONFIG.watchlinkTtlSec);
+
+                  const watchData = {
+                    url: data.data.url,
+                    provider: provider.name,
+                    provKey: provKey,
+                    origin: provider.base,
+                    session: _currentStickySession,
+                    expiresAt: Date.now() + (ttlSec * 1000)
+                  };
+
+                  // Cache in Redis (shared across PM2 workers) and RAM
+                  await redisClient.set(cacheKey, watchData, ttlSec);
+                  watchLinkCache.set(eventId, watchData);
+
+                  logAudit({
+                    provider: provider.name,
+                    tableId: eventId,
+                    statusCode: res.status,
+                    category: 'success',
+                    durationMs,
+                    retries: attempt,
+                    circuitState,
+                    message: `WatchLink acquired successfully (TTL: ${Math.round(ttlSec / 60)} min): ${data.data.url.slice(0, 45)}...`
+                  });
+                  return watchData;
+                }
+
+                // 2. HTTP 429: Too Many Requests (Respect Retry-After)
+                if (res.status === 429) {
+                  const retryAfterHeader = res.headers.get('retry-after');
+                  let cooldownMs = CONFIG.cooldownMs;
+                  if (retryAfterHeader && !isNaN(parseInt(retryAfterHeader, 10))) {
+                    cooldownMs = parseInt(retryAfterHeader, 10) * 1000;
+                  }
+                  providerManager.tripCooldown(provKey, cooldownMs, 'HTTP 429 Too Many Requests');
+                  providerManager.trackRequest(provKey, durationMs, false, 429, 'Rate-limited HTTP 429');
+                  logAudit({
+                    provider: provider.name,
+                    tableId: eventId,
+                    statusCode: 429,
+                    category: 'rate_limiting',
+                    durationMs,
+                    retries: attempt,
+                    circuitState: 'OPEN',
+                    message: `HTTP 429 rate limit. Tripped cooldown for ${Math.round(cooldownMs / 1000)}s`
+                  });
+                  throw new Error(`Provider ${provider.name} rate-limited (HTTP 429)`);
+                }
+
+                // 3. IP Blocked: viewer_ip_blocked
+                if (data?.meta?.message === 'viewer_ip_blocked' || (res.status === 403 && JSON.stringify(data || '').includes('blocked'))) {
+                  providerManager.tripCooldown(provKey, CONFIG.cooldownMs, `viewer_ip_blocked on session #${_currentStickySession}`);
+                  rotateStickySession(`IP blocked on ${provider.name}`);
+                  providerManager.trackRequest(provKey, durationMs, false, 403, 'viewer_ip_blocked');
+                  logAudit({
+                    provider: provider.name,
+                    tableId: eventId,
+                    statusCode: res.status,
+                    category: 'rate_limiting',
+                    durationMs,
+                    retries: attempt,
+                    circuitState: 'OPEN',
+                    message: `viewer_ip_blocked. Tripped cooldown 60s & rotated proxy session to #${_currentStickySession}`
+                  });
+                  throw new Error(`Provider ${provider.name} blocked residential IP`);
+                }
+
+                // 4. HTTP 401: Authentication expired
+                if (res.status === 401 || data?.meta?.status_code === 401) {
+                  logAudit({
+                    provider: provider.name,
+                    tableId: eventId,
+                    statusCode: 401,
+                    category: 'authentication',
+                    durationMs,
+                    retries: attempt,
+                    circuitState,
+                    message: 'Token expired (401). Invalidating cache and refreshing unified token...'
+                  });
+                  // Clear cached auth token in Redis and memory
+                  await redisClient.del(`auth:${provKey}`);
+                  sessionState[provKey].token = null;
+
+                  if (!tokenRefreshed) {
+                    tokenRefreshed = true;
+                    token = await getAuthToken(provKey, true);
+                    continue; // Retry once with fresh token
+                  }
+                  providerManager.trackRequest(provKey, durationMs, false, 401, 'Auth Token Expired');
+                  throw new Error(`Token refresh failed for ${provider.name}`);
+                }
+
+                // 5. Non-retryable client errors: 400, 403, 404
+                if (res.status >= 400 && res.status < 500) {
+                  providerManager.trackRequest(provKey, durationMs, false, res.status, data?.meta?.message || res.statusText);
+                  logAudit({
+                    provider: provider.name,
+                    tableId: eventId,
+                    statusCode: res.status,
+                    category: 'permission',
+                    durationMs,
+                    retries: attempt,
+                    circuitState,
+                    message: `Non-retryable status ${res.status}: ${data?.meta?.message || res.statusText}`
+                  });
+                  throw new Error(`Non-retryable HTTP ${res.status} from ${provider.name}`);
+                }
+
+                // 6. Retryable server errors: 500, 502, 503, 504
+                if (res.status >= 500) {
+                  logAudit({
+                    provider: provider.name,
+                    tableId: eventId,
+                    statusCode: res.status,
+                    category: 'server_error',
+                    durationMs,
+                    retries: attempt,
+                    circuitState,
+                    message: `Upstream server error HTTP ${res.status}`
+                  });
+                  if (attempt < maxRetries) {
+                    const delay = backoffDelays[attempt] || 5000;
+                    console.log(`[SmartRetry] [${provider.name}] Retrying table ${eventId} in ${delay / 1000}s (attempt ${attempt + 1}/${maxRetries})...`);
+                    await new Promise(r => setTimeout(r, delay));
+                    continue;
+                  }
+                  providerManager.trackRequest(provKey, durationMs, false, res.status, `Server error ${res.status}`);
+                  throw new Error(`Provider ${provider.name} failed with HTTP ${res.status}`);
+                }
+
+                throw new Error(`Unexpected response from ${provider.name}: ${JSON.stringify(data || res.status)}`);
+
+              } catch (callErr) {
+                const durationMs = Date.now() - startTime;
+                const isNetworkError = callErr.message && (
+                  callErr.message.includes('timeout') ||
+                  callErr.message.includes('ECONNRESET') ||
+                  callErr.message.includes('socket hang up') ||
+                  callErr.message.includes('ETIMEDOUT')
+                );
+
+                if (isNetworkError && attempt < maxRetries) {
+                  const delay = backoffDelays[attempt] || 5000;
+                  logAudit({
+                    provider: provider.name,
+                    tableId: eventId,
+                    statusCode: 'NET_ERR',
+                    category: 'server_error',
+                    durationMs,
+                    retries: attempt,
+                    circuitState: providerManager.getState(provKey),
+                    message: `Network error (${callErr.message}). Retrying in ${delay / 1000}s...`
+                  });
+                  await new Promise(r => setTimeout(r, delay));
+                  continue;
+                }
+
+                throw callErr;
+              }
+            }
+          });
+
+          if (result && result.url) {
+            return result;
+          }
+        } catch (provErr) {
+          lastError = provErr;
+          console.warn(`[Failover] Provider ${provider.name} unavailable for ${eventId}: ${provErr.message}. Failing over to next provider...`);
+        }
+      }
+
+      throw new Error(`Failed to obtain watch link for table ${eventId} from any provider: ${lastError ? lastError.message : 'All providers exhausted'}`);
+    } finally {
+      await redisClient.releaseLock(lockKey).catch(() => {});
+    }
   })();
 
   inFlightWatchLinks.set(eventId, task);
@@ -797,12 +1033,18 @@ async function getWatchUrl(eventId) {
   }
 }
 
-// Multi-Provider Sports WatchLink Resolution with Queue & Circuit Breaker
+// Multi-Provider Sports WatchLink Resolution with Queue, Circuit Breaker & Redis
 async function getSportsWatchUrl(rawEventId, sportId = '4') {
   let streamId = String(rawEventId || '').trim();
-  const cacheKey = `sports_${streamId}`;
+  const cacheKey = `watchlink:sports_${streamId}`;
 
-  // 1. Check RAM Cache
+  // 1. Check Redis Cache
+  const redisCached = await redisClient.get(cacheKey);
+  if (redisCached && redisCached.url && Date.now() < (redisCached.expiresAt || 0)) {
+    return redisCached;
+  }
+
+  // 2. Check RAM Cache
   const cached = watchLinkCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt) {
     return cached;
@@ -810,7 +1052,7 @@ async function getSportsWatchUrl(rawEventId, sportId = '4') {
 
   const providerList = ['nice444', 'startexch', 'asstarplay'];
 
-  // 2. If eventId is a long internal ID (e.g. 40020...), resolve its actual Betfair eventId
+  // 3. If eventId is a long internal ID (e.g. 40020...), resolve its actual Betfair eventId
   if (streamId.length > 9 && (streamId.startsWith('400') || streamId.startsWith('100') || streamId.startsWith('200'))) {
     try {
       const token = await getAuthToken('nice444');
@@ -831,7 +1073,7 @@ async function getSportsWatchUrl(rawEventId, sportId = '4') {
     }
   }
 
-  // 3. Query exchEventsWatchLink across providers through Provider Queue
+  // 4. Query exchEventsWatchLink across providers through Provider Queue
   for (const provKey of providerList) {
     const provider = PROVIDERS[provKey];
     if (!provider || !providerManager.isAvailable(provKey)) continue;
@@ -855,21 +1097,23 @@ async function getSportsWatchUrl(rawEventId, sportId = '4') {
         const data = await res.json();
         if (data?.data?.url) {
           providerManager.recordSuccess(provKey);
+          const ttlSec = resolveWatchLinkTtl(data.data.url, CONFIG.watchlinkTtlSec);
           const sportsData = {
             url: data.data.url,
             provider: provider.name,
             provKey: provKey,
             origin: provider.base,
             streamId,
-            expiresAt: Date.now() + WATCHLINK_CACHE_TTL
+            expiresAt: Date.now() + (ttlSec * 1000)
           };
+          await redisClient.set(cacheKey, sportsData, ttlSec);
           watchLinkCache.set(cacheKey, sportsData);
           console.log(`[Sports] Acquired sports stream URL from ${provider.name}: ${data.data.url}`);
           return sportsData;
         }
 
         if (res.status === 429) {
-          providerManager.tripCooldown(provKey, 60000, 'HTTP 429 in sports watch link');
+          providerManager.tripCooldown(provKey, CONFIG.cooldownMs, 'HTTP 429 in sports watch link');
         }
         throw new Error(`No stream URL in ${provider.name} response`);
       });
@@ -971,5 +1215,8 @@ module.exports = {
   getEffectiveProxyUrl,
   providerManager,
   watchLinkCache,
-  logAudit
+  logAudit,
+  redisClient,
+  CONFIG,
+  resolveWatchLinkTtl
 };
