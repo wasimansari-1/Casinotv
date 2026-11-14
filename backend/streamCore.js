@@ -8,6 +8,19 @@ const { URL } = require('url');
 
 let _cachedAgent = null;
 let _cachedProxyUrl = null;
+let _currentStickySession = Math.floor(Math.random() * 50) + 1;
+
+function getEffectiveProxyUrl(proxyUrlStr) {
+  if (!proxyUrlStr) return null;
+  // If user provided a Webshare rotating endpoint (like bbmraujs-in-rotate):
+  // Webshare's -rotate switches IP on EVERY single connection. This breaks Universe Studio
+  // which requires the ticket to be fetched by the exact same IP that requested it.
+  // Converting -rotate to a numeric sticky session (-SESSION_NUM) locks the same Indian residential IP!
+  if (proxyUrlStr.includes('webshare.io') && proxyUrlStr.includes('-rotate')) {
+    return proxyUrlStr.replace('-rotate', `-${_currentStickySession}`);
+  }
+  return proxyUrlStr;
+}
 
 function resetProxyAgent() {
   if (_cachedAgent) {
@@ -19,11 +32,18 @@ function resetProxyAgent() {
   }
 }
 
+function rotateStickySession() {
+  _currentStickySession = (_currentStickySession % 100) + 1;
+  resetProxyAgent();
+  console.log(`[StreamCore] Rotated sticky residential proxy session to session #${_currentStickySession}`);
+}
+
 function getProxyAgent(proxyUrlStr) {
-  if (_cachedAgent && _cachedProxyUrl === proxyUrlStr) {
+  const effectiveProxyUrl = getEffectiveProxyUrl(proxyUrlStr);
+  if (_cachedAgent && _cachedProxyUrl === effectiveProxyUrl) {
     return _cachedAgent;
   }
-  const pUrl = new URL(proxyUrlStr);
+  const pUrl = new URL(effectiveProxyUrl);
   const proxyAuth = pUrl.username 
     ? 'Basic ' + Buffer.from(decodeURIComponent(pUrl.username) + ':' + decodeURIComponent(pUrl.password)).toString('base64') 
     : null;
@@ -72,8 +92,8 @@ function getProxyAgent(proxyUrlStr) {
   };
 
   _cachedAgent = agent;
-  _cachedProxyUrl = proxyUrlStr;
-  console.log(`[StreamCore] Outbound HTTPS ProxyAgent active: ${proxyUrlStr.replace(/:\/\/.*@/, '://***:***@')}`);
+  _cachedProxyUrl = effectiveProxyUrl;
+  console.log(`[StreamCore] Outbound HTTPS ProxyAgent active: ${effectiveProxyUrl.replace(/:\/\/.*@/, '://***:***@')}`);
   return agent;
 }
 
@@ -343,12 +363,12 @@ async function getWatchUrl(eventId, retries = 3) {
             }
 
             if (data?.data?.url) {
-              return { url: data.data.url, provider: provider.name, origin: provider.casinoBase };
+              return { url: data.data.url, provider: provider.name, origin: provider.base };
             }
 
             if (data?.meta?.message === 'viewer_ip_blocked' || res.status === 403) {
-              console.warn(`[WatchLink] IP blocked on ${provider.name}. Resetting proxy connection to rotate fresh IP...`);
-              resetProxyAgent();
+              console.warn(`[WatchLink] IP blocked on ${provider.name}. Rotating sticky residential proxy session...`);
+              rotateStickySession();
               await new Promise(r => setTimeout(r, 400));
               continue;
             }

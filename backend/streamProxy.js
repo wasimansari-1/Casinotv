@@ -264,12 +264,16 @@ router.get('/player/:eventId', async (req, res) => {
       
       const watchData = await getWatchUrl(eventId);
       const watchUrl = typeof watchData === 'string' ? watchData : watchData.url;
-      const referer = watchData.origin ? `${watchData.origin}/` : 'https://casino.nice444.com/';
+      const referer = watchData.origin ? (watchData.origin.endsWith('/') ? watchData.origin : `${watchData.origin}/`) : 'https://nice444.com/';
 
       const pageRes = await proxyFetch(watchUrl, {
         headers: {
           'User-Agent': UA,
-          'Referer': referer
+          'Referer': referer,
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+          'Sec-Fetch-Dest': 'iframe',
+          'Sec-Fetch-Mode': 'navigate',
+          'Sec-Fetch-Site': 'cross-site'
         }
       });
 
