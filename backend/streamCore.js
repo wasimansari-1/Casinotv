@@ -473,7 +473,7 @@ class ProviderManager {
       prov.inFlightByTable.set(tableId, promise);
       promise.finally(() => {
         prov.inFlightByTable.delete(tableId);
-      });
+      }).catch(() => {});
     }
 
     return promise;
