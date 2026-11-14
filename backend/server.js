@@ -19,9 +19,18 @@ if (fs.existsSync(envPath) && typeof process.loadEnvFile === 'function') {
 const proxyUrl = process.env.UPSTREAM_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
 if (proxyUrl) {
   try {
-    const { ProxyAgent, setGlobalDispatcher } = require('undici');
-    const proxyAgent = new ProxyAgent(proxyUrl);
-    setGlobalDispatcher(proxyAgent);
+    const undici = require('undici');
+    let proxyAgent;
+    try {
+      proxyAgent = new undici.ProxyAgent({ uri: proxyUrl });
+    } catch (e1) {
+      proxyAgent = new undici.ProxyAgent(proxyUrl);
+    }
+    
+    // Set both global dispatcher and override globalThis.fetch for 100% compatibility across all Node versions
+    try { undici.setGlobalDispatcher(proxyAgent); } catch (_) {}
+    globalThis.fetch = (url, opts = {}) => undici.fetch(url, { dispatcher: proxyAgent, ...opts });
+
     console.log(`[Proxy] Upstream proxy active: ${proxyUrl.replace(/:\/\/.*@/, '://***:***@')}`);
   } catch (err) {
     console.error(`[Proxy] Failed to initialize ProxyAgent:`, err.message);
