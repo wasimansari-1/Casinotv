@@ -343,7 +343,7 @@ export default function App() {
                     {selectedTable ? (
                       <iframe
                         key={`casino-${selectedTable.id}-${reloadKey}`}
-                        src={`/api/stream/player/${selectedTable.id}`}
+                        src={`/api/stream/player/${selectedTable.id}?t=${reloadKey}`}
                         title={selectedTable.name}
                         className="absolute inset-0 w-full h-full border-none"
                         allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
@@ -446,7 +446,7 @@ export default function App() {
 
                     <div className="relative w-full aspect-video bg-black">
                       <iframe
-                        src={`/api/stream/player/${table.id}`}
+                        src={`/api/stream/player/${table.id}?t=${reloadKey}`}
                         title={table.name}
                         className="absolute inset-0 w-full h-full border-none"
                         loading="lazy"
@@ -518,7 +518,7 @@ export default function App() {
                   {selectedSportMatch ? (
                     <iframe
                       key={`sports-${selectedSportMatch.id}-${reloadKey}`}
-                      src={`/api/stream/sports/player/${selectedSportMatch.id}?sportId=${selectedSportMatch.sportId}`}
+                      src={`/api/stream/sports/player/${selectedSportMatch.id}?sportId=${selectedSportMatch.sportId}&t=${reloadKey}`}
                       title={selectedSportMatch.name}
                       className="absolute inset-0 w-full h-full border-none"
                       allow="autoplay; fullscreen; encrypted-media; picture-in-picture"

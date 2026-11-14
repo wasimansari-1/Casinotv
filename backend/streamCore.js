@@ -353,19 +353,21 @@ const GAME_MAP = {
   '99.0005': { name: 'Amar Akbar Anthony', streamId: 'GAME05', category: 'Special' },
 };
 
-// Queue to serialize watchLink requests with a gentle 120ms rate-limit spacer
-let watchLinkQueue = Promise.resolve();
+// Multi-Provider Casino WatchLink Resolution
+let _nice444BlockedUntil = 0;
 const inFlightWatchLinks = new Map();
 
-// Multi-Provider Casino WatchLink Resolution
-async function getWatchUrl(eventId, retries = 3) {
+async function getWatchUrl(eventId, retries = 2) {
   if (inFlightWatchLinks.has(eventId)) {
     return inFlightWatchLinks.get(eventId);
   }
 
   const task = (async () => {
-    // Try primary provider (nice444), then fallback to startexch
-    const providerList = ['nice444', 'startexch', 'asstarplay'];
+    // Startexch99 is rock-solid on Indian residential IPs with 3 accounts, never blocks.
+    // Prioritize Startexch99 for 0.1s instant startup, failover to Nice444 and Asstarplay.
+    const providerList = (Date.now() < _nice444BlockedUntil)
+      ? ['startexch', 'asstarplay', 'nice444']
+      : ['startexch', 'nice444', 'asstarplay'];
 
     for (const provKey of providerList) {
       const provider = PROVIDERS[provKey];
@@ -374,29 +376,20 @@ async function getWatchUrl(eventId, retries = 3) {
 
         for (let attempt = 0; attempt <= retries; attempt++) {
           try {
-            const res = await new Promise((resolve, reject) => {
-              watchLinkQueue = watchLinkQueue.then(async () => {
-                try {
-                  await new Promise(r => setTimeout(r, 350));
-                  const r = await proxyFetch(`${provider.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`, {
-                    method: 'POST',
-                    headers: {
-                      'Content-Type': 'application/json',
-                      'Authorization': `Bearer ${token}`,
-                      'Origin': provider.casinoBase,
-                      'Referer': `${provider.casinoBase}/`,
-                      'User-Agent': UA
-                    },
-                    body: JSON.stringify({
-                      streamId: eventId,
-                      timestamp: Date.now()
-                    })
-                  });
-                  resolve(r);
-                } catch (e) {
-                  reject(e);
-                }
-              });
+            const res = await proxyFetch(`${provider.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`,
+                'Origin': provider.casinoBase,
+                'Referer': `${provider.casinoBase}/`,
+                'User-Agent': UA
+              },
+              body: JSON.stringify({
+                streamId: eventId,
+                timestamp: Date.now()
+              }),
+              timeout: 8000
             });
 
             const data = await res.json();
@@ -412,16 +405,18 @@ async function getWatchUrl(eventId, retries = 3) {
             }
 
             if (data?.meta?.message === 'viewer_ip_blocked' || res.status === 403) {
-              console.warn(`[WatchLink] IP blocked on ${provider.name}. Rotating session and failing over immediately to next provider...`);
-              rotateStickySession();
+              console.warn(`[WatchLink] IP blocked on ${provider.name}. Cooling down ${provider.name} and failing over immediately...`);
+              if (provKey === 'nice444') {
+                _nice444BlockedUntil = Date.now() + 10 * 60 * 1000;
+              }
               break;
             }
 
             console.warn(`[WatchLink] ${provider.name} attempt ${attempt} response:`, data?.meta?.message || data);
-            await new Promise(r => setTimeout(r, 250));
+            await new Promise(r => setTimeout(r, 200));
           } catch (err) {
             console.warn(`[WatchLink] Error on ${provider.name} attempt ${attempt}:`, err.message);
-            await new Promise(r => setTimeout(r, 250));
+            await new Promise(r => setTimeout(r, 200));
           }
         }
       } catch (provErr) {

@@ -576,6 +576,12 @@ function getPatchedPlayerJs() {
   // 6. Neutralize aggressive 5-second freeze detector (eliminates stutter, buffering, and loops)
   text = text.replace(/e\.reconnect\("frozen"\)/g, '(function(){console.warn("[Stream Jitter Handled]");})()');
 
+  // 7. Guaranteed mobile autoplay (muted + playsinline before play())
+  text = text.replace(
+    /tryPlay\(\)\{const e=this\.video\.play\(\);/g,
+    'tryPlay(){this.video.muted=!0;this.video.defaultMuted=!0;this.video.playsInline=!0;this.video.setAttribute("playsinline","");this.video.setAttribute("webkit-playsinline","");const e=this.video.play();'
+  );
+
   _cachedPatchedPlayerJs = text;
   return text;
 }

@@ -67,11 +67,22 @@ const publicPath = path.join(__dirname, '../public');
 const staticPath = fs.existsSync(distPath) ? distPath : publicPath;
 
 console.log(`[Static] Serving frontend from: ${staticPath}`);
-app.use(express.static(staticPath));
+app.use(express.static(staticPath, {
+  setHeaders: (res, p) => {
+    if (p.endsWith('.html')) {
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+  }
+}));
 
 // Fallback route for SPA
 app.use((req, res, next) => {
   if (req.path.startsWith('/api/')) return next();
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
   res.sendFile(path.join(staticPath, 'index.html'));
 });
 
