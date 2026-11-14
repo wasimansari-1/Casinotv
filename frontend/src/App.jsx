@@ -104,9 +104,9 @@ export default function App() {
   const handleCopyIframe = () => {
     let code = '';
     if (mainHub === 'casino' && selectedTable) {
-      code = `<iframe src="${window.location.origin}/api/stream/player/${selectedTable.id}" allow="autoplay; fullscreen; unload" width="100%" height="100%" frameborder="0"></iframe>`;
+      code = `<iframe src="${window.location.origin}/api/stream/player/${selectedTable.id}" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" width="100%" height="100%" frameborder="0" allowfullscreen></iframe>`;
     } else if (mainHub === 'sports' && selectedSportMatch) {
-      code = `<iframe src="${window.location.origin}/api/stream/sports/player/${selectedSportMatch.id}?sportId=${selectedSportMatch.sportId}" allow="autoplay; fullscreen; unload" width="100%" height="100%" frameborder="0"></iframe>`;
+      code = `<iframe src="${window.location.origin}/api/stream/sports/player/${selectedSportMatch.id}?sportId=${selectedSportMatch.sportId}" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" width="100%" height="100%" frameborder="0" allowfullscreen></iframe>`;
     }
     if (code) {
       navigator.clipboard.writeText(code);
@@ -346,7 +346,8 @@ export default function App() {
                         src={`/api/stream/player/${selectedTable.id}`}
                         title={selectedTable.name}
                         className="absolute inset-0 w-full h-full border-none"
-                        allow="autoplay; fullscreen; unload"
+                        allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+                        allowFullScreen
                       />
                     ) : (
                       <div className="text-slate-500 flex flex-col items-center gap-2 text-xs">
@@ -362,7 +363,7 @@ export default function App() {
                       <span className="text-slate-400 font-medium shrink-0">Iframe Tag:</span>
                       <code className="text-sky-400 font-mono truncate select-all">
                         {selectedTable 
-                          ? `<iframe src="${window.location.origin}/api/stream/player/${selectedTable.id}" allow="autoplay; fullscreen; unload"></iframe>`
+                          ? `<iframe src="${window.location.origin}/api/stream/player/${selectedTable.id}" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" width="100%" height="100%" frameborder="0" allowfullscreen></iframe>`
                           : ''}
                       </code>
                     </div>

@@ -98,6 +98,7 @@ async function fetchFullTsSegment(targetUrl) {
 const CASINO_CACHE_TTL = 360 * 1000;
 const playerCache = new Map();
 const inFlightPlayers = new Map();
+const pingCache = new Map();
 
 // Helper: Pre-warm a single casino table in memory
 async function warmCasinoTable(eventId) {
@@ -122,6 +123,30 @@ async function warmCasinoTable(eventId) {
       html = transformPlayerHtml(html, watchUrl, false);
       playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + CASINO_CACHE_TTL });
       console.log(`[Stream Warmer] Pre-warmed & cached table ${eventId} in memory`);
+
+      // Pre-warm ping handshake for instant 0ms start
+      const cfgMatch = html.match(/<script type="application\/json" id="cfg">([^<]+)<\/script>/);
+      if (cfgMatch) {
+        try {
+          const cfg = JSON.parse(cfgMatch[1]);
+          const targetUrl = cfg.pingUrl.includes('target=') 
+            ? decodeURIComponent(new URL(cfg.pingUrl, 'http://localhost').searchParams.get('target'))
+            : cfg.pingUrl;
+          if (targetUrl) {
+            proxyFetch(targetUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'User-Agent': UA },
+              body: JSON.stringify({ sid: cfg.sid, mode: 'connecting', init: true, tz: 'Asia/Kolkata', tzo: 330 })
+            }).then(r => r.json()).then(data => {
+              if (data && data.wsUrl && data.streamId) {
+                pingCache.set(targetUrl, { data, timestamp: Date.now() });
+                console.log(`[Stream Warmer] Pre-warmed ping handshake for table ${eventId} (${data.streamId})`);
+              }
+            }).catch(() => {});
+          }
+        } catch (_) {}
+      }
+
       return true;
     }
   } catch (err) {
@@ -623,6 +648,15 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
     const targetUrl = decodeURIComponent(target);
     const decodedWatchUrl = watchUrl ? decodeURIComponent(watchUrl) : targetUrl;
     const targetOrigin = new URL(targetUrl).origin;
+    const isInit = Boolean(req.body?.init);
+
+    // Instant RAM delivery for init pings (eliminates 1.5-3s loader wait time!)
+    if (isInit && pingCache.has(targetUrl)) {
+      const cachedPing = pingCache.get(targetUrl);
+      if (cachedPing && (Date.now() - cachedPing.timestamp < 180000)) {
+        return res.status(200).json(cachedPing.data);
+      }
+    }
 
     const payload = {
       ...req.body,
@@ -659,12 +693,23 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
       if (data.hlsUrl) {
         data.hlsUrl = `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(data.hlsUrl)}`;
       }
+      if (isInit && data.wsUrl && data.streamId) {
+        pingCache.set(targetUrl, { data, timestamp: Date.now() });
+      }
     }
 
     // Always return HTTP 200 so the client player never aborts the stream
     const finalStatus = (upstreamRes.status >= 200 && upstreamRes.status < 300) ? upstreamRes.status : 200;
     return res.status(finalStatus).json(data || { ok: true, state: "live" });
   } catch (err) {
+    const { target } = req.query;
+    if (target) {
+      const targetUrl = decodeURIComponent(target);
+      const cachedPing = pingCache.get(targetUrl);
+      if (cachedPing && cachedPing.data) {
+        return res.status(200).json(cachedPing.data);
+      }
+    }
     // Ultra-resilient ping fallback: Keep player alive and active
     return res.status(200).json({ ok: true, state: "live", maintenance: null, stop: false });
   }
