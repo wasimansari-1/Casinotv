@@ -72,6 +72,9 @@ function getProxyAgent(proxyUrlStr) {
         socket.destroy();
         return callback(new Error('Proxy CONNECT rejected with status ' + res.statusCode));
       }
+      if (head && head.length > 0) {
+        socket.unshift(head);
+      }
       const tlsSocket = tls.connect({
         socket: socket,
         servername: options.servername || targetHost,

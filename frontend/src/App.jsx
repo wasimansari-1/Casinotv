@@ -448,6 +448,7 @@ export default function App() {
                         src={`/api/stream/player/${table.id}`}
                         title={table.name}
                         className="absolute inset-0 w-full h-full border-none"
+                        loading="lazy"
                         allow="autoplay; fullscreen; unload"
                       />
                     </div>

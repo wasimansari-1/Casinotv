@@ -96,6 +96,7 @@ async function fetchFullTsSegment(targetUrl) {
 
 // Memory cache for modified player HTML (TTL 25s) to eliminate redundant roundtrips
 const playerCache = new Map();
+const inFlightPlayers = new Map();
 
 // 1. Get all supported Casino tables
 router.get('/tables', (req, res) => {
@@ -257,59 +258,81 @@ router.get('/player/:eventId', async (req, res) => {
     res.setHeader('Permissions-Policy', 'unload=*');
     return res.send(cached.html);
   }
-  
-  for (let attempt = 1; attempt <= 2; attempt++) {
+
+  // Deduplicate in-flight requests for the same table
+  if (inFlightPlayers.has(eventId)) {
     try {
-      console.log(`[Casino Player] Fetching player for ${eventId} (attempt ${attempt})`);
-      
-      const watchData = await getWatchUrl(eventId);
-      const watchUrl = typeof watchData === 'string' ? watchData : watchData.url;
-      const referer = watchData.origin ? (watchData.origin.endsWith('/') ? watchData.origin : `${watchData.origin}/`) : 'https://nice444.com/';
+      const html = await inFlightPlayers.get(eventId);
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Permissions-Policy', 'unload=*');
+      return res.send(html);
+    } catch (_) {}
+  }
 
-      const pageRes = await proxyFetch(watchUrl, {
-        headers: {
-          'User-Agent': UA,
-          'Referer': referer,
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-          'Sec-Fetch-Dest': 'iframe',
-          'Sec-Fetch-Mode': 'navigate',
-          'Sec-Fetch-Site': 'cross-site'
+  const fetchTask = (async () => {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        console.log(`[Casino Player] Fetching player for ${eventId} (attempt ${attempt})`);
+        
+        const watchData = await getWatchUrl(eventId);
+        const watchUrl = typeof watchData === 'string' ? watchData : watchData.url;
+        const referer = watchData.origin ? (watchData.origin.endsWith('/') ? watchData.origin : `${watchData.origin}/`) : 'https://nice444.com/';
+
+        const pageRes = await proxyFetch(watchUrl, {
+          headers: {
+            'User-Agent': UA,
+            'Referer': referer,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Sec-Fetch-Dest': 'iframe',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'cross-site'
+          }
+        });
+
+        if (!pageRes.ok) {
+          console.warn(`[Casino Player] Upstream returned status ${pageRes.status} for ${eventId}`);
+          if (attempt === 1) {
+            await new Promise(r => setTimeout(r, 400));
+            continue;
+          }
+          throw new Error(`Upstream stream service returned ${pageRes.status}`);
         }
-      });
 
-      if (!pageRes.ok) {
-        console.warn(`[Casino Player] Upstream returned status ${pageRes.status} for ${eventId}`);
+        let html = await pageRes.text();
+        html = transformPlayerHtml(html, watchUrl, false);
+
+        // Cache player HTML for 25 seconds
+        playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + 25000 });
+        return html;
+      } catch (err) {
+        console.error(`[Casino Player Error] Attempt ${attempt}:`, err.message);
         if (attempt === 1) {
           await new Promise(r => setTimeout(r, 400));
           continue;
         }
-        return res.status(pageRes.status).send(`Upstream stream service returned ${pageRes.status}`);
+        throw err;
       }
-
-      let html = await pageRes.text();
-      html = transformPlayerHtml(html, watchUrl, false);
-
-      // Cache player HTML for 25 seconds
-      playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + 25000 });
-
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', '*');
-      res.setHeader('Permissions-Policy', 'unload=*');
-      res.removeHeader('X-Frame-Options');
-      res.removeHeader('Content-Security-Policy');
-
-      return res.send(html);
-    } catch (err) {
-      console.error(`[Casino Player Error] Attempt ${attempt}:`, err.message);
-      if (attempt === 1) {
-        await new Promise(r => setTimeout(r, 400));
-        continue;
-      }
-      return res.status(500).send(`Stream Proxy Error: ${err.message}`);
     }
+  })();
+
+  inFlightPlayers.set(eventId, fetchTask);
+  try {
+    const html = await fetchTask;
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Permissions-Policy', 'unload=*');
+    res.removeHeader('X-Frame-Options');
+    res.removeHeader('Content-Security-Policy');
+    return res.send(html);
+  } catch (err) {
+    return res.status(500).send(`Stream Proxy Error: ${err.message}`);
+  } finally {
+    inFlightPlayers.delete(eventId);
   }
 });
 
