@@ -32,19 +32,21 @@ function resetProxyAgent() {
   }
 }
 
-function rotateStickySession() {
+let _lastRotateTime = 0;
+function rotateStickySession(reason = '') {
+  const now = Date.now();
+  // Cooldown: Never rotate more than once every 30 seconds to keep IPs stable
+  if (now - _lastRotateTime < 30000) {
+    return;
+  }
+  _lastRotateTime = now;
   const oldSession = _currentStickySession;
   let next = Math.floor(Math.random() * 250) + 1;
   if (next === oldSession) next = (next % 250) + 1;
   _currentStickySession = next;
   resetProxyAgent();
-  console.log(`[StreamCore] Rotated sticky residential proxy session from #${oldSession} -> #${_currentStickySession}`);
+  console.log(`[StreamCore] Rotated sticky residential proxy session from #${oldSession} -> #${_currentStickySession} (Reason: ${reason || 'unspecified'})`);
 }
-
-// Proactive sticky session rotation every 5 minutes so residential peers never go stale
-setInterval(() => {
-  rotateStickySession();
-}, 5 * 60 * 1000);
 
 function getProxyAgent(proxyUrlStr) {
   const effectiveProxyUrl = getEffectiveProxyUrl(proxyUrlStr);
@@ -78,8 +80,9 @@ function getProxyAgent(proxyUrlStr) {
     connectReq.on('connect', (res, socket, head) => {
       if (res.statusCode !== 200) {
         socket.destroy();
-        // Immediately rotate dead session on any failure (502, 503, 504, 403, 407, etc.)
-        rotateStickySession();
+        if (res.statusCode === 502 || res.statusCode === 503) {
+          rotateStickySession('Proxy CONNECT status ' + res.statusCode);
+        }
         return callback(new Error('Proxy CONNECT rejected with status ' + res.statusCode));
       }
       if (head && head.length > 0) {
@@ -99,7 +102,6 @@ function getProxyAgent(proxyUrlStr) {
     });
 
     connectReq.on('error', (err) => {
-      rotateStickySession();
       callback(err);
     });
     connectReq.end();
@@ -494,52 +496,68 @@ async function getSportsWatchUrl(rawEventId, sportId = '4') {
   throw new Error(`No live TV coverage currently available for sports event ${rawEventId}`);
 }
 
-// Fetch all active live sports events (Cricket, Football, Tennis)
+let _sportsEventsCache = null;
+let _sportsEventsCacheExpires = 0;
+
+// Fetch all active live sports events (Cricket, Football, Tennis) with multi-provider failover & RAM cache
 async function getLiveSportsEvents() {
-  try {
-    const token = await getAuthToken('nice444');
-    const res = await proxyFetch(`${PROVIDERS.nice444.base}/api/exchange/market/matchodds/allEventsList`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-      body: JSON.stringify({})
-    });
+  if (_sportsEventsCache && Date.now() < _sportsEventsCacheExpires) {
+    return _sportsEventsCache;
+  }
 
-    const data = await res.json();
-    const result = [];
-    const sportNames = { '1': 'Soccer', '2': 'Tennis', '4': 'Cricket', '7': 'Horse Racing' };
+  const providerList = ['nice444', 'startexch', 'asstarplay'];
+  const sportNames = { '1': 'Soccer', '2': 'Tennis', '4': 'Cricket', '7': 'Horse Racing' };
 
-    if (data?.data) {
-      for (const [sId, list] of Object.entries(data.data)) {
-        if (Array.isArray(list)) {
-          for (const ev of list) {
-            const isInPlay = Boolean(ev?.oddsData?.inPlay ?? ev?.inPlay ?? false);
-            result.push({
-              id: String(ev.exEventId || ev._id || ''),
-              name: ev.eventName || 'Unnamed Match',
-              sportId: String(sId),
-              sportName: sportNames[sId] || 'Other Sport',
-              tournament: ev.tournamentName || '',
-              inPlay: isInPlay,
-              eventTime: ev.eventTime || '',
-              tv: true
-            });
+  for (const provKey of providerList) {
+    try {
+      const provider = PROVIDERS[provKey];
+      const token = await getAuthToken(provKey);
+      const res = await proxyFetch(`${provider.base}/api/exchange/market/matchodds/allEventsList`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({})
+      });
+
+      const data = await res.json();
+      const result = [];
+
+      if (data?.data) {
+        for (const [sId, list] of Object.entries(data.data)) {
+          if (Array.isArray(list)) {
+            for (const ev of list) {
+              const isInPlay = Boolean(ev?.oddsData?.inPlay ?? ev?.inPlay ?? false);
+              result.push({
+                id: String(ev.exEventId || ev._id || ''),
+                name: ev.eventName || 'Unnamed Match',
+                sportId: String(sId),
+                sportName: sportNames[sId] || 'Other Sport',
+                tournament: ev.tournamentName || '',
+                inPlay: isInPlay,
+                eventTime: ev.eventTime || '',
+                tv: true
+              });
+            }
           }
         }
       }
+
+      if (result.length > 0) {
+        result.sort((a, b) => {
+          if (a.inPlay && !b.inPlay) return -1;
+          if (!a.inPlay && b.inPlay) return 1;
+          return 0;
+        });
+
+        _sportsEventsCache = result;
+        _sportsEventsCacheExpires = Date.now() + 30000;
+        return result;
+      }
+    } catch (err) {
+      console.warn(`[Sports] Failed to fetch events from ${provKey}:`, err.message);
     }
-
-    // Sort: In-Play matches first, then by eventTime
-    result.sort((a, b) => {
-      if (a.inPlay && !b.inPlay) return -1;
-      if (!a.inPlay && b.inPlay) return 1;
-      return 0;
-    });
-
-    return result;
-  } catch (err) {
-    console.error('[Sports] Failed to fetch live sports events:', err.message);
-    return [];
   }
+
+  return _sportsEventsCache || [];
 }
 
 module.exports = {
