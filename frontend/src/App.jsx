@@ -39,6 +39,14 @@ export default function App() {
   const [selectedTable, setSelectedTable] = useState(null);
   const [activeCategory, setActiveCategory] = useState('ALL');
   const [viewMode, setViewMode] = useState('single'); // 'single' | 'grid-2' | 'grid-4'
+  const [loadedCasinoTableIds, setLoadedCasinoTableIds] = useState(new Set());
+
+  // Automatically track loaded tables so they stay alive in background (Instant 0ms switching)
+  useEffect(() => {
+    if (selectedTable?.id) {
+      setLoadedCasinoTableIds(prev => new Set(prev).add(selectedTable.id));
+    }
+  }, [selectedTable]);
 
   // Sports State
   const [sportsEvents, setSportsEvents] = useState([]);
@@ -338,18 +346,30 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* 16:9 Video Aspect Ratio */}
+                  {/* 16:9 Video Aspect Ratio with Persistent Keep-Alive Stream Cache */}
                   <div className="relative w-full aspect-video bg-black flex items-center justify-center overflow-hidden">
-                    {selectedTable ? (
-                      <iframe
-                        key={`casino-${selectedTable.id}-${reloadKey}`}
-                        src={`/api/stream/player/${selectedTable.id}?t=${reloadKey}`}
-                        title={selectedTable.name}
-                        className="absolute inset-0 w-full h-full border-none"
-                        allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
-                        allowFullScreen
-                      />
-                    ) : (
+                    {tables.filter(t => loadedCasinoTableIds.has(t.id)).map(table => {
+                      const isSelected = selectedTable?.id === table.id;
+                      return (
+                        <iframe
+                          key={`casino-${table.id}-${reloadKey}`}
+                          src={`/api/stream/player/${table.id}?t=${reloadKey}`}
+                          title={table.name}
+                          style={{
+                            display: isSelected ? 'block' : 'none',
+                            position: 'absolute',
+                            top: 0,
+                            left: 0,
+                            width: '100%',
+                            height: '100%',
+                            border: 'none'
+                          }}
+                          allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+                          allowFullScreen
+                        />
+                      );
+                    })}
+                    {!selectedTable && (
                       <div className="text-slate-500 flex flex-col items-center gap-2 text-xs">
                         <RotateCw className="w-6 h-6 animate-spin text-amber-500" />
                         <span>Loading live table...</span>
@@ -449,7 +469,6 @@ export default function App() {
                         src={`/api/stream/player/${table.id}?t=${reloadKey}`}
                         title={table.name}
                         className="absolute inset-0 w-full h-full border-none"
-                        loading="lazy"
                         allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
                         allowFullScreen
                       />

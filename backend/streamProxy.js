@@ -99,8 +99,8 @@ async function fetchFullTsSegment(targetUrl) {
   return task;
 }
 
-// Memory cache for modified player HTML (TTL 10 Minutes) to serve 17 tables instantly with zero API requests
-const CASINO_CACHE_TTL = 10 * 60 * 1000;
+// Memory cache for modified player HTML (TTL 40 Seconds) to deduplicate rapid clicks while ensuring fresh WebRTC sid on reload
+const CASINO_CACHE_TTL = 40 * 1000;
 const playerCache = new Map();
 const inFlightPlayers = new Map();
 const pingCache = new Map();
@@ -924,7 +924,7 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
       data = null;
     }
 
-    if (data && typeof data === 'object') {
+    if (data && typeof data === 'object' && (data.token || !isInit)) {
       if (data.stop) data.stop = false;
       if (data.hlsUrl) {
         data.hlsUrl = `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(data.hlsUrl)}`;
@@ -945,7 +945,25 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
       return res.status(200).json(data);
     }
 
-    // Upstream returned non-JSON or error: Return cached token if available!
+    // Upstream returned non-JSON, 403, or missing token: Auto-heal on the fly!
+    if (eventId) {
+      console.log(`[Proxy-Ping] Stale session or missing token for table ${eventId}. Auto-refreshing fresh token on the fly...`);
+      await warmCasinoTable(eventId);
+      const freshToken = tableTokenCache.get(eventId);
+      if (freshToken && freshToken.token) {
+        return res.status(200).json({
+          ok: true,
+          state: "live",
+          streamId: freshToken.streamId || fallbackStreamId,
+          wsUrl: freshToken.wsUrl || fallbackWsUrl,
+          token: freshToken.token,
+          maintenance: null,
+          stop: false
+        });
+      }
+    }
+
+    // Fallback if warmCasinoTable couldn't get token
     const cachedToken = (eventId && tableTokenCache.get(eventId)?.token) || '';
     return res.status(200).json({
       ok: true,
