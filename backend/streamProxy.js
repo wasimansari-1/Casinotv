@@ -196,24 +196,28 @@ async function warmAllCasinoTables() {
   if (_isWarming) return;
   _isWarming = true;
   try {
-    // Only pre-warm the primary table (20-20 Teen Patti) on startup to prevent provider rate limits
-    await warmCasinoTable('99.0010');
-    // 5 seconds later, warm Lucky 7
-    setTimeout(() => {
-      warmCasinoTable('99.0030').catch(() => {});
-    }, 5000);
+    const tableIds = Object.keys(GAME_MAP);
+    console.log(`[Stream Warmer] Starting background pre-warming for all ${tableIds.length} tables...`);
+    for (const tableId of tableIds) {
+      try {
+        await warmCasinoTable(tableId);
+      } catch (_) {}
+      // 800ms polite pause between warming each table across 4 distributed providers
+      await new Promise(r => setTimeout(r, 800));
+    }
+    console.log(`[Stream Warmer] All ${tableIds.length} tables pre-warmed & ready in memory/Redis.`);
   } finally {
     _isWarming = false;
   }
 }
 
-// Start warmer 3s after boot, recurring every 15 minutes for the top tables
+// Start warmer 2s after boot, recurring every 10 minutes for all tables so cache never expires
 setTimeout(() => {
   warmAllCasinoTables().catch(() => {});
   setInterval(() => {
     warmAllCasinoTables().catch(() => {});
-  }, 15 * 60 * 1000);
-}, 3000);
+  }, 10 * 60 * 1000);
+}, 2000);
 
 // Health Check & Monitoring API (Real-Time Provider Observability)
 router.get('/health', async (req, res) => {
@@ -280,10 +284,10 @@ function transformPlayerHtml(html, watchUrl, isSports = false, eventId = '', pro
   html = html.replace(/asstarplay\.com/gi, '');
   html = html.replace(/cbtfexchange\.com/gi, '');
 
-  // Universal style injection to ensure watermark and foreign domains are 100% hidden
+  // Universal style injection to ensure watermark, block images and foreign domains are 100% hidden
   const cleanWatermarkStyle = `
     <style>
-      #wm, [id="wm"], .watermark, #watermark {
+      #wm, [id="wm"], .watermark, #watermark, #blockImg, [id="blockImg"] {
         display: none !important;
         opacity: 0 !important;
         visibility: hidden !important;
@@ -388,49 +392,7 @@ function transformPlayerHtml(html, watchUrl, isSports = false, eventId = '', pro
       })();
     </script>
   `;
-  const spinnerCss = `
-    <style>
-      #loading, .loading, div#loading {
-        position: fixed !important;
-        inset: 0 !important;
-        top: 0 !important;
-        left: 0 !important;
-        right: 0 !important;
-        bottom: 0 !important;
-        width: 100% !important;
-        height: 100% !important;
-        max-width: none !important;
-        max-height: none !important;
-        margin: 0 !important;
-        padding: 0 !important;
-        transform: none !important;
-        background-color: #07090e !important;
-        background-image: url("/api/stream/player-assets/loader.gif") !important;
-        background-repeat: no-repeat !important;
-        background-position: center center !important;
-        background-size: 140px auto !important;
-        z-index: 99999 !important;
-        pointer-events: none !important;
-        transition: opacity 0.4s ease-out !important;
-      }
-      #loading.fade-out, .loading.fade-out, div#loading.fade-out,
-      #loading[style*="display: none"], .loading[style*="display: none"],
-      #loading[style*="display:none"], .loading[style*="display:none"] {
-        display: none !important;
-        opacity: 0 !important;
-        visibility: hidden !important;
-      }
-      #blockImg, [id="blockImg"] {
-        display: none !important;
-        opacity: 0 !important;
-        visibility: hidden !important;
-        pointer-events: none !important;
-        width: 0 !important;
-        height: 0 !important;
-      }
-    </style>
-  `;
-  html = html.replace('</head>', `${runtimePatch}${spinnerCss}</head>`);
+  html = html.replace('</head>', `${runtimePatch}</head>`);
   return html;
 }
 

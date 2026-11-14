@@ -11,19 +11,19 @@ const redisClient = require('./redisClient');
 // Global System Configuration (Configurable via Environment Variables)
 // ============================================================================
 const CONFIG = {
-  // Provider concurrency: number of simultaneous requests allowed per provider (default: 1)
-  concurrency: Math.max(1, parseInt(process.env.PROVIDER_CONCURRENCY, 10) || 1),
-  // Minimum interval between requests to the same provider in ms (default: 2000)
-  minIntervalMs: Math.max(500, parseInt(process.env.PROVIDER_MIN_INTERVAL_MS, 10) || 2000),
+  // Provider concurrency: number of simultaneous requests allowed per provider (default: 2)
+  concurrency: Math.max(1, parseInt(process.env.PROVIDER_CONCURRENCY, 10) || 2),
+  // Minimum interval between requests to the same provider in ms (default: 800)
+  minIntervalMs: Math.max(200, parseInt(process.env.PROVIDER_MIN_INTERVAL_MS, 10) || 800),
   // Maximum retries for temporary failures (default: 2)
   maxRetries: Math.max(0, parseInt(process.env.PROVIDER_MAX_RETRIES, 10) || 2),
   // Exponential backoff delays in ms
   backoffMs: [
-    parseInt(process.env.PROVIDER_BACKOFF_1_MS, 10) || 5000,
-    parseInt(process.env.PROVIDER_BACKOFF_2_MS, 10) || 15000
+    parseInt(process.env.PROVIDER_BACKOFF_1_MS, 10) || 2000,
+    parseInt(process.env.PROVIDER_BACKOFF_2_MS, 10) || 5000
   ],
-  // Circuit breaker cooldown on HTTP 429 / repeated failures in ms (default: 60000)
-  cooldownMs: parseInt(process.env.CIRCUIT_BREAKER_COOLDOWN_MS, 10) || 60000,
+  // Circuit breaker cooldown on HTTP 429 / repeated failures in ms (default: 10000 = 10s)
+  cooldownMs: parseInt(process.env.CIRCUIT_BREAKER_COOLDOWN_MS, 10) || 10000,
   // WatchLink default cache TTL in seconds (default: 900 = 15m)
   watchlinkTtlSec: parseInt(process.env.WATCHLINK_CACHE_TTL_SEC, 10) || 900
 };
@@ -647,11 +647,8 @@ class ProviderManager {
     // Check circuit breaker status
     if (prov.state === 'OPEN') {
       if (now < prov.cooldownUntil) {
-        // Provider still in cooldown, reject queued items so caller can fail over
-        while (prov.queue.length > 0) {
-          const item = prov.queue.shift();
-          item.reject(new Error(`Provider ${prov.name} is in cooldown (OPEN)`));
-        }
+        // Schedule next check when cooldown expires instead of mass-rejecting queue
+        setTimeout(() => this._processQueue(provKey), Math.max(100, prov.cooldownUntil - now));
         return;
       }
       prov.state = 'HALF_OPEN';
@@ -786,7 +783,14 @@ async function getWatchUrl(eventId) {
     }
 
     try {
-      const providerList = ['startexch', 'nice444', 'asstarplay', 'cbtf'];
+      // Distribute primary provider evenly across providers based on eventId
+      const allKeys = ['startexch', 'nice444', 'asstarplay', 'cbtf'];
+      const hash = eventId.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
+      const startIdx = hash % allKeys.length;
+      const providerList = [
+        ...allKeys.slice(startIdx),
+        ...allKeys.slice(0, startIdx)
+      ];
       const maxRetries = CONFIG.maxRetries;
       const backoffDelays = CONFIG.backoffMs;
       let lastError = null;
@@ -897,9 +901,8 @@ async function getWatchUrl(eventId) {
                   throw new Error(`Provider ${provider.name} rate-limited (HTTP 429)`);
                 }
 
-                // 3. IP Blocked: viewer_ip_blocked
+                // 3. IP Blocked: viewer_ip_blocked (Do not trip provider circuit breaker; rotate session and retry/failover)
                 if (data?.meta?.message === 'viewer_ip_blocked' || (res.status === 403 && JSON.stringify(data || '').includes('blocked'))) {
-                  providerManager.tripCooldown(provKey, CONFIG.cooldownMs, `viewer_ip_blocked on session #${_currentStickySession}`);
                   rotateStickySession(`IP blocked on ${provider.name}`);
                   providerManager.trackRequest(provKey, durationMs, false, 403, 'viewer_ip_blocked');
                   logAudit({
@@ -909,9 +912,13 @@ async function getWatchUrl(eventId) {
                     category: 'rate_limiting',
                     durationMs,
                     retries: attempt,
-                    circuitState: 'OPEN',
-                    message: `viewer_ip_blocked. Tripped cooldown 60s & rotated proxy session to #${_currentStickySession}`
+                    circuitState: providerManager.getState(provKey),
+                    message: `viewer_ip_blocked on session. Rotated proxy session to #${_currentStickySession}`
                   });
+                  if (attempt < maxRetries) {
+                    console.log(`[StreamCore] Retrying table ${eventId} on ${provider.name} with fresh session #${_currentStickySession}...`);
+                    continue;
+                  }
                   throw new Error(`Provider ${provider.name} blocked residential IP`);
                 }
 

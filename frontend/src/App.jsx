@@ -339,26 +339,18 @@ export default function App() {
                   </div>
 
                   {/* 16:9 Video Aspect Ratio */}
-                  <div className="relative w-full aspect-video bg-[#07090e] flex items-center justify-center overflow-hidden">
-                    {/* Centered Universe 3D Dice Loader behind iframe */}
-                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                      <img 
-                        src="/api/stream/player-assets/loader.gif" 
-                        alt="Loading..." 
-                        className="w-[140px] h-auto select-none" 
-                      />
-                    </div>
+                  <div className="relative w-full aspect-video bg-black flex items-center justify-center overflow-hidden">
                     {selectedTable ? (
                       <iframe
                         key={`casino-${selectedTable.id}-${reloadKey}`}
                         src={`/api/stream/player/${selectedTable.id}?t=${reloadKey}`}
                         title={selectedTable.name}
-                        className="relative z-10 w-full h-full border-none"
+                        className="absolute inset-0 w-full h-full border-none"
                         allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
                         allowFullScreen
                       />
                     ) : (
-                      <div className="relative z-20 text-slate-500 flex flex-col items-center gap-2 text-xs">
+                      <div className="text-slate-500 flex flex-col items-center gap-2 text-xs">
                         <RotateCw className="w-6 h-6 animate-spin text-amber-500" />
                         <span>Loading live table...</span>
                       </div>
@@ -452,18 +444,11 @@ export default function App() {
                       </span>
                     </div>
 
-                    <div className="relative w-full aspect-video bg-[#07090e] flex items-center justify-center overflow-hidden">
-                      <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                        <img 
-                          src="/api/stream/player-assets/loader.gif" 
-                          alt="Loading..." 
-                          className="w-[100px] h-auto select-none opacity-80" 
-                        />
-                      </div>
+                    <div className="relative w-full aspect-video bg-black">
                       <iframe
                         src={`/api/stream/player/${table.id}?t=${reloadKey}`}
                         title={table.name}
-                        className="relative z-10 w-full h-full border-none"
+                        className="absolute inset-0 w-full h-full border-none"
                         loading="lazy"
                         allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
                         allowFullScreen
@@ -529,26 +514,18 @@ export default function App() {
                 </div>
 
                 {/* 16:9 Sports Video Aspect Ratio */}
-                <div className="relative w-full aspect-video bg-[#07090e] flex items-center justify-center overflow-hidden">
-                  {/* Centered Universe Loader behind iframe */}
-                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                    <img 
-                      src="/api/stream/player-assets/loader.gif" 
-                      alt="Loading..." 
-                      className="w-[140px] h-auto select-none" 
-                    />
-                  </div>
+                <div className="relative w-full aspect-video bg-black flex items-center justify-center overflow-hidden">
                   {selectedSportMatch ? (
                     <iframe
                       key={`sports-${selectedSportMatch.id}-${reloadKey}`}
                       src={`/api/stream/sports/player/${selectedSportMatch.id}?sportId=${selectedSportMatch.sportId}&t=${reloadKey}`}
                       title={selectedSportMatch.name}
-                      className="relative z-10 w-full h-full border-none"
+                      className="absolute inset-0 w-full h-full border-none"
                       allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
                       allowFullScreen
                     />
                   ) : (
-                    <div className="relative z-20 text-slate-500 flex flex-col items-center gap-2 text-xs">
+                    <div className="text-slate-500 flex flex-col items-center gap-2 text-xs">
                       <Trophy className="w-8 h-8 text-emerald-500" />
                       <span>Select a live match from the list on the right</span>
                     </div>
