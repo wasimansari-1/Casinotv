@@ -33,10 +33,18 @@ function resetProxyAgent() {
 }
 
 function rotateStickySession() {
-  _currentStickySession = (_currentStickySession % 100) + 1;
+  const oldSession = _currentStickySession;
+  let next = Math.floor(Math.random() * 250) + 1;
+  if (next === oldSession) next = (next % 250) + 1;
+  _currentStickySession = next;
   resetProxyAgent();
-  console.log(`[StreamCore] Rotated sticky residential proxy session to session #${_currentStickySession}`);
+  console.log(`[StreamCore] Rotated sticky residential proxy session from #${oldSession} -> #${_currentStickySession}`);
 }
+
+// Proactive sticky session rotation every 5 minutes so residential peers never go stale
+setInterval(() => {
+  rotateStickySession();
+}, 5 * 60 * 1000);
 
 function getProxyAgent(proxyUrlStr) {
   const effectiveProxyUrl = getEffectiveProxyUrl(proxyUrlStr);
@@ -70,6 +78,8 @@ function getProxyAgent(proxyUrlStr) {
     connectReq.on('connect', (res, socket, head) => {
       if (res.statusCode !== 200) {
         socket.destroy();
+        // Immediately rotate dead session on any failure (502, 503, 504, 403, 407, etc.)
+        rotateStickySession();
         return callback(new Error('Proxy CONNECT rejected with status ' + res.statusCode));
       }
       if (head && head.length > 0) {
@@ -89,6 +99,7 @@ function getProxyAgent(proxyUrlStr) {
     });
 
     connectReq.on('error', (err) => {
+      rotateStickySession();
       callback(err);
     });
     connectReq.end();
@@ -143,6 +154,16 @@ function proxyFetch(urlStr, options = {}, redirectCount = 0, retryCount = 0) {
           return resolve(proxyFetch(redirectUrl, options, redirectCount + 1));
         }
 
+        if ((res.statusCode === 502 || res.statusCode === 503 || res.statusCode === 504) && retryCount < 3) {
+          rotateStickySession();
+          const delay = 150 * Math.pow(2, retryCount);
+          return setTimeout(() => {
+            const freshOptions = { ...options };
+            delete freshOptions.agent;
+            resolve(proxyFetch(urlStr, freshOptions, redirectCount, retryCount + 1));
+          }, delay);
+        }
+
         const chunks = [];
         res.on('data', (chunk) => chunks.push(chunk));
         res.on('end', () => {
@@ -178,13 +199,18 @@ function proxyFetch(urlStr, options = {}, redirectCount = 0, retryCount = 0) {
         const isTransient = err.message && (
           err.message.includes('502') || 
           err.message.includes('503') || 
+          err.message.includes('504') || 
           err.message.includes('ECONNRESET') || 
+          err.message.includes('ETIMEDOUT') || 
           err.message.includes('socket hang up')
         );
         if (isTransient && retryCount < 3) {
-          const delay = 200 * Math.pow(2, retryCount);
+          rotateStickySession();
+          const delay = 150 * Math.pow(2, retryCount);
           return setTimeout(() => {
-            resolve(proxyFetch(urlStr, options, redirectCount, retryCount + 1));
+            const freshOptions = { ...options };
+            delete freshOptions.agent;
+            resolve(proxyFetch(urlStr, freshOptions, redirectCount, retryCount + 1));
           }, delay);
         }
         reject(err);
@@ -527,5 +553,6 @@ module.exports = {
   UA,
   proxyFetch,
   getProxyAgent,
-  resetProxyAgent
+  resetProxyAgent,
+  rotateStickySession
 };
