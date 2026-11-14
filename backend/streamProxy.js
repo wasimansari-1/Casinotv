@@ -735,7 +735,7 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
 
     const payload = {
       ...req.body,
-      page: decodedWatchUrl,
+      page: 'https://nice444.com/',
       tz: req.body?.tz || 'Asia/Kolkata',
       tzo: req.body?.tzo !== undefined ? req.body.tzo : 330
     };
@@ -754,12 +754,6 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
       },
       body: JSON.stringify(payload)
     });
-
-    if (upstreamRes.status === 403) {
-      console.warn(`[Proxy Ping] Upstream ping 403 on session. Rotating proxy immediately...`);
-      const { rotateStickySession } = require('./streamCore');
-      rotateStickySession('ping 403', true);
-    }
 
     let data;
     try {

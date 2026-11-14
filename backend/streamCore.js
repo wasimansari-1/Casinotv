@@ -32,29 +32,20 @@ function resetProxyAgent() {
   }
 }
 
-const badSessions = new Set();
 let _lastRotateTime = 0;
-function rotateStickySession(reason = '', force = false) {
+function rotateStickySession(reason = '') {
   const now = Date.now();
-  // If not forced by an explicit block or 403, debounce by 3 seconds
-  if (!force && (now - _lastRotateTime < 3000)) {
+  // Cooldown: Never rotate more than once every 25 seconds to keep IPs rock-solid stable
+  if (now - _lastRotateTime < 25000) {
     return;
   }
   _lastRotateTime = now;
   const oldSession = _currentStickySession;
-  if (reason && (reason.includes('blocked') || reason.includes('403') || reason.includes('502'))) {
-    badSessions.add(oldSession);
-    setTimeout(() => badSessions.delete(oldSession), 180000);
-  }
-
   let next = Math.floor(Math.random() * 40) + 1;
-  for (let i = 0; i < 40; i++) {
-    if (!badSessions.has(next) && next !== oldSession) break;
-    next = (next % 40) + 1;
-  }
+  if (next === oldSession) next = (next % 40) + 1;
   _currentStickySession = next;
   resetProxyAgent();
-  console.log(`[StreamCore] Rotated sticky residential proxy session from #${oldSession} -> #${_currentStickySession} (Reason: ${reason || 'unspecified'}, Blacklisted: ${badSessions.size})`);
+  console.log(`[StreamCore] Rotated sticky residential proxy session from #${oldSession} -> #${_currentStickySession} (Reason: ${reason || 'unspecified'})`);
 }
 
 function getProxyAgent(proxyUrlStr) {
@@ -414,12 +405,11 @@ async function getWatchUrl(eventId, retries = 2) {
             }
 
             if (data?.meta?.message === 'viewer_ip_blocked' || res.status === 403) {
-              console.warn(`[WatchLink] IP blocked on ${provider.name} (session #${_currentStickySession}). Rotating session immediately...`);
+              console.warn(`[WatchLink] IP blocked on ${provider.name} (session #${_currentStickySession}). Failing over to next provider...`);
               if (provKey === 'nice444') {
                 _nice444BlockedUntil = Date.now() + 10 * 60 * 1000;
               }
-              rotateStickySession(`IP blocked on ${provider.name}`, true);
-              await new Promise(r => setTimeout(r, 100));
+              rotateStickySession(`IP blocked on ${provider.name}`);
               break;
             }
 
