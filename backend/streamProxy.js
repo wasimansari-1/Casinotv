@@ -94,9 +94,68 @@ async function fetchFullTsSegment(targetUrl) {
   return task;
 }
 
-// Memory cache for modified player HTML (TTL 25s) to eliminate redundant roundtrips
+// Memory cache for modified player HTML (TTL 6 Minutes) to eliminate redundant roundtrips & serve 1cr users from RAM
+const CASINO_CACHE_TTL = 360 * 1000;
 const playerCache = new Map();
 const inFlightPlayers = new Map();
+
+// Helper: Pre-warm a single casino table in memory
+async function warmCasinoTable(eventId) {
+  try {
+    const watchData = await getWatchUrl(eventId);
+    const watchUrl = typeof watchData === 'string' ? watchData : watchData.url;
+    const referer = watchData.origin ? (watchData.origin.endsWith('/') ? watchData.origin : `${watchData.origin}/`) : 'https://nice444.com/';
+
+    const pageRes = await proxyFetch(watchUrl, {
+      headers: {
+        'User-Agent': UA,
+        'Referer': referer,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Sec-Fetch-Dest': 'iframe',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'cross-site'
+      }
+    });
+
+    if (pageRes.ok) {
+      let html = await pageRes.text();
+      html = transformPlayerHtml(html, watchUrl, false);
+      playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + CASINO_CACHE_TTL });
+      console.log(`[Stream Warmer] Pre-warmed & cached table ${eventId} in memory`);
+      return true;
+    }
+  } catch (err) {
+    console.warn(`[Stream Warmer] Notice for table ${eventId}:`, err.message);
+  }
+  return false;
+}
+
+let _isWarming = false;
+async function warmAllCasinoTables() {
+  if (_isWarming) return;
+  _isWarming = true;
+  try {
+    const tableIds = Object.keys(GAME_MAP);
+    for (const id of tableIds) {
+      const cached = playerCache.get(`casino_${id}`);
+      if (!cached || Date.now() > (cached.expiresAt - 60000)) {
+        await warmCasinoTable(id);
+        // Stagger by 350ms to prevent proxy 502 bursts
+        await new Promise(r => setTimeout(r, 350));
+      }
+    }
+  } finally {
+    _isWarming = false;
+  }
+}
+
+// Start warmer 4s after boot, recurring every 3 minutes
+setTimeout(() => {
+  warmAllCasinoTables().catch(() => {});
+  setInterval(() => {
+    warmAllCasinoTables().catch(() => {});
+  }, 180 * 1000);
+}, 4000);
 
 // 1. Get all supported Casino tables
 router.get('/tables', (req, res) => {
@@ -303,8 +362,8 @@ router.get('/player/:eventId', async (req, res) => {
         let html = await pageRes.text();
         html = transformPlayerHtml(html, watchUrl, false);
 
-        // Cache player HTML for 25 seconds
-        playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + 25000 });
+        // Cache player HTML for 6 minutes (serves millions of users directly from RAM in 1ms)
+        playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + CASINO_CACHE_TTL });
         return html;
       } catch (err) {
         console.error(`[Casino Player Error] Attempt ${attempt}:`, err.message);
@@ -419,9 +478,24 @@ function getPatchedPlayerJs() {
   text = text.replace(/t\.devtoolsGuard/g, 'false');
   text = text.replace(/devtoolsGuard:!0/g, 'devtoolsGuard:!1');
 
-  // Neutralize session killer ("The dealer has closed your session")
+  // 1. Neutralize Network Lost screen blur
+  text = text.replace(/showNetworkLostEffects\(\)\{/g, 'showNetworkLostEffects(){return;');
+
+  // 2. Infinite retry on table startup instead of giving up after 5 tries
+  text = text.replace(
+    /for\(let t=0;t<5&&!p\.ready&&!p\.ended;t\+\+\)t&&await new Promise\(e=>setTimeout\(e,3e3\)\),await p\.ping\(!0\);/g,
+    'for(let t=0;!p.ready&&!p.ended;t++){if(t>0)await new Promise(e=>setTimeout(e,2000));try{await p.ping(!0)}catch(e){}}'
+  );
+
+  // 3. Neutralize 'The table didn\'t open. Please refresh the page.' (variable l)
+  text = text.replace(/g\.say\(l,!0\)/g, '(function(){console.warn("[Auto-Retrying Stream]");return false;})()');
+
+  // 4. Neutralize session killer ("The dealer has closed your session")
   text = text.replace(/403===a\.status/g, 'false');
   text = text.replace(/g\.say\(a,!0\)/g, '(function(){console.warn("[Session Suppressed]");return false;})()');
+
+  // 5. Neutralize visibility killswitch
+  text = text.replace(/"visibilitychange"/g, '"disabled_visibility"');
 
   _cachedPatchedPlayerJs = text;
   return text;

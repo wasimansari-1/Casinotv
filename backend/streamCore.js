@@ -100,7 +100,7 @@ function getProxyAgent(proxyUrlStr) {
   return agent;
 }
 
-function proxyFetch(urlStr, options = {}, redirectCount = 0) {
+function proxyFetch(urlStr, options = {}, redirectCount = 0, retryCount = 0) {
   if (redirectCount > 5) return Promise.reject(new Error('Too many redirects'));
 
   return new Promise((resolve, reject) => {
@@ -174,7 +174,21 @@ function proxyFetch(urlStr, options = {}, redirectCount = 0) {
       req.on('timeout', () => {
         req.destroy(new Error('Request timed out'));
       });
-      req.on('error', reject);
+      req.on('error', (err) => {
+        const isTransient = err.message && (
+          err.message.includes('502') || 
+          err.message.includes('503') || 
+          err.message.includes('ECONNRESET') || 
+          err.message.includes('socket hang up')
+        );
+        if (isTransient && retryCount < 3) {
+          const delay = 200 * Math.pow(2, retryCount);
+          return setTimeout(() => {
+            resolve(proxyFetch(urlStr, options, redirectCount, retryCount + 1));
+          }, delay);
+        }
+        reject(err);
+      });
       if (body) req.write(body);
       req.end();
     } catch (err) {
