@@ -97,8 +97,8 @@ async function fetchFullTsSegment(targetUrl) {
   return task;
 }
 
-// Memory cache for modified player HTML (TTL 30 Minutes) to eliminate redundant roundtrips & serve 1cr users from RAM
-const CASINO_CACHE_TTL = 30 * 60 * 1000;
+// Memory cache for modified player HTML (TTL 20 Seconds) to deduplicate rapid clicks while ensuring live WebRTC sid freshness
+const CASINO_CACHE_TTL = 20 * 1000;
 const playerCache = new Map();
 const inFlightPlayers = new Map();
 const pingCache = new Map();
@@ -390,23 +390,43 @@ function transformPlayerHtml(html, watchUrl, isSports = false, eventId = '', pro
   `;
   const spinnerCss = `
     <style>
-      .loading {
-        position: absolute !important;
+      #loading, .loading, div#loading {
+        position: fixed !important;
         inset: 0 !important;
+        top: 0 !important;
+        left: 0 !important;
+        right: 0 !important;
+        bottom: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+        max-width: none !important;
+        max-height: none !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        transform: none !important;
         background-color: #07090e !important;
         background-image: url("/api/stream/player-assets/loader.gif") !important;
         background-repeat: no-repeat !important;
         background-position: center center !important;
-        background-size: 72px 72px !important;
-        z-index: 9999 !important;
-        display: block !important;
-        opacity: 1 !important;
+        background-size: 140px auto !important;
+        z-index: 99999 !important;
         pointer-events: none !important;
         transition: opacity 0.4s ease-out !important;
       }
-      .loading.fade-out {
-        opacity: 0 !important;
+      #loading.fade-out, .loading.fade-out, div#loading.fade-out,
+      #loading[style*="display: none"], .loading[style*="display: none"],
+      #loading[style*="display:none"], .loading[style*="display:none"] {
         display: none !important;
+        opacity: 0 !important;
+        visibility: hidden !important;
+      }
+      #blockImg, [id="blockImg"] {
+        display: none !important;
+        opacity: 0 !important;
+        visibility: hidden !important;
+        pointer-events: none !important;
+        width: 0 !important;
+        height: 0 !important;
       }
     </style>
   `;

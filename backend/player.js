@@ -118,20 +118,7 @@
           e && !t && (this.tempTimer = setTimeout(() => this.say(""), 3e3)));
       },
       showBlockImage(e) {
-        let t = document.getElementById("blockImg");
-        (t ||
-          ((t = document.createElement("img")),
-          (t.id = "blockImg"),
-          (t.alt = ""),
-          (t.style.cssText =
-            "position:fixed;inset:0;width:100%;height:100%;object-fit:contain;background:#000;z-index:2147483647"),
-          (t.onerror = () => {
-            try {
-              t.remove();
-            } catch (e) {}
-          }),
-          document.body.appendChild(t)),
-          (t.src = e));
+        return;
       },
       clearSticky(e) {
         (e && this.sticky !== e) || ((this.sticky = ""), this.say(""));
