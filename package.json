@@ -1,0 +1,30 @@
+{
+  "name": "casinotv",
+  "version": "1.0.0",
+  "description": "Zero-latency live casino TV stream proxy and multi-table MERN hub",
+  "main": "backend/server.js",
+  "scripts": {
+    "start": "node backend/server.js",
+    "build": "npm run build --prefix frontend",
+    "dev:backend": "node --watch backend/server.js",
+    "dev:frontend": "npm run dev --prefix frontend",
+    "dev": "npm run start"
+  },
+  "keywords": [
+    "casino-stream",
+    "webrtc-proxy",
+    "live-dealer",
+    "teen-patti",
+    "dragon-tiger",
+    "react",
+    "tailwind"
+  ],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "undici": "^8.12.4"
+  }
+}

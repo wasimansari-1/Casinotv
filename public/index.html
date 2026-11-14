@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Casino TV Hub | Zero-Latency Stream Proxy</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #0a0b12;
+      --card-bg: rgba(18, 20, 32, 0.75);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --accent: #f59e0b;
+      --accent-glow: rgba(245, 158, 11, 0.35);
+      --purple: #8b5cf6;
+      --green: #10b981;
+      --red: #ef4444;
+      --text-main: #f3f4f6;
+      --text-muted: #9ca3af;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      font-family: 'Outfit', sans-serif;
+    }
+
+    body {
+      background: var(--bg-dark);
+      color: var(--text-main);
+      min-height: 100vh;
+      overflow-x: hidden;
+      background-image: 
+        radial-gradient(circle at 10% 20%, rgba(139, 92, 246, 0.12) 0%, transparent 40%),
+        radial-gradient(circle at 90% 80%, rgba(245, 158, 11, 0.1) 0%, transparent 40%);
+    }
+
+    /* Header */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 28px;
+      background: rgba(10, 11, 18, 0.85);
+      backdrop-filter: blur(16px);
+      border-bottom: 1px solid var(--card-border);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-logo {
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      background: linear-gradient(135deg, #f59e0b, #ec4899);
+      display: grid;
+      place-items: center;
+      font-size: 20px;
+      box-shadow: 0 0 20px var(--accent-glow);
+    }
+
+    .brand-title {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      background: linear-gradient(to right, #fff, #d1d5db);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .brand-subtitle {
+      font-size: 11px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .view-toggle {
+      display: flex;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 3px;
+    }
+
+    .view-btn {
+      padding: 6px 14px;
+      border-radius: 6px;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .view-btn.active {
+      background: var(--accent);
+      color: #000;
+      font-weight: 600;
+      box-shadow: 0 0 12px var(--accent-glow);
+    }
+
+    .live-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      border-radius: 99px;
+      color: var(--green);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .live-dot {
+      width: 7px;
+      height: 7px;
+      background: var(--green);
+      border-radius: 50%;
+      box-shadow: 0 0 8px var(--green);
+      animation: pulse 1.6s infinite ease-in-out;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.4; transform: scale(1.3); }
+    }
+
+    /* Main Container */
+    main {
+      max-width: 1560px;
+      margin: 0 auto;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    /* Category Filter Tabs */
+    .filter-bar {
+      display: flex;
+      gap: 10px;
+      overflow-x: auto;
+      padding-bottom: 6px;
+    }
+
+    .filter-chip {
+      padding: 8px 18px;
+      border-radius: 99px;
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      color: var(--text-muted);
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.2s;
+    }
+
+    .filter-chip:hover {
+      border-color: rgba(255, 255, 255, 0.2);
+      color: #fff;
+    }
+
+    .filter-chip.active {
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.2), rgba(139, 92, 246, 0.2));
+      border-color: var(--accent);
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    /* Single Theater TV Layout */
+    .theater-layout {
+      display: grid;
+      grid-template-columns: 1fr 360px;
+      gap: 24px;
+    }
+
+    @media (max-width: 1024px) {
+      .theater-layout {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .player-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 16px;
+      overflow: hidden;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .player-header {
+      padding: 14px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(255, 255, 255, 0.03);
+      border-bottom: 1px solid var(--card-border);
+    }
+
+    .player-title-info {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .player-game-name {
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .player-game-id {
+      font-size: 12px;
+      color: var(--text-muted);
+      background: rgba(255, 255, 255, 0.06);
+      padding: 2px 8px;
+      border-radius: 4px;
+    }
+
+    .player-controls {
+      display: flex;
+      gap: 8px;
+    }
+
+    .control-btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--card-border);
+      color: var(--text-main);
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+    }
+
+    .control-btn:hover {
+      background: rgba(255, 255, 255, 0.16);
+      border-color: rgba(255, 255, 255, 0.3);
+    }
+
+    /* 16:9 Video Canvas Frame */
+    .video-viewport {
+      position: relative;
+      width: 100%;
+      padding-top: 56.25%; /* 16:9 ratio */
+      background: #000;
+      overflow: hidden;
+    }
+
+    .video-viewport iframe {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      border: none;
+    }
+
+    /* Embed Code Bar */
+    .embed-snippet-bar {
+      padding: 12px 20px;
+      background: rgba(0, 0, 0, 0.4);
+      border-top: 1px solid var(--card-border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      font-size: 12px;
+    }
+
+    .embed-code-text {
+      color: #38bdf8;
+      font-family: monospace;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 80%;
+    }
+
+    .copy-btn {
+      background: var(--purple);
+      color: #fff;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    /* Sidebar Table Switcher */
+    .sidebar-tables {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-height: 640px;
+      overflow-y: auto;
+      padding-right: 4px;
+    }
+
+    .sidebar-tables::-webkit-scrollbar {
+      width: 6px;
+    }
+    .sidebar-tables::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 4px;
+    }
+
+    .table-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px;
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .table-item:hover {
+      background: rgba(255, 255, 255, 0.06);
+      transform: translateX(3px);
+    }
+
+    .table-item.active {
+      border-color: var(--accent);
+      background: rgba(245, 158, 11, 0.1);
+    }
+
+    .table-item-name {
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .table-item-meta {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    .table-item-stream-badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      background: rgba(139, 92, 246, 0.2);
+      border: 1px solid rgba(139, 92, 246, 0.4);
+      color: #c4b5fd;
+      border-radius: 6px;
+      font-weight: 600;
+    }
+
+    /* Multi Grid TV View */
+    .multi-grid-layout {
+      display: none;
+      grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
+      gap: 20px;
+    }
+
+    @media (max-width: 600px) {
+      .multi-grid-layout {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .grid-tv-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 14px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .grid-tv-header {
+      padding: 10px 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: rgba(255, 255, 255, 0.04);
+      font-size: 13px;
+      font-weight: 600;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top Navigation Bar -->
+  <header>
+    <div class="brand">
+      <div class="brand-logo">♠️</div>
+      <div>
+        <div class="brand-title">CasinoTV Stream Engine</div>
+        <div class="brand-subtitle">Zero-Latency WebRTC & H5Live Proxy Hub</div>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <div class="live-badge">
+        <span class="live-dot"></span>
+        <span id="activeCount">15 Tables Live</span>
+      </div>
+
+      <div class="view-toggle">
+        <button class="view-btn active" id="singleViewBtn" onclick="switchView('single')">Single TV</button>
+        <button class="view-btn" id="multiViewBtn" onclick="switchView('multi')">Multi-TV Grid</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main View Container -->
+  <main>
+    <!-- Category Filter Chips -->
+    <div class="filter-bar" id="filterBar">
+      <button class="filter-chip active" onclick="filterCategory('ALL')">All Games (15)</button>
+      <button class="filter-chip" onclick="filterCategory('Teen Patti')">Teen Patti</button>
+      <button class="filter-chip" onclick="filterCategory('Dragon Tiger')">Dragon Tiger</button>
+      <button class="filter-chip" onclick="filterCategory('Lucky 7')">Lucky 7</button>
+      <button class="filter-chip" onclick="filterCategory('Andar Bahar')">Andar Bahar</button>
+      <button class="filter-chip" onclick="filterCategory('Baccarat')">Baccarat</button>
+      <button class="filter-chip" onclick="filterCategory('Cards')">Cards</button>
+      <button class="filter-chip" onclick="filterCategory('Poker')">Poker</button>
+    </div>
+
+    <!-- 1. Theater / Single TV Mode -->
+    <div class="theater-layout" id="theaterSection">
+      <!-- Player Main Card -->
+      <div class="player-card">
+        <div class="player-header">
+          <div class="player-title-info">
+            <span class="player-game-name" id="selectedGameTitle">20-20 Teen Patti</span>
+            <span class="player-game-id" id="selectedGameId">99.0010</span>
+            <span class="table-item-stream-badge" id="selectedStreamId">GAME10</span>
+          </div>
+
+          <div class="player-controls">
+            <button class="control-btn" onclick="reloadStream()">
+              🔄 Reload Feed
+            </button>
+            <button class="control-btn" onclick="toggleFullscreen()">
+              ⛶ Fullscreen
+            </button>
+          </div>
+        </div>
+
+        <!-- 16:9 Video Canvas -->
+        <div class="video-viewport" id="viewportContainer">
+          <iframe 
+            id="mainStreamFrame" 
+            src="/api/stream/player/99.0010" 
+            title="Live Casino TV"
+            allow="autoplay; fullscreen; unload"
+          ></iframe>
+        </div>
+
+        <!-- Embed Code Bar -->
+        <div class="embed-snippet-bar">
+          <span style="color: var(--text-muted);">Embed Iframe:</span>
+          <span class="embed-code-text" id="embedCodeSnippet">&lt;iframe src="/api/stream/player/99.0010" allow="autoplay; fullscreen; unload"&gt;&lt;/iframe&gt;</span>
+          <button class="copy-btn" onclick="copyEmbedCode()">Copy Code</button>
+        </div>
+      </div>
+
+      <!-- Right Column: Table Switcher List -->
+      <div class="sidebar-tables" id="sidebarList">
+        <!-- Injected via JavaScript -->
+      </div>
+    </div>
+
+    <!-- 2. Multi-TV Grid Mode -->
+    <div class="multi-grid-layout" id="multiGridSection">
+      <!-- Injected via JavaScript -->
+    </div>
+  </main>
+
+  <script>
+    let currentTables = [];
+    let currentCategory = 'ALL';
+    let currentEventId = '99.0010';
+    let currentView = 'single';
+
+    async function loadTables() {
+      try {
+        const res = await fetch('/api/stream/tables');
+        const data = await res.json();
+        if (data.tables) {
+          currentTables = data.tables;
+          document.getElementById('activeCount').innerText = `${currentTables.length} Tables Live`;
+          renderSidebar();
+          renderMultiGrid();
+        }
+      } catch (err) {
+        console.error('Failed to load tables:', err);
+      }
+    }
+
+    function renderSidebar() {
+      const container = document.getElementById('sidebarList');
+      container.innerHTML = '';
+
+      const filtered = currentCategory === 'ALL' 
+        ? currentTables 
+        : currentTables.filter(t => t.category === currentCategory);
+
+      filtered.forEach(table => {
+        const div = document.createElement('div');
+        div.className = `table-item ${table.id === currentEventId ? 'active' : ''}`;
+        div.onclick = () => selectGame(table.id);
+        div.innerHTML = `
+          <div>
+            <div class="table-item-name">${table.name}</div>
+            <div class="table-item-meta">${table.category} • ID: ${table.id}</div>
+          </div>
+          <div class="table-item-stream-badge">${table.streamId}</div>
+        `;
+        container.appendChild(div);
+      });
+    }
+
+    function selectGame(eventId) {
+      currentEventId = eventId;
+      const table = currentTables.find(t => t.id === eventId);
+      if (!table) return;
+
+      document.getElementById('selectedGameTitle').innerText = table.name;
+      document.getElementById('selectedGameId').innerText = table.id;
+      document.getElementById('selectedStreamId').innerText = table.streamId;
+
+      const iframe = document.getElementById('mainStreamFrame');
+      iframe.src = `/api/stream/player/${eventId}`;
+
+      const fullSnippet = `<iframe src="${window.location.origin}/api/stream/player/${eventId}" width="100%" height="100%" frameborder="0" allow="autoplay; fullscreen; unload"></iframe>`;
+      document.getElementById('embedCodeSnippet').innerText = fullSnippet;
+
+      renderSidebar();
+    }
+
+    function reloadStream() {
+      const iframe = document.getElementById('mainStreamFrame');
+      iframe.src = `/api/stream/player/${currentEventId}?t=${Date.now()}`;
+    }
+
+    function toggleFullscreen() {
+      const el = document.getElementById('viewportContainer');
+      if (!document.fullscreenElement) {
+        el.requestFullscreen().catch(err => alert(err.message));
+      } else {
+        document.exitFullscreen();
+      }
+    }
+
+    function copyEmbedCode() {
+      const text = document.getElementById('embedCodeSnippet').innerText;
+      navigator.clipboard.writeText(text).then(() => {
+        alert('Iframe embed code copied to clipboard!');
+      });
+    }
+
+    function filterCategory(cat) {
+      currentCategory = cat;
+      document.querySelectorAll('.filter-chip').forEach(el => {
+        if (el.innerText.includes(cat) || (cat === 'ALL' && el.innerText.includes('All'))) {
+          el.classList.add('active');
+        } else {
+          el.classList.remove('active');
+        }
+      });
+      renderSidebar();
+      renderMultiGrid();
+    }
+
+    function switchView(view) {
+      currentView = view;
+      const singleBtn = document.getElementById('singleViewBtn');
+      const multiBtn = document.getElementById('multiViewBtn');
+      const theaterSec = document.getElementById('theaterSection');
+      const multiSec = document.getElementById('multiGridSection');
+
+      if (view === 'single') {
+        singleBtn.classList.add('active');
+        multiBtn.classList.remove('active');
+        theaterSec.style.display = 'grid';
+        multiSec.style.display = 'none';
+      } else {
+        singleBtn.classList.remove('active');
+        multiBtn.classList.add('active');
+        theaterSec.style.display = 'none';
+        multiSec.style.display = 'grid';
+      }
+    }
+
+    function renderMultiGrid() {
+      const container = document.getElementById('multiGridSection');
+      container.innerHTML = '';
+
+      const filtered = currentCategory === 'ALL' 
+        ? currentTables 
+        : currentTables.filter(t => t.category === currentCategory);
+
+      // Render up to 6 tables in multi grid
+      filtered.slice(0, 6).forEach(table => {
+        const card = document.createElement('div');
+        card.className = 'grid-tv-card';
+        card.innerHTML = `
+          <div class="grid-tv-header">
+            <span>${table.name}</span>
+            <span class="table-item-stream-badge">${table.streamId}</span>
+          </div>
+          <div class="video-viewport">
+            <iframe 
+              src="/api/stream/player/${table.id}" 
+              title="${table.name}"
+              allow="autoplay; fullscreen; unload"
+            ></iframe>
+          </div>
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    // Initialize
+    loadTables();
+  </script>
+</body>
+</html>
+
