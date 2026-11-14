@@ -30,6 +30,19 @@ if (fs.existsSync(envPath)) {
 const proxyUrl = process.env.UPSTREAM_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
 if (proxyUrl) {
   console.log(`[Proxy] Upstream proxy configured: ${proxyUrl.replace(/:\/\/.*@/, '://***:***@')}`);
+  setTimeout(() => {
+    try {
+      const { proxyFetch } = require('./streamCore');
+      proxyFetch('https://ipinfo.io/json', { timeout: 8000 })
+        .then(r => r.json())
+        .then(info => {
+          console.log(`[Proxy Geo Verified] Outbound IP: ${info.ip}, Country: ${info.country}, Region: ${info.region}, City: ${info.city}, ISP: ${info.org}`);
+        })
+        .catch(err => {
+          console.warn(`[Proxy Geo Alert] Verification request:`, err.message);
+        });
+    } catch (_) {}
+  }, 100);
 } else {
   console.log(`[Proxy] No UPSTREAM_PROXY_URL configured. Running on direct host IP.`);
 }

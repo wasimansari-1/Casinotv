@@ -9,6 +9,16 @@ const { URL } = require('url');
 let _cachedAgent = null;
 let _cachedProxyUrl = null;
 
+function resetProxyAgent() {
+  if (_cachedAgent) {
+    try {
+      _cachedAgent.destroy();
+    } catch (_) {}
+    _cachedAgent = null;
+    _cachedProxyUrl = null;
+  }
+}
+
 function getProxyAgent(proxyUrlStr) {
   if (_cachedAgent && _cachedProxyUrl === proxyUrlStr) {
     return _cachedAgent;
@@ -335,6 +345,13 @@ async function getWatchUrl(eventId, retries = 3) {
               return { url: data.data.url, provider: provider.name, origin: provider.casinoBase };
             }
 
+            if (data?.meta?.message === 'viewer_ip_blocked' || res.status === 403) {
+              console.warn(`[WatchLink] IP blocked on ${provider.name}. Resetting proxy connection to rotate fresh IP...`);
+              resetProxyAgent();
+              await new Promise(r => setTimeout(r, 400));
+              continue;
+            }
+
             console.warn(`[WatchLink] ${provider.name} attempt ${attempt} response:`, data?.meta?.message || data);
             await new Promise(r => setTimeout(r, 250));
           } catch (err) {
@@ -471,5 +488,6 @@ module.exports = {
   PROVIDERS,
   UA,
   proxyFetch,
-  getProxyAgent
+  getProxyAgent,
+  resetProxyAgent
 };
