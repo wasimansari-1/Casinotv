@@ -490,12 +490,45 @@ router.get('/sports/player/:eventId', async (req, res) => {
 
       return res.send(html);
     } catch (err) {
-      console.error(`[Sports Player Error] Attempt ${attempt}:`, err.message);
-      if (attempt === 1) {
+      const isNoTv = err.message && err.message.includes('No live TV coverage');
+      if (isNoTv) {
+        console.log(`[Sports Player] Notice for match ${eventId}: No TV broadcast feed currently available upstream`);
+      } else {
+        console.error(`[Sports Player Error] Attempt ${attempt}:`, err.message);
+      }
+
+      if (attempt === 1 && !isNoTv) {
         await new Promise(r => setTimeout(r, 400));
         continue;
       }
-      return res.status(500).send(`Sports TV Error: ${err.message}`);
+
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Permissions-Policy', 'unload=*');
+      res.removeHeader('X-Frame-Options');
+      res.removeHeader('Content-Security-Policy');
+
+      return res.status(200).send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <style>
+            body { margin: 0; background: #07090e; color: #94a3b8; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; text-align: center; }
+            .icon { font-size: 40px; margin-bottom: 12px; }
+            h2 { font-size: 16px; font-weight: 600; color: #f1f5f9; margin: 0 0 6px; }
+            p { font-size: 12px; color: #64748b; margin: 0; max-width: 280px; line-height: 1.4; }
+          </style>
+        </head>
+        <body>
+          <div class="icon">📡</div>
+          <h2>Live TV Feed Unavailable</h2>
+          <p>This match does not have an active live satellite TV broadcast right now or the match has concluded.</p>
+        </body>
+        </html>
+      `);
     }
   }
 });
