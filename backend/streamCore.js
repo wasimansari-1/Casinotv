@@ -375,7 +375,7 @@ async function getWatchUrl(eventId, retries = 3) {
             const res = await new Promise((resolve, reject) => {
               watchLinkQueue = watchLinkQueue.then(async () => {
                 try {
-                  await new Promise(r => setTimeout(r, 120));
+                  await new Promise(r => setTimeout(r, 350));
                   const r = await proxyFetch(`${provider.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`, {
                     method: 'POST',
                     headers: {
@@ -410,10 +410,9 @@ async function getWatchUrl(eventId, retries = 3) {
             }
 
             if (data?.meta?.message === 'viewer_ip_blocked' || res.status === 403) {
-              console.warn(`[WatchLink] IP blocked on ${provider.name}. Rotating sticky residential proxy session...`);
+              console.warn(`[WatchLink] IP blocked on ${provider.name}. Rotating session and failing over immediately to next provider...`);
               rotateStickySession();
-              await new Promise(r => setTimeout(r, 400));
-              continue;
+              break;
             }
 
             console.warn(`[WatchLink] ${provider.name} attempt ${attempt} response:`, data?.meta?.message || data);

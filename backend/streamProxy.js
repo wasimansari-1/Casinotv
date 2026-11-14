@@ -94,8 +94,8 @@ async function fetchFullTsSegment(targetUrl) {
   return task;
 }
 
-// Memory cache for modified player HTML (TTL 6 Minutes) to eliminate redundant roundtrips & serve 1cr users from RAM
-const CASINO_CACHE_TTL = 360 * 1000;
+// Memory cache for modified player HTML (TTL 30 Minutes) to eliminate redundant roundtrips & serve 1cr users from RAM
+const CASINO_CACHE_TTL = 30 * 60 * 1000;
 const playerCache = new Map();
 const inFlightPlayers = new Map();
 const pingCache = new Map();
@@ -163,10 +163,10 @@ async function warmAllCasinoTables() {
     const tableIds = Object.keys(GAME_MAP);
     for (const id of tableIds) {
       const cached = playerCache.get(`casino_${id}`);
-      if (!cached || Date.now() > (cached.expiresAt - 60000)) {
+      if (!cached || Date.now() > (cached.expiresAt - 120000)) {
         await warmCasinoTable(id);
-        // Stagger by 350ms to prevent proxy 502 bursts
-        await new Promise(r => setTimeout(r, 350));
+        // Stagger by 1200ms to eliminate Nice444 rate limits & proxy drops
+        await new Promise(r => setTimeout(r, 1200));
       }
     }
   } finally {
@@ -174,12 +174,12 @@ async function warmAllCasinoTables() {
   }
 }
 
-// Start warmer 4s after boot, recurring every 3 minutes
+// Start warmer 4s after boot, recurring every 12 minutes
 setTimeout(() => {
   warmAllCasinoTables().catch(() => {});
   setInterval(() => {
     warmAllCasinoTables().catch(() => {});
-  }, 180 * 1000);
+  }, 12 * 60 * 1000);
 }, 4000);
 
 // 1. Get all supported Casino tables
@@ -257,7 +257,8 @@ function transformPlayerHtml(html, watchUrl, isSports = false, eventId = '') {
         devtoolsRedirect: "",
         blockedUrl: "",
         home: "", // Neutralize home domain validation
-        webrtcTimeout: 20,
+        webrtcTimeout: 30,
+        freezeSeconds: 120, // 2 minutes instead of 5s - eliminates false freeze reloads & stutter
         frameAllow: {
           enforce: false,
           outer: { apps: false, hosts: [], sites: [] },
@@ -568,6 +569,9 @@ function getPatchedPlayerJs() {
 
   // 5. Neutralize visibility killswitch
   text = text.replace(/"visibilitychange"/g, '"disabled_visibility"');
+
+  // 6. Neutralize aggressive 5-second freeze detector (eliminates stutter, buffering, and loops)
+  text = text.replace(/e\.reconnect\("frozen"\)/g, '(function(){console.warn("[Stream Jitter Handled]");})()');
 
   _cachedPatchedPlayerJs = text;
   return text;
