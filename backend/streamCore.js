@@ -8,7 +8,7 @@ const { URL } = require('url');
 
 let _cachedAgent = null;
 let _cachedProxyUrl = null;
-let _currentStickySession = Math.floor(Math.random() * 40) + 1;
+let _currentStickySession = 1; // Locked to Session #1 (Stable Indian Residential IP)
 
 function getEffectiveProxyUrl(proxyUrlStr) {
   if (!proxyUrlStr) return null;
@@ -35,8 +35,8 @@ function resetProxyAgent() {
 let _lastRotateTime = 0;
 function rotateStickySession(reason = '') {
   const now = Date.now();
-  // Cooldown: Never rotate more than once every 25 seconds to keep IPs rock-solid stable
-  if (now - _lastRotateTime < 25000) {
+  // Cooldown: Never rotate more than once every 60 seconds to keep IPs rock-solid stable
+  if (now - _lastRotateTime < 60000) {
     return;
   }
   _lastRotateTime = now;
@@ -404,12 +404,8 @@ async function getWatchUrl(eventId, retries = 2) {
               return { url: data.data.url, provider: provider.name, origin: provider.base };
             }
 
-            if (data?.meta?.message === 'viewer_ip_blocked' || res.status === 403) {
-              console.warn(`[WatchLink] IP blocked on ${provider.name} (session #${_currentStickySession}). Failing over to next provider...`);
-              if (provKey === 'nice444') {
-                _nice444BlockedUntil = Date.now() + 10 * 60 * 1000;
-              }
-              rotateStickySession(`IP blocked on ${provider.name}`);
+            if (data?.meta?.message === 'viewer_ip_blocked' || res.status === 403 || res.status === 429) {
+              console.warn(`[WatchLink] Provider ${provider.name} rate-limited or blocked (session #${_currentStickySession}). Failing over to next provider...`);
               break;
             }
 
@@ -510,8 +506,15 @@ async function getLiveSportsEvents() {
       const token = await getAuthToken(provKey);
       const res = await proxyFetch(`${provider.base}/api/exchange/market/matchodds/allEventsList`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({})
+        headers: { 
+          'Content-Type': 'application/json', 
+          'Authorization': `Bearer ${token}`,
+          'Origin': provider.base,
+          'Referer': `${provider.base}/`,
+          'User-Agent': UA
+        },
+        body: JSON.stringify({}),
+        timeout: 8000
       });
 
       const data = await res.json();

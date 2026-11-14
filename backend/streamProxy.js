@@ -99,18 +99,19 @@ const CASINO_CACHE_TTL = 30 * 60 * 1000;
 const playerCache = new Map();
 const inFlightPlayers = new Map();
 const pingCache = new Map();
+const tableTokenCache = new Map(); // eventId -> { token, wsUrl, streamId, expiresAt }
 
 // Helper: Pre-warm a single casino table in memory
 async function warmCasinoTable(eventId) {
   try {
     const watchData = await getWatchUrl(eventId);
     const watchUrl = typeof watchData === 'string' ? watchData : watchData.url;
-    const referer = watchData.origin ? (watchData.origin.endsWith('/') ? watchData.origin : `${watchData.origin}/`) : 'https://nice444.com/';
+    const providerOrigin = watchData.origin ? (watchData.origin.endsWith('/') ? watchData.origin : `${watchData.origin}/`) : 'https://nice444.com/';
 
     const pageRes = await proxyFetch(watchUrl, {
       headers: {
         'User-Agent': UA,
-        'Referer': referer,
+        'Referer': providerOrigin,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'Sec-Fetch-Dest': 'iframe',
         'Sec-Fetch-Mode': 'navigate',
@@ -120,11 +121,11 @@ async function warmCasinoTable(eventId) {
 
     if (pageRes.ok) {
       let html = await pageRes.text();
-      html = transformPlayerHtml(html, watchUrl, false, eventId);
+      html = transformPlayerHtml(html, watchUrl, false, eventId, providerOrigin);
       playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + CASINO_CACHE_TTL });
       console.log(`[Stream Warmer] Pre-warmed & cached table ${eventId} in memory`);
 
-      // Pre-warm ping handshake for instant 0ms start
+      // Pre-warm ping handshake to acquire and cache the valid JWT token in tableTokenCache!
       const cfgMatch = html.match(/<script type="application\/json" id="cfg">([^<]+)<\/script>/);
       if (cfgMatch) {
         try {
@@ -133,16 +134,38 @@ async function warmCasinoTable(eventId) {
             ? decodeURIComponent(new URL(cfg.pingUrl, 'http://localhost').searchParams.get('target'))
             : cfg.pingUrl;
           if (targetUrl) {
-            proxyFetch(targetUrl, {
+            const pingRes = await proxyFetch(targetUrl, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'User-Agent': UA },
-              body: JSON.stringify({ sid: cfg.sid, mode: 'connecting', init: true, tz: 'Asia/Kolkata', tzo: 330 })
-            }).then(r => r.json()).then(data => {
-              if (data && data.wsUrl && data.streamId) {
-                pingCache.set(targetUrl, { data, timestamp: Date.now() });
-                console.log(`[Stream Warmer] Pre-warmed ping handshake for table ${eventId} (${data.streamId})`);
-              }
-            }).catch(() => {});
+              headers: { 
+                'Content-Type': 'application/json', 
+                'Origin': new URL(targetUrl).origin,
+                'Referer': watchUrl,
+                'User-Agent': UA,
+                'Accept': '*/*',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin'
+              },
+              body: JSON.stringify({ 
+                sid: cfg.sid, 
+                mode: 'connecting', 
+                init: true, 
+                page: providerOrigin,
+                tz: 'Asia/Kolkata', 
+                tzo: 330 
+              })
+            });
+            const pingData = await pingRes.json();
+            if (pingData && pingData.token && pingData.wsUrl) {
+              tableTokenCache.set(eventId, {
+                token: pingData.token,
+                wsUrl: pingData.wsUrl,
+                streamId: pingData.streamId || (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) || 'GAME10',
+                expiresAt: Date.now() + 15 * 60 * 1000
+              });
+              pingCache.set(targetUrl, { data: pingData, timestamp: Date.now() });
+              console.log(`[Stream Warmer] Pre-warmed valid token & handshake for table ${eventId} (${pingData.streamId})`);
+            }
           }
         } catch (_) {}
       }
@@ -160,27 +183,24 @@ async function warmAllCasinoTables() {
   if (_isWarming) return;
   _isWarming = true;
   try {
-    const tableIds = Object.keys(GAME_MAP);
-    for (const id of tableIds) {
-      const cached = playerCache.get(`casino_${id}`);
-      if (!cached || Date.now() > (cached.expiresAt - 120000)) {
-        await warmCasinoTable(id);
-        // Stagger by 1200ms to eliminate Nice444 rate limits & proxy drops
-        await new Promise(r => setTimeout(r, 1200));
-      }
-    }
+    // Only pre-warm the primary table (20-20 Teen Patti) on startup to prevent provider rate limits
+    await warmCasinoTable('99.0010');
+    // 5 seconds later, warm Lucky 7
+    setTimeout(() => {
+      warmCasinoTable('99.0030').catch(() => {});
+    }, 5000);
   } finally {
     _isWarming = false;
   }
 }
 
-// Start warmer 4s after boot, recurring every 12 minutes
+// Start warmer 3s after boot, recurring every 15 minutes for the top tables
 setTimeout(() => {
   warmAllCasinoTables().catch(() => {});
   setInterval(() => {
     warmAllCasinoTables().catch(() => {});
-  }, 12 * 60 * 1000);
-}, 4000);
+  }, 15 * 60 * 1000);
+}, 3000);
 
 // 1. Get all supported Casino tables
 router.get('/tables', (req, res) => {
@@ -209,7 +229,7 @@ router.get('/sports/events', async (req, res) => {
 });
 
 // Helper: Transform upstream player HTML with full bypass patches & watermark removal
-function transformPlayerHtml(html, watchUrl, isSports = false, eventId = '') {
+function transformPlayerHtml(html, watchUrl, isSports = false, eventId = '', providerOrigin = '') {
   // 1. Completely remove watermark elements and foreign domain strings
   html = html.replace(/<div id="wm">[\s\S]*?<\/div>/gi, '');
   html = html.replace(/#wm\{[^}]*\}/gi, '#wm{display:none!important;opacity:0!important;visibility:hidden!important;pointer-events:none!important;height:0!important;width:0!important;}');
@@ -245,8 +265,8 @@ function transformPlayerHtml(html, watchUrl, isSports = false, eventId = '') {
         ? originalCfg.pingUrl
         : new URL(originalCfg.pingUrl, watchUrl).href;
 
-      // Construct proxied ping URL that routes through our backend with eventId context
-      const proxiedPingUrl = `/api/stream/proxy-ping?target=${encodeURIComponent(fullPingUrl)}&watchUrl=${encodeURIComponent(watchUrl)}&eventId=${encodeURIComponent(eventId)}`;
+      // Construct proxied ping URL that routes through our backend with eventId and provider origin context
+      const proxiedPingUrl = `/api/stream/proxy-ping?target=${encodeURIComponent(fullPingUrl)}&watchUrl=${encodeURIComponent(watchUrl)}&eventId=${encodeURIComponent(eventId)}&origin=${encodeURIComponent(providerOrigin)}`;
       
       const modifiedCfg = {
         ...originalCfg,
@@ -416,10 +436,55 @@ router.get('/player/:eventId', async (req, res) => {
         }
 
         let html = await pageRes.text();
-        html = transformPlayerHtml(html, watchUrl, false, eventId);
+        html = transformPlayerHtml(html, watchUrl, false, eventId, referer);
 
-        // Cache player HTML for 6 minutes (serves millions of users directly from RAM in 1ms)
+        // Cache player HTML for 30 minutes (serves millions of users directly from RAM in 1ms)
         playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + CASINO_CACHE_TTL });
+
+        // Trigger asynchronous background pre-warming of the ping token so it is ready in RAM
+        const cfgMatch = html.match(/<script type="application\/json" id="cfg">([^<]+)<\/script>/);
+        if (cfgMatch) {
+          try {
+            const cfg = JSON.parse(cfgMatch[1]);
+            const targetUrl = cfg.pingUrl.includes('target=') 
+              ? decodeURIComponent(new URL(cfg.pingUrl, 'http://localhost').searchParams.get('target'))
+              : cfg.pingUrl;
+            if (targetUrl) {
+              proxyFetch(targetUrl, {
+                method: 'POST',
+                headers: { 
+                  'Content-Type': 'application/json', 
+                  'Origin': new URL(targetUrl).origin,
+                  'Referer': watchUrl,
+                  'User-Agent': UA,
+                  'Accept': '*/*',
+                  'Sec-Fetch-Dest': 'empty',
+                  'Sec-Fetch-Mode': 'cors',
+                  'Sec-Fetch-Site': 'same-origin'
+                },
+                body: JSON.stringify({ 
+                  sid: cfg.sid, 
+                  mode: 'connecting', 
+                  init: true, 
+                  page: referer,
+                  tz: 'Asia/Kolkata', 
+                  tzo: 330 
+                })
+              }).then(r => r.json()).then(data => {
+                if (data && data.token && data.wsUrl) {
+                  tableTokenCache.set(eventId, {
+                    token: data.token,
+                    wsUrl: data.wsUrl,
+                    streamId: data.streamId || (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) || 'GAME10',
+                    expiresAt: Date.now() + 15 * 60 * 1000
+                  });
+                  pingCache.set(targetUrl, { data, timestamp: Date.now() });
+                }
+              }).catch(() => {});
+            }
+          } catch (_) {}
+        }
+
         return html;
       } catch (err) {
         console.error(`[Casino Player Error] Attempt ${attempt}:`, err.message);
@@ -711,31 +776,50 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 
+  const eventId = req.query.eventId || '';
+  const fallbackStreamId = (eventId && GAME_MAP[eventId]) ? GAME_MAP[eventId].streamId : 'GAME10';
+  const fallbackWsUrl = 'wss://livecdnplatin.com/UNIVERSE-GE/websocket';
+  const isInit = Boolean(req.body?.init);
+
+  // 1. FAST RAM PATH: If we already have a valid token in memory for this eventId, return it INSTANTLY (0ms!)
+  if (isInit && eventId && tableTokenCache.has(eventId)) {
+    const cached = tableTokenCache.get(eventId);
+    if (cached && (Date.now() < cached.expiresAt) && cached.token) {
+      return res.status(200).json({
+        ok: true,
+        state: "live",
+        streamId: cached.streamId || fallbackStreamId,
+        token: cached.token,
+        wsUrl: cached.wsUrl || fallbackWsUrl,
+        maintenance: null,
+        stop: false
+      });
+    }
+  }
+
   try {
-    const { target, watchUrl } = req.query;
+    const { target, watchUrl, origin } = req.query;
     if (!target) {
-      return res.status(200).json({ ok: true, state: "live" });
+      const fallbackToken = tableTokenCache.get(eventId)?.token || '';
+      return res.status(200).json({ ok: true, state: "live", streamId: fallbackStreamId, wsUrl: fallbackWsUrl, token: fallbackToken });
     }
 
     const targetUrl = decodeURIComponent(target);
     const decodedWatchUrl = watchUrl ? decodeURIComponent(watchUrl) : targetUrl;
     const targetOrigin = new URL(targetUrl).origin;
-    const isInit = Boolean(req.body?.init);
-    const eventId = req.query.eventId || '';
-    const fallbackStreamId = (eventId && GAME_MAP[eventId]) ? GAME_MAP[eventId].streamId : '';
-    const fallbackWsUrl = 'wss://livecdnplatin.com/UNIVERSE-GE/websocket';
+    const pageOrigin = origin ? decodeURIComponent(origin) : (decodedWatchUrl.includes('startexch') ? 'https://startexch99.com/' : 'https://nice444.com/');
 
-    // Instant RAM delivery for init pings (eliminates 1.5-3s loader wait time!)
+    // Check pingCache URL cache
     if (isInit && pingCache.has(targetUrl)) {
       const cachedPing = pingCache.get(targetUrl);
-      if (cachedPing && (Date.now() - cachedPing.timestamp < 180000)) {
+      if (cachedPing && cachedPing.data && (Date.now() - cachedPing.timestamp < 180000) && cachedPing.data.token) {
         return res.status(200).json(cachedPing.data);
       }
     }
 
     const payload = {
       ...req.body,
-      page: 'https://nice444.com/',
+      page: pageOrigin,
       tz: req.body?.tz || 'Asia/Kolkata',
       tzo: req.body?.tzo !== undefined ? req.body.tzo : 330
     };
@@ -752,17 +836,17 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
         'Sec-Fetch-Mode': 'cors',
         'Sec-Fetch-Site': 'same-origin'
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      timeout: 8000
     });
 
     let data;
     try {
       data = await upstreamRes.json();
     } catch (e) {
-      data = { ok: true, state: "live" };
+      data = null;
     }
 
-    // Suppress upstream session termination or false maintenance stops
     if (data && typeof data === 'object') {
       if (data.stop) data.stop = false;
       if (data.hlsUrl) {
@@ -771,32 +855,38 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
       if (isInit) {
         if (!data.streamId && fallbackStreamId) data.streamId = fallbackStreamId;
         if (!data.wsUrl) data.wsUrl = fallbackWsUrl;
-        if (data.wsUrl && data.streamId) {
+        if (data.token) {
+          tableTokenCache.set(eventId, {
+            token: data.token,
+            wsUrl: data.wsUrl,
+            streamId: data.streamId,
+            expiresAt: Date.now() + 15 * 60 * 1000
+          });
           pingCache.set(targetUrl, { data, timestamp: Date.now() });
         }
       }
+      return res.status(200).json(data);
     }
 
-    // Always return HTTP 200 so the client player never aborts the stream
-    const finalStatus = (upstreamRes.status >= 200 && upstreamRes.status < 300) ? upstreamRes.status : 200;
-    return res.status(finalStatus).json(data || { ok: true, state: "live", streamId: fallbackStreamId || "GAME30", wsUrl: fallbackWsUrl });
+    // Upstream returned non-JSON or error: Return cached token if available!
+    const cachedToken = (eventId && tableTokenCache.get(eventId)?.token) || '';
+    return res.status(200).json({
+      ok: true,
+      state: "live",
+      streamId: fallbackStreamId,
+      wsUrl: fallbackWsUrl,
+      token: cachedToken,
+      maintenance: null,
+      stop: false
+    });
   } catch (err) {
-    const { target, eventId } = req.query;
-    const fallbackStreamId = (eventId && GAME_MAP[eventId]) ? GAME_MAP[eventId].streamId : '';
-    const fallbackWsUrl = 'wss://livecdnplatin.com/UNIVERSE-GE/websocket';
-    if (target) {
-      const targetUrl = decodeURIComponent(target);
-      const cachedPing = pingCache.get(targetUrl);
-      if (cachedPing && cachedPing.data) {
-        return res.status(200).json(cachedPing.data);
-      }
-    }
-    // Ultra-resilient ping fallback: ALWAYS supply streamId & wsUrl so player.ready is true!
+    const cachedToken = (eventId && tableTokenCache.get(eventId)?.token) || '';
     return res.status(200).json({ 
       ok: true, 
       state: "live", 
-      streamId: fallbackStreamId || "GAME30", 
+      streamId: fallbackStreamId, 
       wsUrl: fallbackWsUrl, 
+      token: cachedToken,
       maintenance: null, 
       stop: false 
     });
