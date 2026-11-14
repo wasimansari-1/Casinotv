@@ -354,25 +354,21 @@ function transformPlayerHtml(html, watchUrl, isSports = false, eventId = '', pro
     <style>
       .loading {
         position: absolute !important;
-        top: 50% !important;
-        left: 50% !important;
-        transform: translate(-50%, -50%) !important;
-        z-index: 15 !important;
-        width: 56px !important;
-        height: 56px !important;
-        border: 4px solid rgba(255, 255, 255, 0.12) !important;
-        border-top-color: #d4228a !important;
-        border-radius: 50% !important;
-        animation: streamSpinner 0.8s linear infinite !important;
-        background: transparent !important;
+        inset: 0 !important;
+        background-color: #07090e !important;
+        background-image: url("/api/stream/player-assets/loader.gif") !important;
+        background-repeat: no-repeat !important;
+        background-position: center center !important;
+        background-size: 72px 72px !important;
+        z-index: 9999 !important;
+        display: block !important;
+        opacity: 1 !important;
         pointer-events: none !important;
+        transition: opacity 0.4s ease-out !important;
       }
       .loading.fade-out {
         opacity: 0 !important;
-        transition: opacity 0.5s ease-out !important;
-      }
-      @keyframes streamSpinner {
-        to { transform: translate(-50%, -50%) rotate(360deg); }
+        display: none !important;
       }
     </style>
   `;
