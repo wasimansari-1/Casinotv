@@ -28,52 +28,53 @@ function getProxyAgent(proxyUrlStr) {
     ? 'Basic ' + Buffer.from(decodeURIComponent(pUrl.username) + ':' + decodeURIComponent(pUrl.password)).toString('base64') 
     : null;
 
-  _cachedAgent = new https.Agent({
-    keepAlive: true,
-    maxSockets: 50,
-    timeout: 20000,
-    createConnection(options, callback) {
-      const targetHost = options.host || options.hostname;
-      const targetPort = options.port || 443;
-      const connectReq = http.request({
-        host: pUrl.hostname,
-        port: pUrl.port || 80,
-        method: 'CONNECT',
-        path: targetHost + ':' + targetPort,
-        headers: {
-          'Host': targetHost + ':' + targetPort,
-          ...(proxyAuth ? { 'Proxy-Authorization': proxyAuth } : {})
-        }
-      });
-
-      connectReq.on('connect', (res, socket, head) => {
-        if (res.statusCode !== 200) {
-          socket.destroy();
-          return callback(new Error('Proxy CONNECT rejected with status ' + res.statusCode));
-        }
-        const tlsSocket = tls.connect({
-          socket: socket,
-          servername: options.servername || targetHost,
-          rejectUnauthorized: false
-        }, () => {
-          callback(null, tlsSocket);
-        });
-        tlsSocket.on('error', (err) => {
-          socket.destroy();
-          callback(err);
-        });
-      });
-
-      connectReq.on('error', (err) => {
-        callback(err);
-      });
-      connectReq.end();
-    }
+  const agent = new https.Agent({
+    keepAlive: false,
+    timeout: 20000
   });
 
+  agent.createConnection = function(options, callback) {
+    const targetHost = options.host || options.hostname;
+    const targetPort = options.port || 443;
+    const connectReq = http.request({
+      host: pUrl.hostname,
+      port: pUrl.port || 80,
+      method: 'CONNECT',
+      path: targetHost + ':' + targetPort,
+      headers: {
+        'Host': targetHost + ':' + targetPort,
+        ...(proxyAuth ? { 'Proxy-Authorization': proxyAuth } : {})
+      }
+    });
+
+    connectReq.on('connect', (res, socket, head) => {
+      if (res.statusCode !== 200) {
+        socket.destroy();
+        return callback(new Error('Proxy CONNECT rejected with status ' + res.statusCode));
+      }
+      const tlsSocket = tls.connect({
+        socket: socket,
+        servername: options.servername || targetHost,
+        rejectUnauthorized: false
+      }, () => {
+        callback(null, tlsSocket);
+      });
+      tlsSocket.on('error', (err) => {
+        socket.destroy();
+        callback(err);
+      });
+    });
+
+    connectReq.on('error', (err) => {
+      callback(err);
+    });
+    connectReq.end();
+  };
+
+  _cachedAgent = agent;
   _cachedProxyUrl = proxyUrlStr;
   console.log(`[StreamCore] Outbound HTTPS ProxyAgent active: ${proxyUrlStr.replace(/:\/\/.*@/, '://***:***@')}`);
-  return _cachedAgent;
+  return agent;
 }
 
 function proxyFetch(urlStr, options = {}, redirectCount = 0) {
