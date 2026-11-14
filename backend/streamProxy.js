@@ -120,7 +120,7 @@ async function warmCasinoTable(eventId) {
 
     if (pageRes.ok) {
       let html = await pageRes.text();
-      html = transformPlayerHtml(html, watchUrl, false);
+      html = transformPlayerHtml(html, watchUrl, false, eventId);
       playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + CASINO_CACHE_TTL });
       console.log(`[Stream Warmer] Pre-warmed & cached table ${eventId} in memory`);
 
@@ -209,7 +209,7 @@ router.get('/sports/events', async (req, res) => {
 });
 
 // Helper: Transform upstream player HTML with full bypass patches & watermark removal
-function transformPlayerHtml(html, watchUrl, isSports = false) {
+function transformPlayerHtml(html, watchUrl, isSports = false, eventId = '') {
   // 1. Completely remove watermark elements and foreign domain strings
   html = html.replace(/<div id="wm">[\s\S]*?<\/div>/gi, '');
   html = html.replace(/#wm\{[^}]*\}/gi, '#wm{display:none!important;opacity:0!important;visibility:hidden!important;pointer-events:none!important;height:0!important;width:0!important;}');
@@ -245,8 +245,8 @@ function transformPlayerHtml(html, watchUrl, isSports = false) {
         ? originalCfg.pingUrl
         : new URL(originalCfg.pingUrl, watchUrl).href;
 
-      // Construct proxied ping URL that routes through our backend
-      const proxiedPingUrl = `/api/stream/proxy-ping?target=${encodeURIComponent(fullPingUrl)}&watchUrl=${encodeURIComponent(watchUrl)}`;
+      // Construct proxied ping URL that routes through our backend with eventId context
+      const proxiedPingUrl = `/api/stream/proxy-ping?target=${encodeURIComponent(fullPingUrl)}&watchUrl=${encodeURIComponent(watchUrl)}&eventId=${encodeURIComponent(eventId)}`;
       
       const modifiedCfg = {
         ...originalCfg,
@@ -388,7 +388,7 @@ router.get('/player/:eventId', async (req, res) => {
         }
 
         let html = await pageRes.text();
-        html = transformPlayerHtml(html, watchUrl, false);
+        html = transformPlayerHtml(html, watchUrl, false, eventId);
 
         // Cache player HTML for 6 minutes (serves millions of users directly from RAM in 1ms)
         playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + CASINO_CACHE_TTL });
@@ -474,7 +474,7 @@ router.get('/sports/player/:eventId', async (req, res) => {
       }
 
       let html = await pageRes.text();
-      html = transformPlayerHtml(html, watchUrl, true);
+      html = transformPlayerHtml(html, watchUrl, true, eventId);
 
       // Cache player HTML for 25 seconds
       playerCache.set(cacheKey, { html, expiresAt: Date.now() + 25000 });
@@ -682,6 +682,9 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
     const decodedWatchUrl = watchUrl ? decodeURIComponent(watchUrl) : targetUrl;
     const targetOrigin = new URL(targetUrl).origin;
     const isInit = Boolean(req.body?.init);
+    const eventId = req.query.eventId || '';
+    const fallbackStreamId = (eventId && GAME_MAP[eventId]) ? GAME_MAP[eventId].streamId : '';
+    const fallbackWsUrl = 'wss://livecdnplatin.com/WebRTCAppEE/websocket';
 
     // Instant RAM delivery for init pings (eliminates 1.5-3s loader wait time!)
     if (isInit && pingCache.has(targetUrl)) {
@@ -726,16 +729,22 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
       if (data.hlsUrl) {
         data.hlsUrl = `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(data.hlsUrl)}`;
       }
-      if (isInit && data.wsUrl && data.streamId) {
-        pingCache.set(targetUrl, { data, timestamp: Date.now() });
+      if (isInit) {
+        if (!data.streamId && fallbackStreamId) data.streamId = fallbackStreamId;
+        if (!data.wsUrl) data.wsUrl = fallbackWsUrl;
+        if (data.wsUrl && data.streamId) {
+          pingCache.set(targetUrl, { data, timestamp: Date.now() });
+        }
       }
     }
 
     // Always return HTTP 200 so the client player never aborts the stream
     const finalStatus = (upstreamRes.status >= 200 && upstreamRes.status < 300) ? upstreamRes.status : 200;
-    return res.status(finalStatus).json(data || { ok: true, state: "live" });
+    return res.status(finalStatus).json(data || { ok: true, state: "live", streamId: fallbackStreamId || "GAME30", wsUrl: fallbackWsUrl });
   } catch (err) {
-    const { target } = req.query;
+    const { target, eventId } = req.query;
+    const fallbackStreamId = (eventId && GAME_MAP[eventId]) ? GAME_MAP[eventId].streamId : '';
+    const fallbackWsUrl = 'wss://livecdnplatin.com/WebRTCAppEE/websocket';
     if (target) {
       const targetUrl = decodeURIComponent(target);
       const cachedPing = pingCache.get(targetUrl);
@@ -743,8 +752,15 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
         return res.status(200).json(cachedPing.data);
       }
     }
-    // Ultra-resilient ping fallback: Keep player alive and active
-    return res.status(200).json({ ok: true, state: "live", maintenance: null, stop: false });
+    // Ultra-resilient ping fallback: ALWAYS supply streamId & wsUrl so player.ready is true!
+    return res.status(200).json({ 
+      ok: true, 
+      state: "live", 
+      streamId: fallbackStreamId || "GAME30", 
+      wsUrl: fallbackWsUrl, 
+      maintenance: null, 
+      stop: false 
+    });
   }
 });
 
