@@ -327,7 +327,33 @@ function transformPlayerHtml(html, watchUrl, isSports = false, eventId = '') {
       })();
     </script>
   `;
-  html = html.replace('</head>', `${runtimePatch}</head>`);
+  const spinnerCss = `
+    <style>
+      .loading {
+        position: absolute !important;
+        top: 50% !important;
+        left: 50% !important;
+        transform: translate(-50%, -50%) !important;
+        z-index: 15 !important;
+        width: 56px !important;
+        height: 56px !important;
+        border: 4px solid rgba(255, 255, 255, 0.12) !important;
+        border-top-color: #d4228a !important;
+        border-radius: 50% !important;
+        animation: streamSpinner 0.8s linear infinite !important;
+        background: transparent !important;
+        pointer-events: none !important;
+      }
+      .loading.fade-out {
+        opacity: 0 !important;
+        transition: opacity 0.5s ease-out !important;
+      }
+      @keyframes streamSpinner {
+        to { transform: translate(-50%, -50%) rotate(360deg); }
+      }
+    </style>
+  `;
+  html = html.replace('</head>', `${runtimePatch}${spinnerCss}</head>`);
   return html;
 }
 
@@ -709,7 +735,7 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
 
     const payload = {
       ...req.body,
-      page: 'https://nice444.com/',
+      page: decodedWatchUrl,
       tz: req.body?.tz || 'Asia/Kolkata',
       tzo: req.body?.tzo !== undefined ? req.body.tzo : 330
     };
@@ -728,6 +754,12 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
       },
       body: JSON.stringify(payload)
     });
+
+    if (upstreamRes.status === 403) {
+      console.warn(`[Proxy Ping] Upstream ping 403 on session. Rotating proxy immediately...`);
+      const { rotateStickySession } = require('./streamCore');
+      rotateStickySession('ping 403', true);
+    }
 
     let data;
     try {
