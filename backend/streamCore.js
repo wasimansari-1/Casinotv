@@ -1,46 +1,152 @@
-// Polyfill for Node.js versions lacking zstd in zlib (Fixes Undici 8+ bind crash)
-const zlib = require('node:zlib');
-if (!zlib.createZstdDecompress) {
-  zlib.createZstdDecompress = function() {};
-}
-if (!zlib.constants) zlib.constants = {};
-if (!zlib.constants.ZSTD_d_windowLogMax) zlib.constants.ZSTD_d_windowLogMax = 23;
-
 const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
-const { ProxyAgent } = require('undici');
 
-let _proxyDispatcher = undefined;
-function getProxyDispatcher() {
-  if (_proxyDispatcher !== undefined) return _proxyDispatcher;
-  let pUrl = process.env.UPSTREAM_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
-  if (pUrl) {
-    if (pUrl.startsWith('socks5://127.0.0.1:40000') || pUrl.startsWith('socks5://localhost:40000')) {
-      pUrl = 'http://127.0.0.1:40000';
-    }
-    try {
-      _proxyDispatcher = new ProxyAgent(pUrl);
-      console.log(`[StreamCore] Outbound ProxyAgent initialized: ${pUrl.replace(/:\/\/.*@/, '://***:***@')}`);
-    } catch (e) {
-      try { 
-        _proxyDispatcher = new ProxyAgent({ uri: pUrl }); 
-      } catch (_) { 
-        _proxyDispatcher = null; 
-      }
-    }
-  } else {
-    _proxyDispatcher = null;
+const http = require('http');
+const https = require('https');
+const tls = require('tls');
+const { URL } = require('url');
+
+let _cachedAgent = null;
+let _cachedProxyUrl = null;
+
+function getProxyAgent(proxyUrlStr) {
+  if (_cachedAgent && _cachedProxyUrl === proxyUrlStr) {
+    return _cachedAgent;
   }
-  return _proxyDispatcher;
+  const pUrl = new URL(proxyUrlStr);
+  const proxyAuth = pUrl.username 
+    ? 'Basic ' + Buffer.from(decodeURIComponent(pUrl.username) + ':' + decodeURIComponent(pUrl.password)).toString('base64') 
+    : null;
+
+  _cachedAgent = new https.Agent({
+    keepAlive: true,
+    maxSockets: 50,
+    timeout: 20000,
+    createConnection(options, callback) {
+      const targetHost = options.host || options.hostname;
+      const targetPort = options.port || 443;
+      const connectReq = http.request({
+        host: pUrl.hostname,
+        port: pUrl.port || 80,
+        method: 'CONNECT',
+        path: targetHost + ':' + targetPort,
+        headers: {
+          'Host': targetHost + ':' + targetPort,
+          ...(proxyAuth ? { 'Proxy-Authorization': proxyAuth } : {})
+        }
+      });
+
+      connectReq.on('connect', (res, socket, head) => {
+        if (res.statusCode !== 200) {
+          socket.destroy();
+          return callback(new Error('Proxy CONNECT rejected with status ' + res.statusCode));
+        }
+        const tlsSocket = tls.connect({
+          socket: socket,
+          servername: options.servername || targetHost,
+          rejectUnauthorized: false
+        }, () => {
+          callback(null, tlsSocket);
+        });
+        tlsSocket.on('error', (err) => {
+          socket.destroy();
+          callback(err);
+        });
+      });
+
+      connectReq.on('error', (err) => {
+        callback(err);
+      });
+      connectReq.end();
+    }
+  });
+
+  _cachedProxyUrl = proxyUrlStr;
+  console.log(`[StreamCore] Outbound HTTPS ProxyAgent active: ${proxyUrlStr.replace(/:\/\/.*@/, '://***:***@')}`);
+  return _cachedAgent;
 }
 
-function proxyFetch(url, options = {}) {
-  const d = getProxyDispatcher();
-  const opts = { ...options };
-  if (d && !opts.dispatcher) {
-    opts.dispatcher = d;
-  }
-  return fetch(url, opts);
+function proxyFetch(urlStr, options = {}, redirectCount = 0) {
+  if (redirectCount > 5) return Promise.reject(new Error('Too many redirects'));
+
+  return new Promise((resolve, reject) => {
+    try {
+      const u = new URL(urlStr);
+      const isHttps = u.protocol === 'https:';
+      const lib = isHttps ? https : http;
+
+      const proxyUrl = process.env.UPSTREAM_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+      let agent = options.agent;
+      if (!agent && proxyUrl && isHttps) {
+        agent = getProxyAgent(proxyUrl);
+      }
+
+      const headers = { ...(options.headers || {}) };
+      let body = options.body;
+      if (body && typeof body === 'object' && !(body instanceof Buffer)) {
+        body = JSON.stringify(body);
+        if (!headers['Content-Type'] && !headers['content-type']) {
+          headers['Content-Type'] = 'application/json';
+        }
+      }
+      if (body) {
+        headers['Content-Length'] = Buffer.byteLength(body);
+      }
+
+      const req = lib.request({
+        protocol: u.protocol,
+        hostname: u.hostname,
+        port: u.port || (isHttps ? 443 : 80),
+        path: u.pathname + u.search,
+        method: options.method || 'GET',
+        headers: headers,
+        agent: agent,
+        timeout: options.timeout || 20000,
+        rejectUnauthorized: false
+      }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          const redirectUrl = new URL(res.headers.location, urlStr).href;
+          return resolve(proxyFetch(redirectUrl, options, redirectCount + 1));
+        }
+
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          const fullBuf = Buffer.concat(chunks);
+          resolve({
+            status: res.statusCode,
+            statusText: res.statusMessage,
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            headers: {
+              get(name) {
+                const lower = name.toLowerCase();
+                return res.headers[lower] || null;
+              },
+              raw() { return res.headers; }
+            },
+            async text() {
+              return fullBuf.toString('utf8');
+            },
+            async json() {
+              return JSON.parse(fullBuf.toString('utf8'));
+            },
+            async arrayBuffer() {
+              return fullBuf.buffer.slice(fullBuf.byteOffset, fullBuf.byteOffset + fullBuf.byteLength);
+            }
+          });
+        });
+      });
+
+      req.on('timeout', () => {
+        req.destroy(new Error('Request timed out'));
+      });
+      req.on('error', reject);
+      if (body) req.write(body);
+      req.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
 }
 
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
@@ -365,5 +471,5 @@ module.exports = {
   PROVIDERS,
   UA,
   proxyFetch,
-  getProxyDispatcher
+  getProxyAgent
 };

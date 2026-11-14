@@ -1,11 +1,3 @@
-// Polyfill for Node.js versions lacking zstd in zlib (Fixes Undici 8+ bind crash)
-const zlib = require('node:zlib');
-if (!zlib.createZstdDecompress) {
-  zlib.createZstdDecompress = function() {};
-}
-if (!zlib.constants) zlib.constants = {};
-if (!zlib.constants.ZSTD_d_windowLogMax) zlib.constants.ZSTD_d_windowLogMax = 23;
-
 const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
 
@@ -34,28 +26,10 @@ if (fs.existsSync(envPath)) {
   }
 }
 
-// Support Outbound Proxy for VPS deployment (Residential / SOCKS5 / HTTP Proxy)
-let proxyUrl = process.env.UPSTREAM_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+// Check Outbound Proxy for VPS deployment (Residential / SOCKS5 / HTTP Proxy)
+const proxyUrl = process.env.UPSTREAM_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
 if (proxyUrl) {
-  try {
-    if (proxyUrl.startsWith('socks5://127.0.0.1:40000') || proxyUrl.startsWith('socks5://localhost:40000')) {
-      proxyUrl = 'http://127.0.0.1:40000';
-    }
-    const undici = require('undici');
-    let proxyAgent;
-    try {
-      proxyAgent = new undici.ProxyAgent(proxyUrl);
-    } catch (e1) {
-      proxyAgent = new undici.ProxyAgent({ uri: proxyUrl });
-    }
-    
-    try { undici.setGlobalDispatcher(proxyAgent); } catch (_) {}
-    globalThis.fetch = (url, opts = {}) => undici.fetch(url, { dispatcher: proxyAgent, ...opts });
-
-    console.log(`[Proxy] Upstream proxy active: ${proxyUrl.replace(/:\/\/.*@/, '://***:***@')}`);
-  } catch (err) {
-    console.error(`[Proxy] Failed to initialize ProxyAgent:`, err.message);
-  }
+  console.log(`[Proxy] Upstream proxy configured: ${proxyUrl.replace(/:\/\/.*@/, '://***:***@')}`);
 } else {
   console.log(`[Proxy] No UPSTREAM_PROXY_URL configured. Running on direct host IP.`);
 }

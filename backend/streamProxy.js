@@ -1,11 +1,3 @@
-// Polyfill for Node.js versions lacking zstd in zlib (Fixes Undici 8+ bind crash)
-const zlib = require('node:zlib');
-if (!zlib.createZstdDecompress) {
-  zlib.createZstdDecompress = function() {};
-}
-if (!zlib.constants) zlib.constants = {};
-if (!zlib.constants.ZSTD_d_windowLogMax) zlib.constants.ZSTD_d_windowLogMax = 23;
-
 const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
 
