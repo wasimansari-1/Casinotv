@@ -1,5 +1,39 @@
 const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
+const { ProxyAgent } = require('undici');
+
+let _proxyDispatcher = undefined;
+function getProxyDispatcher() {
+  if (_proxyDispatcher !== undefined) return _proxyDispatcher;
+  let pUrl = process.env.UPSTREAM_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+  if (pUrl) {
+    if (pUrl.startsWith('socks5://127.0.0.1:40000') || pUrl.startsWith('socks5://localhost:40000')) {
+      pUrl = 'http://127.0.0.1:40000';
+    }
+    try {
+      _proxyDispatcher = new ProxyAgent(pUrl);
+      console.log(`[StreamCore] Outbound ProxyAgent initialized: ${pUrl.replace(/:\/\/.*@/, '://***:***@')}`);
+    } catch (e) {
+      try { 
+        _proxyDispatcher = new ProxyAgent({ uri: pUrl }); 
+      } catch (_) { 
+        _proxyDispatcher = null; 
+      }
+    }
+  } else {
+    _proxyDispatcher = null;
+  }
+  return _proxyDispatcher;
+}
+
+function proxyFetch(url, options = {}) {
+  const d = getProxyDispatcher();
+  const opts = { ...options };
+  if (d && !opts.dispatcher) {
+    opts.dispatcher = d;
+  }
+  return fetch(url, opts);
+}
 
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
@@ -75,7 +109,7 @@ async function getAuthToken(providerKey = 'nice444', forceRefresh = false) {
           const bodyPayload = { userName: acc.user, password: acc.pass };
           if (acc.siteKey) bodyPayload.siteKey = acc.siteKey;
 
-          const res = await fetch(`${provider.base}/app/users/userLogin`, {
+          const res = await proxyFetch(`${provider.base}/app/users/userLogin`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
@@ -154,7 +188,7 @@ async function getWatchUrl(eventId, retries = 3) {
               watchLinkQueue = watchLinkQueue.then(async () => {
                 try {
                   await new Promise(r => setTimeout(r, 120));
-                  const r = await fetch(`${provider.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`, {
+                  const r = await proxyFetch(`${provider.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`, {
                     method: 'POST',
                     headers: {
                       'Content-Type': 'application/json',
@@ -219,7 +253,7 @@ async function getSportsWatchUrl(rawEventId, sportId = '4') {
   if (streamId.length > 9 && (streamId.startsWith('400') || streamId.startsWith('100') || streamId.startsWith('200'))) {
     try {
       const token = await getAuthToken('nice444');
-      const marketRes = await fetch(`${PROVIDERS.nice444.base}/api/exchange/markets/getMarketsEventList`, {
+      const marketRes = await proxyFetch(`${PROVIDERS.nice444.base}/api/exchange/markets/getMarketsEventList`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
         body: JSON.stringify({ eventId: streamId, sportId: String(sportId), key: '2' })
@@ -241,7 +275,7 @@ async function getSportsWatchUrl(rawEventId, sportId = '4') {
     const provider = PROVIDERS[provKey];
     try {
       const token = await getAuthToken(provKey);
-      const res = await fetch(`${provider.base}/api/exchange/streaming/exchEventsWatchLink`, {
+      const res = await proxyFetch(`${provider.base}/api/exchange/streaming/exchEventsWatchLink`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -270,7 +304,7 @@ async function getSportsWatchUrl(rawEventId, sportId = '4') {
 async function getLiveSportsEvents() {
   try {
     const token = await getAuthToken('nice444');
-    const res = await fetch(`${PROVIDERS.nice444.base}/api/exchange/market/matchodds/allEventsList`, {
+    const res = await proxyFetch(`${PROVIDERS.nice444.base}/api/exchange/market/matchodds/allEventsList`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
       body: JSON.stringify({})
@@ -321,5 +355,7 @@ module.exports = {
   getLiveSportsEvents,
   GAME_MAP,
   PROVIDERS,
-  UA
+  UA,
+  proxyFetch,
+  getProxyDispatcher
 };

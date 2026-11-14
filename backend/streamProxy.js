@@ -11,7 +11,8 @@ const {
   getLiveSportsEvents, 
   GAME_MAP, 
   PROVIDERS, 
-  UA 
+  UA,
+  proxyFetch
 } = require('./streamCore');
 
 const router = express.Router();
@@ -265,7 +266,7 @@ router.get('/player/:eventId', async (req, res) => {
       const watchUrl = typeof watchData === 'string' ? watchData : watchData.url;
       const referer = watchData.origin ? `${watchData.origin}/` : 'https://casino.nice444.com/';
 
-      const pageRes = await fetch(watchUrl, {
+      const pageRes = await proxyFetch(watchUrl, {
         headers: {
           'User-Agent': UA,
           'Referer': referer
@@ -331,7 +332,7 @@ router.get('/sports/player/:eventId', async (req, res) => {
       const watchUrl = watchData.url;
       const referer = watchData.origin ? `${watchData.origin}/` : 'https://nice444.com/';
 
-      const pageRes = await fetch(watchUrl, {
+      const pageRes = await proxyFetch(watchUrl, {
         headers: {
           'User-Agent': UA,
           'Referer': referer
@@ -379,7 +380,7 @@ router.get('/player-assets/player.js', async (req, res) => {
   try {
     const upstreamAssetUrl = `https://live.livecdnplatin.com/player/player.js`;
     
-    const upstreamRes = await fetch(upstreamAssetUrl, {
+    const upstreamRes = await proxyFetch(upstreamAssetUrl, {
       headers: {
         'User-Agent': UA,
         'Referer': 'https://live.livecdnplatin.com/'
@@ -421,7 +422,7 @@ router.get('/player-assets/sports-player.js', async (req, res) => {
   try {
     const upstreamAssetUrl = `https://tv.ltve.live/player/player.js`;
     
-    const upstreamRes = await fetch(upstreamAssetUrl, {
+    const upstreamRes = await proxyFetch(upstreamAssetUrl, {
       headers: {
         'User-Agent': UA,
         'Referer': 'https://tv.ltve.live/'
@@ -464,7 +465,7 @@ router.get('/player-assets/:asset', async (req, res) => {
     const { asset } = req.params;
     const upstreamAssetUrl = `https://live.livecdnplatin.com/player/${asset}`;
     
-    const upstreamRes = await fetch(upstreamAssetUrl, {
+    const upstreamRes = await proxyFetch(upstreamAssetUrl, {
       headers: {
         'User-Agent': UA,
         'Referer': 'https://live.livecdnplatin.com/'
@@ -503,7 +504,7 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
       page: targetOrigin.includes('ltve') ? 'https://nice444.com/' : 'https://nice444.com/'
     };
 
-    const upstreamRes = await fetch(targetUrl, {
+    const upstreamRes = await proxyFetch(targetUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
