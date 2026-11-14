@@ -8,16 +8,13 @@ const { URL } = require('url');
 
 let _cachedAgent = null;
 let _cachedProxyUrl = null;
-let _currentStickySession = 1; // Locked to Session #1 (Stable Indian Residential IP)
+let _currentStickySession = Math.floor(Math.random() * 10) + 1; // Pool of 10 Webshare Indian Residential sessions
 
-function getEffectiveProxyUrl(proxyUrlStr) {
+function getEffectiveProxyUrl(proxyUrlStr, sessionOverride = null) {
   if (!proxyUrlStr) return null;
-  // If user provided a Webshare rotating endpoint (like bbmraujs-in-rotate):
-  // Webshare's -rotate switches IP on EVERY single connection. This breaks Universe Studio
-  // which requires the ticket to be fetched by the exact same IP that requested it.
-  // Converting -rotate to a numeric sticky session (-SESSION_NUM) locks the same Indian residential IP!
+  const session = sessionOverride || _currentStickySession;
   if (proxyUrlStr.includes('webshare.io') && proxyUrlStr.includes('-rotate')) {
-    return proxyUrlStr.replace('-rotate', `-${_currentStickySession}`);
+    return proxyUrlStr.replace('-rotate', `-${session}`);
   }
   return proxyUrlStr;
 }
@@ -35,22 +32,21 @@ function resetProxyAgent() {
 let _lastRotateTime = 0;
 function rotateStickySession(reason = '') {
   const now = Date.now();
-  // Cooldown: Never rotate more than once every 60 seconds to keep IPs rock-solid stable
-  if (now - _lastRotateTime < 60000) {
+  // Cooldown: at least 10 seconds between rotations
+  if (now - _lastRotateTime < 10000) {
     return;
   }
   _lastRotateTime = now;
   const oldSession = _currentStickySession;
-  let next = Math.floor(Math.random() * 40) + 1;
-  if (next === oldSession) next = (next % 40) + 1;
+  let next = (_currentStickySession % 10) + 1;
   _currentStickySession = next;
   resetProxyAgent();
   console.log(`[StreamCore] Rotated sticky residential proxy session from #${oldSession} -> #${_currentStickySession} (Reason: ${reason || 'unspecified'})`);
 }
 
-function getProxyAgent(proxyUrlStr) {
-  const effectiveProxyUrl = getEffectiveProxyUrl(proxyUrlStr);
-  if (_cachedAgent && _cachedProxyUrl === effectiveProxyUrl) {
+function getProxyAgent(proxyUrlStr, sessionOverride = null) {
+  const effectiveProxyUrl = getEffectiveProxyUrl(proxyUrlStr, sessionOverride);
+  if (!sessionOverride && _cachedAgent && _cachedProxyUrl === effectiveProxyUrl) {
     return _cachedAgent;
   }
   const pUrl = new URL(effectiveProxyUrl);
@@ -107,9 +103,10 @@ function getProxyAgent(proxyUrlStr) {
     connectReq.end();
   };
 
-  _cachedAgent = agent;
-  _cachedProxyUrl = effectiveProxyUrl;
-  console.log(`[StreamCore] Outbound HTTPS ProxyAgent active: ${effectiveProxyUrl.replace(/:\/\/.*@/, '://***:***@')}`);
+  if (!sessionOverride) {
+    _cachedAgent = agent;
+    _cachedProxyUrl = effectiveProxyUrl;
+  }
   return agent;
 }
 
@@ -125,7 +122,7 @@ function proxyFetch(urlStr, options = {}, redirectCount = 0, retryCount = 0) {
       const proxyUrl = process.env.UPSTREAM_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
       let agent = options.agent;
       if (!agent && proxyUrl && isHttps) {
-        agent = getProxyAgent(proxyUrl);
+        agent = getProxyAgent(proxyUrl, options.session);
       }
 
       const headers = { ...(options.headers || {}) };
@@ -363,61 +360,74 @@ async function getWatchUrl(eventId, retries = 2) {
   }
 
   const task = (async () => {
-    // Startexch99 is rock-solid on Indian residential IPs with 3 accounts, never blocks.
-    // Prioritize Startexch99 for 0.1s instant startup, failover to Nice444 and Asstarplay.
-    const providerList = (Date.now() < _nice444BlockedUntil)
-      ? ['startexch', 'asstarplay', 'nice444']
-      : ['startexch', 'nice444', 'asstarplay'];
+    // Try across up to 3 residential sessions if the current IP gets rate-limited
+    for (let sessionAttempt = 0; sessionAttempt < 3; sessionAttempt++) {
+      const providerList = ['startexch', 'nice444', 'asstarplay'];
+      let hadBlockedIp = false;
 
-    for (const provKey of providerList) {
-      const provider = PROVIDERS[provKey];
-      try {
-        let token = await getAuthToken(provKey);
+      for (const provKey of providerList) {
+        const provider = PROVIDERS[provKey];
+        try {
+          let token = await getAuthToken(provKey);
 
-        for (let attempt = 0; attempt <= retries; attempt++) {
-          try {
-            const res = await proxyFetch(`${provider.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${token}`,
-                'Origin': provider.casinoBase,
-                'Referer': `${provider.casinoBase}/`,
-                'User-Agent': UA
-              },
-              body: JSON.stringify({
-                streamId: eventId,
-                timestamp: Date.now()
-              }),
-              timeout: 8000
-            });
+          for (let attempt = 0; attempt <= retries; attempt++) {
+            try {
+              const res = await proxyFetch(`${provider.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`, {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${token}`,
+                  'Origin': provider.casinoBase,
+                  'Referer': `${provider.casinoBase}/`,
+                  'User-Agent': UA
+                },
+                body: JSON.stringify({
+                  streamId: eventId,
+                  timestamp: Date.now()
+                }),
+                timeout: 8000
+              });
 
-            const data = await res.json();
-            
-            if (data?.meta?.status_code === 401 || res.status === 401) {
-              console.warn(`[WatchLink] Token expired (401) on ${provider.name}, refreshing...`);
-              token = await getAuthToken(provKey, true);
-              continue;
+              const data = await res.json();
+              
+              if (data?.meta?.status_code === 401 || res.status === 401) {
+                console.warn(`[WatchLink] Token expired (401) on ${provider.name}, refreshing...`);
+                token = await getAuthToken(provKey, true);
+                continue;
+              }
+
+              if (data?.data?.url) {
+                return { 
+                  url: data.data.url, 
+                  provider: provider.name, 
+                  origin: provider.base,
+                  session: _currentStickySession 
+                };
+              }
+
+              if (data?.meta?.message === 'viewer_ip_blocked' || res.status === 403 || res.status === 429) {
+                hadBlockedIp = true;
+                console.warn(`[WatchLink] Provider ${provider.name} rate-limited IP (session #${_currentStickySession}). Trying next provider/session...`);
+                break;
+              }
+
+              console.warn(`[WatchLink] ${provider.name} attempt ${attempt} response:`, data?.meta?.message || data);
+              await new Promise(r => setTimeout(r, 200));
+            } catch (err) {
+              console.warn(`[WatchLink] Error on ${provider.name} attempt ${attempt}:`, err.message);
+              await new Promise(r => setTimeout(r, 200));
             }
-
-            if (data?.data?.url) {
-              return { url: data.data.url, provider: provider.name, origin: provider.base };
-            }
-
-            if (data?.meta?.message === 'viewer_ip_blocked' || res.status === 403 || res.status === 429) {
-              console.warn(`[WatchLink] Provider ${provider.name} rate-limited or blocked (session #${_currentStickySession}). Failing over to next provider...`);
-              break;
-            }
-
-            console.warn(`[WatchLink] ${provider.name} attempt ${attempt} response:`, data?.meta?.message || data);
-            await new Promise(r => setTimeout(r, 200));
-          } catch (err) {
-            console.warn(`[WatchLink] Error on ${provider.name} attempt ${attempt}:`, err.message);
-            await new Promise(r => setTimeout(r, 200));
           }
+        } catch (provErr) {
+          console.warn(`[WatchLink] Provider ${provider.name} exhausted, failing over to next provider...`);
         }
-      } catch (provErr) {
-        console.warn(`[WatchLink] Provider ${provider.name} exhausted, failing over to next provider...`);
+      }
+
+      // If all providers failed on this session because of IP rate-limit, rotate to next clean residential IP!
+      if (hadBlockedIp && sessionAttempt < 2) {
+        rotateStickySession('Auto-failover on viewer_ip_blocked');
+        await new Promise(r => setTimeout(r, 400));
+        continue;
       }
     }
 

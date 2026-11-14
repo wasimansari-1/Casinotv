@@ -107,8 +107,10 @@ async function warmCasinoTable(eventId) {
     const watchData = await getWatchUrl(eventId);
     const watchUrl = typeof watchData === 'string' ? watchData : watchData.url;
     const providerOrigin = watchData.origin ? (watchData.origin.endsWith('/') ? watchData.origin : `${watchData.origin}/`) : 'https://nice444.com/';
+    const session = watchData.session || null;
 
     const pageRes = await proxyFetch(watchUrl, {
+      session: session,
       headers: {
         'User-Agent': UA,
         'Referer': providerOrigin,
@@ -121,7 +123,7 @@ async function warmCasinoTable(eventId) {
 
     if (pageRes.ok) {
       let html = await pageRes.text();
-      html = transformPlayerHtml(html, watchUrl, false, eventId, providerOrigin);
+      html = transformPlayerHtml(html, watchUrl, false, eventId, providerOrigin, session);
       playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + CASINO_CACHE_TTL });
       console.log(`[Stream Warmer] Pre-warmed & cached table ${eventId} in memory`);
 
@@ -136,6 +138,7 @@ async function warmCasinoTable(eventId) {
           if (targetUrl) {
             const pingRes = await proxyFetch(targetUrl, {
               method: 'POST',
+              session: session,
               headers: { 
                 'Content-Type': 'application/json', 
                 'Origin': new URL(targetUrl).origin,
@@ -229,7 +232,7 @@ router.get('/sports/events', async (req, res) => {
 });
 
 // Helper: Transform upstream player HTML with full bypass patches & watermark removal
-function transformPlayerHtml(html, watchUrl, isSports = false, eventId = '', providerOrigin = '') {
+function transformPlayerHtml(html, watchUrl, isSports = false, eventId = '', providerOrigin = '', session = '') {
   // 1. Completely remove watermark elements and foreign domain strings
   html = html.replace(/<div id="wm">[\s\S]*?<\/div>/gi, '');
   html = html.replace(/#wm\{[^}]*\}/gi, '#wm{display:none!important;opacity:0!important;visibility:hidden!important;pointer-events:none!important;height:0!important;width:0!important;}');
@@ -265,8 +268,8 @@ function transformPlayerHtml(html, watchUrl, isSports = false, eventId = '', pro
         ? originalCfg.pingUrl
         : new URL(originalCfg.pingUrl, watchUrl).href;
 
-      // Construct proxied ping URL that routes through our backend with eventId and provider origin context
-      const proxiedPingUrl = `/api/stream/proxy-ping?target=${encodeURIComponent(fullPingUrl)}&watchUrl=${encodeURIComponent(watchUrl)}&eventId=${encodeURIComponent(eventId)}&origin=${encodeURIComponent(providerOrigin)}`;
+      // Construct proxied ping URL that routes through our backend with eventId, provider origin and matching proxy session context
+      const proxiedPingUrl = `/api/stream/proxy-ping?target=${encodeURIComponent(fullPingUrl)}&watchUrl=${encodeURIComponent(watchUrl)}&eventId=${encodeURIComponent(eventId)}&origin=${encodeURIComponent(providerOrigin)}&session=${encodeURIComponent(session || '')}`;
       
       const modifiedCfg = {
         ...originalCfg,
@@ -414,8 +417,10 @@ router.get('/player/:eventId', async (req, res) => {
         const watchData = await getWatchUrl(eventId);
         const watchUrl = typeof watchData === 'string' ? watchData : watchData.url;
         const referer = watchData.origin ? (watchData.origin.endsWith('/') ? watchData.origin : `${watchData.origin}/`) : 'https://nice444.com/';
+        const session = watchData.session || null;
 
         const pageRes = await proxyFetch(watchUrl, {
+          session: session,
           headers: {
             'User-Agent': UA,
             'Referer': referer,
@@ -436,7 +441,7 @@ router.get('/player/:eventId', async (req, res) => {
         }
 
         let html = await pageRes.text();
-        html = transformPlayerHtml(html, watchUrl, false, eventId, referer);
+        html = transformPlayerHtml(html, watchUrl, false, eventId, referer, session);
 
         // Cache player HTML for 30 minutes (serves millions of users directly from RAM in 1ms)
         playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + CASINO_CACHE_TTL });
@@ -452,6 +457,7 @@ router.get('/player/:eventId', async (req, res) => {
             if (targetUrl) {
               proxyFetch(targetUrl, {
                 method: 'POST',
+                session: session,
                 headers: { 
                   'Content-Type': 'application/json', 
                   'Origin': new URL(targetUrl).origin,
@@ -824,8 +830,10 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
       tzo: req.body?.tzo !== undefined ? req.body.tzo : 330
     };
 
+    const proxySession = req.query.session ? parseInt(req.query.session, 10) : null;
     const upstreamRes = await proxyFetch(targetUrl, {
       method: 'POST',
+      session: proxySession,
       headers: {
         'Content-Type': 'application/json',
         'Origin': targetOrigin,
