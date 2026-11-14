@@ -402,45 +402,42 @@ router.get('/sports/player/:eventId', async (req, res) => {
   }
 });
 
+const fs = require('fs');
+const path = require('path');
+
+let _cachedPatchedPlayerJs = null;
+function getPatchedPlayerJs() {
+  if (_cachedPatchedPlayerJs) return _cachedPatchedPlayerJs;
+  const filePath = path.join(__dirname, 'player.js');
+  let text = fs.readFileSync(filePath, 'utf8');
+
+  // Patch out domain checks & devtools detector
+  text = text.replace(/function L\(\)\{/g, 'function L(){return!1;');
+  text = text.replace(/function S\(\)\{/g, 'function S(){return!1;');
+  text = text.replace(/function I\(\)\{/g, 'function I(){return!1;');
+  text = text.replace(/function w\(e\)\{/g, 'function w(e){return;');
+  text = text.replace(/t\.devtoolsGuard/g, 'false');
+  text = text.replace(/devtoolsGuard:!0/g, 'devtoolsGuard:!1');
+
+  // Neutralize session killer ("The dealer has closed your session")
+  text = text.replace(/403===a\.status/g, 'false');
+  text = text.replace(/g\.say\(a,!0\)/g, '(function(){console.warn("[Session Suppressed]");return false;})()');
+
+  _cachedPatchedPlayerJs = text;
+  return text;
+}
+
 // 6. Casino Static Assets Proxy (/api/stream/player-assets/player.js)
-router.get('/player-assets/player.js', async (req, res) => {
+router.get('/player-assets/player.js', (req, res) => {
   try {
-    const upstreamAssetUrl = `https://live.livecdnplatin.com/player/player.js`;
-    
-    const upstreamRes = await proxyFetch(upstreamAssetUrl, {
-      headers: {
-        'User-Agent': UA,
-        'Referer': 'https://live.livecdnplatin.com/'
-      }
-    });
-
-    if (!upstreamRes.ok) {
-      return res.status(upstreamRes.status).send('Asset not found');
-    }
-
-    let contentType = upstreamRes.headers.get('content-type') || 'application/javascript';
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    const text = getPatchedPlayerJs();
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
     res.setHeader('Access-Control-Allow-Origin', '*');
-
-    let text = await upstreamRes.text();
-    
-    // Patch out domain checks & devtools detector
-    text = text.replace(/function L\(\)\{/g, 'function L(){return!1;');
-    text = text.replace(/function S\(\)\{/g, 'function S(){return!1;');
-    text = text.replace(/function I\(\)\{/g, 'function I(){return!1;');
-    text = text.replace(/t\.devtoolsGuard/g, 'false');
-    text = text.replace(/devtoolsGuard:!0/g, 'devtoolsGuard:!1');
-
-    // Neutralize session killer ("The dealer has closed your session")
-    text = text.replace(/403===a\.status/g, 'false');
-    text = text.replace(/this\.end\(\)/g, '(function(){console.warn("[Session Protected]");return false;})()');
-    text = text.replace(/g\.say\(a,!0\)/g, '(function(){console.warn("[Session Suppressed]");return false;})()');
-
     return res.send(text);
   } catch (err) {
     console.error('[Asset Proxy Error]:', err.message);
-    res.status(500).send('Error proxying asset');
+    res.status(500).send('Error loading player script');
   }
 });
 
@@ -490,6 +487,15 @@ router.get('/player-assets/sports-player.js', async (req, res) => {
 router.get('/player-assets/:asset', async (req, res) => {
   try {
     const { asset } = req.params;
+    if (asset === 'loader.gif') {
+      const gifPath = path.join(__dirname, 'loader.gif');
+      if (fs.existsSync(gifPath)) {
+        res.setHeader('Content-Type', 'image/gif');
+        res.setHeader('Cache-Control', 'public, max-age=86400');
+        return res.sendFile(gifPath);
+      }
+    }
+
     const upstreamAssetUrl = `https://live.livecdnplatin.com/player/${asset}`;
     
     const upstreamRes = await proxyFetch(upstreamAssetUrl, {
@@ -528,7 +534,9 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
 
     const payload = {
       ...req.body,
-      page: targetOrigin.includes('ltve') ? 'https://nice444.com/' : 'https://nice444.com/'
+      page: 'https://nice444.com/',
+      tz: req.body?.tz || 'Asia/Kolkata',
+      tzo: req.body?.tzo !== undefined ? req.body.tzo : 330
     };
 
     const upstreamRes = await proxyFetch(targetUrl, {
@@ -537,7 +545,11 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
         'Content-Type': 'application/json',
         'Origin': targetOrigin,
         'Referer': decodedWatchUrl,
-        'User-Agent': UA
+        'User-Agent': UA,
+        'Accept': '*/*',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin'
       },
       body: JSON.stringify(payload)
     });
@@ -549,21 +561,11 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
       data = { ok: true, state: "live" };
     }
 
-    // Suppress upstream stop/kill directives so player never shows "The dealer has closed your session"
-    if (upstreamRes.status === 403 || data?.stop === true || !data?.ok) {
-      console.warn('[Proxy Ping] Upstream returned session termination, suppressing and returning active state');
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      return res.status(200).json({ ok: true, state: "live" });
-    }
-
-    if (data && typeof data === 'object' && data.hlsUrl) {
-      data.hlsUrl = `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(data.hlsUrl)}`;
-    }
     if (data && typeof data === 'object' && data.hlsUrl) {
       data.hlsUrl = `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(data.hlsUrl)}`;
     }
     res.setHeader('Access-Control-Allow-Origin', '*');
-    return res.status(200).json(data);
+    return res.status(upstreamRes.status || 200).json(data);
   } catch (err) {
     console.error('[Ping Proxy Error]:', err.message);
     res.status(500).json({ error: err.message });
