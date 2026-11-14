@@ -8,7 +8,7 @@ const { URL } = require('url');
 
 let _cachedAgent = null;
 let _cachedProxyUrl = null;
-let _currentStickySession = Math.floor(Math.random() * 50) + 1;
+let _currentStickySession = Math.floor(Math.random() * 40) + 1;
 
 function getEffectiveProxyUrl(proxyUrlStr) {
   if (!proxyUrlStr) return null;
@@ -41,8 +41,8 @@ function rotateStickySession(reason = '') {
   }
   _lastRotateTime = now;
   const oldSession = _currentStickySession;
-  let next = Math.floor(Math.random() * 250) + 1;
-  if (next === oldSession) next = (next % 250) + 1;
+  let next = Math.floor(Math.random() * 40) + 1;
+  if (next === oldSession) next = (next % 40) + 1;
   _currentStickySession = next;
   resetProxyAgent();
   console.log(`[StreamCore] Rotated sticky residential proxy session from #${oldSession} -> #${_currentStickySession} (Reason: ${reason || 'unspecified'})`);

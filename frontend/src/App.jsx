@@ -450,7 +450,8 @@ export default function App() {
                         title={table.name}
                         className="absolute inset-0 w-full h-full border-none"
                         loading="lazy"
-                        allow="autoplay; fullscreen; unload"
+                        allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+                        allowFullScreen
                       />
                     </div>
                   </div>
@@ -520,7 +521,8 @@ export default function App() {
                       src={`/api/stream/sports/player/${selectedSportMatch.id}?sportId=${selectedSportMatch.sportId}`}
                       title={selectedSportMatch.name}
                       className="absolute inset-0 w-full h-full border-none"
-                      allow="autoplay; fullscreen; unload"
+                      allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+                      allowFullScreen
                     />
                   ) : (
                     <div className="text-slate-500 flex flex-col items-center gap-2 text-xs">

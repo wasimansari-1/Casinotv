@@ -250,6 +250,7 @@ function transformPlayerHtml(html, watchUrl, isSports = false, eventId = '') {
       
       const modifiedCfg = {
         ...originalCfg,
+        streamId: (eventId && GAME_MAP[eventId]) ? GAME_MAP[eventId].streamId : (originalCfg.streamId || 'GAME30'),
         pingUrl: proxiedPingUrl,
         flagUrl: "/api/stream/dummy-flag",
         byeUrl: "/api/stream/dummy-bye",
@@ -560,8 +561,10 @@ function getPatchedPlayerJs() {
     'for(let t=0;!p.ready&&!p.ended;t++){if(t>0)await new Promise(e=>setTimeout(e,2000));try{await p.ping(!0)}catch(e){}}'
   );
 
-  // 3. Neutralize 'The table didn\'t open. Please refresh the page.' (variable l)
+  // 3. Neutralize 'The table didn\'t open. Please refresh the page.' (variable l) and premature black screen
+  text = text.replace(/if\(!p\.ready\)throw new Error\(l\);/g, 'if(!p.ready){p.ready=!0;if(!p.streamId)p.streamId=(t&&t.streamId)||"GAME30";if(!p.wsUrl)p.wsUrl="wss://livecdnplatin.com/UNIVERSE-GE/websocket";}');
   text = text.replace(/g\.say\(l,!0\)/g, '(function(){console.warn("[Auto-Retrying Stream]");return false;})()');
+  text = text.replace(/if\(p\.ended\)return;g\.hideLoading\(\);/g, 'if(p.ended)return;');
 
   // 4. Neutralize session killer ("The dealer has closed your session")
   text = text.replace(/403===a\.status/g, 'false');
@@ -688,7 +691,7 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
     const isInit = Boolean(req.body?.init);
     const eventId = req.query.eventId || '';
     const fallbackStreamId = (eventId && GAME_MAP[eventId]) ? GAME_MAP[eventId].streamId : '';
-    const fallbackWsUrl = 'wss://livecdnplatin.com/WebRTCAppEE/websocket';
+    const fallbackWsUrl = 'wss://livecdnplatin.com/UNIVERSE-GE/websocket';
 
     // Instant RAM delivery for init pings (eliminates 1.5-3s loader wait time!)
     if (isInit && pingCache.has(targetUrl)) {
@@ -748,7 +751,7 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
   } catch (err) {
     const { target, eventId } = req.query;
     const fallbackStreamId = (eventId && GAME_MAP[eventId]) ? GAME_MAP[eventId].streamId : '';
-    const fallbackWsUrl = 'wss://livecdnplatin.com/WebRTCAppEE/websocket';
+    const fallbackWsUrl = 'wss://livecdnplatin.com/UNIVERSE-GE/websocket';
     if (target) {
       const targetUrl = decodeURIComponent(target);
       const cachedPing = pingCache.get(targetUrl);
