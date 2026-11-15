@@ -589,8 +589,8 @@ router.get('/player/:eventId', async (req, res) => {
       return res.send(stale.html);
     }
 
-    // Clean player fallback: Auto-retrying black screen with centered loader GIF (no synthetic error card)
-    const cleanPlayerHtml = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#64748b;font-family:sans-serif}.msg{text-align:center}</style><script>setTimeout(function(){location.reload();}, 3000);</script></head><body><div class="msg"><img src="/api/stream/player-assets/loader.gif" style="width:48px;height:48px;display:block;margin:0 auto 10px;opacity:0.7"><div style="color:#94a3b8;font-size:12px;font-weight:500;">Connecting live stream...</div></div></body></html>`;
+    // Clean player fallback: Auto-retrying black screen (no synthetic loader or text)
+    const cleanPlayerHtml = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;}</style><script>setTimeout(function(){location.reload();}, 2000);</script></head><body></body></html>`;
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.status(200).send(cleanPlayerHtml);
   } finally {
@@ -726,7 +726,6 @@ function getPatchedPlayerJs() {
   // 3. Neutralize 'The table didn\'t open. Please refresh the page.' (variable l) and premature black screen
   text = text.replace(/if\(!p\.ready\)throw new Error\(l\);/g, 'if(!p.ready){p.ready=!0;if(!p.streamId)p.streamId=(t&&t.streamId)||"GAME30";if(!p.wsUrl)p.wsUrl="wss://livecdnplatin.com/UNIVERSE-GE/websocket";}');
   text = text.replace(/g\.say\(l,!0\)/g, '(function(){console.warn("[Auto-Retrying Stream]");return false;})()');
-  text = text.replace(/if\(p\.ended\)return;g\.hideLoading\(\);/g, 'if(p.ended)return;');
 
   // 4. Neutralize session killer ("The dealer has closed your session")
   text = text.replace(/403===a\.status/g, 'false');
