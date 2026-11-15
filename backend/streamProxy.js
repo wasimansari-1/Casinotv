@@ -110,7 +110,7 @@ const tableTokenCache = new Map(); // eventId -> { token, wsUrl, streamId, expir
 async function warmCasinoTable(eventId) {
   // Coordinate across PM2 cluster: only 1 worker warms this table at a time
   const lockKey = `warmer:${eventId}`;
-  const acquired = await redisClient.acquireLock(lockKey, 300);
+  const acquired = await redisClient.acquireLock(lockKey, 30);
   if (!acquired) {
     return false;
   }
@@ -149,61 +149,16 @@ async function warmCasinoTable(eventId) {
       html = transformPlayerHtml(html, watchUrl, false, eventId, providerOrigin, session);
       playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + CASINO_CACHE_TTL });
       await redisClient.set(`html:${eventId}`, html, Math.floor(CASINO_CACHE_TTL / 1000)).catch(() => {});
-      console.log(`[Stream Warmer] Pre-warmed & cached table ${eventId} in memory/Redis (TTL: 10m)`);
+      console.log(`[Stream Warmer] Pre-warmed & cached table ${eventId} in memory/Redis (TTL: 8m)`);
 
       // Invalidate the single-use ticket from watchlink cache since it is now redeemed into HTML
       await invalidateWatchUrl(eventId);
-
-      // Pre-warm ping handshake to acquire and cache the valid JWT token in tableTokenCache!
-      const cfgMatch = html.match(/<script type="application\/json" id="cfg">([^<]+)<\/script>/);
-      if (cfgMatch) {
-        try {
-          const cfg = JSON.parse(cfgMatch[1]);
-          const targetUrl = cfg.pingUrl.includes('target=') 
-            ? decodeURIComponent(new URL(cfg.pingUrl, 'http://localhost').searchParams.get('target'))
-            : cfg.pingUrl;
-          if (targetUrl) {
-            const pingRes = await proxyFetch(targetUrl, {
-              method: 'POST',
-              session: session,
-              headers: { 
-                'Content-Type': 'application/json', 
-                'Origin': new URL(targetUrl).origin,
-                'Referer': watchUrl,
-                'User-Agent': UA,
-                'Accept': '*/*',
-                'Sec-Fetch-Dest': 'empty',
-                'Sec-Fetch-Mode': 'cors',
-                'Sec-Fetch-Site': 'same-origin'
-              },
-              body: JSON.stringify({ 
-                sid: cfg.sid, 
-                mode: 'connecting', 
-                init: true, 
-                page: providerOrigin,
-                tz: 'Asia/Kolkata', 
-                tzo: 330 
-              })
-            });
-            const pingData = await pingRes.json();
-            if (pingData && pingData.token && pingData.wsUrl) {
-              tableTokenCache.set(eventId, {
-                token: pingData.token,
-                wsUrl: pingData.wsUrl,
-                streamId: pingData.streamId || (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) || 'GAME10',
-                expiresAt: Date.now() + 15 * 60 * 1000
-              });
-              pingCache.set(targetUrl, { data: pingData, timestamp: Date.now() });
-              console.log(`[Stream Warmer] Pre-warmed valid token & handshake for table ${eventId} (${pingData.streamId})`);
-            }
-          }
-        } catch (_) {}
-      }
-
       return true;
     }
   } catch (err) {
     console.warn(`[Stream Warmer] Notice for table ${eventId}:`, err.message);
+  } finally {
+    await redisClient.releaseLock(lockKey).catch(() => {});
   }
   return false;
 }
@@ -227,7 +182,14 @@ async function warmAllCasinoTables() {
 }
 
 // Start warmer 2s after boot, recurring every 7 minutes so cache never expires
-setTimeout(() => {
+setTimeout(async () => {
+  try {
+    // Clear any stale locks and expired tickets on fresh boot
+    for (const id of Object.keys(GAME_MAP)) {
+      await redisClient.del(`warmer:${id}`).catch(() => {});
+      await redisClient.del(`watchlink:${id}`).catch(() => {});
+    }
+  } catch (_) {}
   warmAllCasinoTables().catch(() => {});
   setInterval(() => {
     warmAllCasinoTables().catch(() => {});
@@ -453,8 +415,8 @@ router.get('/player/:eventId', async (req, res) => {
       try {
         console.log(`[Casino Player] Fetching player for ${eventId} (attempt ${attempt})`);
         
-        // Force fresh WatchLink if previous attempt failed
-        const watchData = await getWatchUrl(eventId, { forceFresh: attempt > 1 });
+        // Force fresh WatchLink (tickets cannot be reused)
+        const watchData = await getWatchUrl(eventId, { forceFresh: true });
         const watchUrl = typeof watchData === 'string' ? watchData : watchData.url;
         const referer = watchData.origin ? (watchData.origin.endsWith('/') ? watchData.origin : `${watchData.origin}/`) : 'https://casino.nice444.com/';
         const session = watchData.session || null;
@@ -500,57 +462,12 @@ router.get('/player/:eventId', async (req, res) => {
 
         html = transformPlayerHtml(html, watchUrl, false, eventId, referer, session);
 
-        // Cache player HTML for 10 minutes in RAM and distributed Redis
+        // Cache player HTML in RAM and distributed Redis
         playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + CASINO_CACHE_TTL });
         redisClient.set(`html:${eventId}`, html, Math.floor(CASINO_CACHE_TTL / 1000)).catch(() => {});
 
         // Since this one-time ticket is now consumed into HTML, invalidate raw watchlink from cache
         await invalidateWatchUrl(eventId);
-
-        // Trigger asynchronous background pre-warming of the ping token so it is ready in RAM
-        const cfgMatch = html.match(/<script type="application\/json" id="cfg">([^<]+)<\/script>/);
-        if (cfgMatch) {
-          try {
-            const cfg = JSON.parse(cfgMatch[1]);
-            const targetUrl = cfg.pingUrl.includes('target=') 
-              ? decodeURIComponent(new URL(cfg.pingUrl, 'http://localhost').searchParams.get('target'))
-              : cfg.pingUrl;
-            if (targetUrl) {
-              proxyFetch(targetUrl, {
-                method: 'POST',
-                session: session,
-                headers: { 
-                  'Content-Type': 'application/json', 
-                  'Origin': new URL(targetUrl).origin,
-                  'Referer': watchUrl,
-                  'User-Agent': UA,
-                  'Accept': '*/*',
-                  'Sec-Fetch-Dest': 'empty',
-                  'Sec-Fetch-Mode': 'cors',
-                  'Sec-Fetch-Site': 'same-origin'
-                },
-                body: JSON.stringify({ 
-                  sid: cfg.sid, 
-                  mode: 'connecting', 
-                  init: true, 
-                  page: referer,
-                  tz: 'Asia/Kolkata', 
-                  tzo: 330 
-                })
-              }).then(r => r.json()).then(data => {
-                if (data && data.token && data.wsUrl) {
-                  tableTokenCache.set(eventId, {
-                    token: data.token,
-                    wsUrl: data.wsUrl,
-                    streamId: data.streamId || (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) || 'GAME10',
-                    expiresAt: Date.now() + 15 * 60 * 1000
-                  });
-                  pingCache.set(targetUrl, { data, timestamp: Date.now() });
-                }
-              }).catch(() => {});
-            }
-          } catch (_) {}
-        }
 
         return html;
       } catch (err) {
@@ -940,25 +857,7 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
       return res.status(200).json(data);
     }
 
-    // Upstream returned non-JSON, 403, or missing token: Auto-heal on the fly!
-    if (eventId) {
-      console.log(`[Proxy-Ping] Stale session or missing token for table ${eventId}. Auto-refreshing fresh token on the fly...`);
-      await warmCasinoTable(eventId);
-      const freshToken = tableTokenCache.get(eventId);
-      if (freshToken && freshToken.token) {
-        return res.status(200).json({
-          ok: true,
-          state: "live",
-          streamId: freshToken.streamId || fallbackStreamId,
-          wsUrl: freshToken.wsUrl || fallbackWsUrl,
-          token: freshToken.token,
-          maintenance: null,
-          stop: false
-        });
-      }
-    }
-
-    // Fallback if warmCasinoTable couldn't get token
+    // Fallback if upstream ping returned non-JSON, 403, or missing token
     const cachedToken = (eventId && tableTokenCache.get(eventId)?.token) || '';
     return res.status(200).json({
       ok: true,
