@@ -55,8 +55,8 @@ function getPatchedSportsPlayerJs() {
   js = js.replace(/Q\.devtoolsGuard/g, 'false');
   js = js.replace(/devtoolsGuard:!0/g, 'devtoolsGuard:!1');
 
-  // 4. Suppress window redirect traps
-  js = js.replace(/location\.replace\(window\.top===window\?Q\.devtoolsRedirect:Q\.blockedUrl\)/g, '/* blocked suppressed */');
+  // 4. Suppress window redirect traps cleanly with void 0 (keeps valid JS syntax - no SyntaxError!)
+  js = js.replace(/location\.replace\(window\.top===window\?Q\.devtoolsRedirect:Q\.blockedUrl\)/g, 'void 0');
 
   _cachedSportsPlayerJs = js;
   console.log(`[SportsEngine] Loaded & optimized sports_player.js (${(js.length / 1024).toFixed(1)} KB) into RAM`);
@@ -212,7 +212,7 @@ async function getSportsWatchUrl(rawEventId, sportId = '4', forceFresh = false) 
 
 // 4. Transform Sports Player HTML for Zero-Latency Local Playback
 function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
-  // Hide all foreign watermarks & overlays cleanly
+  // YouTube-style buffer spinner & video styling
   const sportsStyle = `
     <style>
       html, body {
@@ -222,6 +222,7 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
         height: 100% !important;
         overflow: hidden !important;
         background: #000 !important;
+        position: relative !important;
       }
       #video, video {
         width: 100% !important;
@@ -238,12 +239,49 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
         width: 0 !important;
       }
       #status {
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
-        font-size: 13px !important;
-        background: rgba(0,0,0,0.6) !important;
-        backdrop-filter: blur(4px) !important;
-        border-radius: 6px !important;
-        padding: 6px 14px !important;
+        display: none !important; /* Replaced by sleek YouTube-style spinner */
+      }
+      /* YouTube-style buffer / loading spinner */
+      .yt-loader-container {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        z-index: 9999;
+        pointer-events: none;
+        transition: opacity 0.4s ease, visibility 0.4s ease;
+      }
+      .yt-spinner-ring {
+        width: 54px;
+        height: 54px;
+        border: 4px solid rgba(255, 255, 255, 0.15);
+        border-top: 4px solid #ef4444; /* YouTube red */
+        border-right: 4px solid rgba(239, 68, 68, 0.5);
+        border-radius: 50%;
+        animation: yt-spin 0.75s linear infinite;
+        box-shadow: 0 0 20px rgba(239, 68, 68, 0.4);
+      }
+      @keyframes yt-spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+      .yt-connecting-text {
+        margin-top: 14px;
+        color: #f1f5f9;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 13px;
+        font-weight: 500;
+        letter-spacing: 0.5px;
+        background: rgba(15, 23, 42, 0.85);
+        padding: 5px 14px;
+        border-radius: 8px;
+        backdrop-filter: blur(8px);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
       }
     </style>
   `;
@@ -261,7 +299,6 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
 
       const proxiedPingUrl = `/api/stream/sports/proxy-ping?target=${encodeURIComponent(fullPingUrl)}&watchUrl=${encodeURIComponent(watchUrl)}&eventId=${encodeURIComponent(eventId)}&origin=${encodeURIComponent(providerOrigin || 'https://nice444.com')}&session=${encodeURIComponent(session || '')}`;
 
-      // CRITICAL: DO NOT inject Casino 'GAME30'! Keep streamId untouched so player discovers it from ping response
       const modifiedCfg = {
         ...originalCfg,
         pingUrl: proxiedPingUrl,
@@ -271,7 +308,9 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
         devtoolsRedirect: "",
         blockedUrl: "",
         home: "",
-        webrtcTimeout: 30,
+        startMode: "webrtc", // Instant zero-latency WebRTC first, auto-fallbacks to HLS if needed
+        forceHls: false,
+        webrtcTimeout: 20,
         freezeSeconds: 120, // Prevents false freeze reloads
         offlineRetry: 5,
         frameAllow: {
@@ -297,7 +336,20 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
     `src="/api/stream/sports/player-assets/sports-player.js?v=${ts}"`
   );
 
-  // Runtime patch for ancestorOrigins and unload handler
+  // Insert YouTube spinner DOM element
+  const spinnerDom = `
+    <div id="yt-spinner" class="yt-loader-container">
+      <div class="yt-spinner-ring"></div>
+      <div class="yt-connecting-text">Connecting to Live Feed...</div>
+    </div>
+  `;
+  if (html.includes('<body')) {
+    html = html.replace(/<body[^>]*>/, `$&${spinnerDom}`);
+  } else {
+    html = `${spinnerDom}${html}`;
+  }
+
+  // Client runtime patch
   const clientPatch = `
     <script>
       (function() {
@@ -314,10 +366,49 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
             configurable: true
           });
         } catch(e) {}
+
+        // YouTube Spinner Controller
+        var spinner = document.getElementById('yt-spinner');
+        var textEl = spinner ? spinner.querySelector('.yt-connecting-text') : null;
+        var video = document.getElementById('video') || document.querySelector('video');
+
+        function hideSpinner() {
+          if (spinner && spinner.style.display !== 'none') {
+            spinner.style.opacity = '0';
+            spinner.style.visibility = 'hidden';
+            setTimeout(function() { if (spinner) spinner.style.display = 'none'; }, 400);
+          }
+        }
+
+        function showSpinner(msg) {
+          if (spinner) {
+            if (msg && textEl) textEl.textContent = msg;
+            spinner.style.display = 'flex';
+            spinner.style.visibility = 'visible';
+            setTimeout(function() { if (spinner) spinner.style.opacity = '1'; }, 10);
+          }
+        }
+
+        if (video) {
+          video.addEventListener('playing', hideSpinner);
+          video.addEventListener('canplay', hideSpinner);
+          video.addEventListener('timeupdate', function() {
+            if (video.currentTime > 0) hideSpinner();
+          });
+          video.addEventListener('waiting', function() { showSpinner('Buffering...'); });
+        }
+
+        // Auto-hide fallback after video starts receiving frames
+        var checkVideoPlaying = setInterval(function() {
+          if (video && (video.currentTime > 0 || video.readyState >= 3)) {
+            hideSpinner();
+            clearInterval(checkVideoPlaying);
+          }
+        }, 300);
       })();
     </script>
   `;
-  html = html.replace('</head>', `${clientPatch}</head>`);
+  html = html.replace('</body>', `${clientPatch}</body>`);
 
   return html;
 }
@@ -690,9 +781,11 @@ router.post('/proxy-ping', async (req, res) => {
     if (data && typeof data === 'object') {
       if (data.stop) data.stop = false;
 
-      // Rewrite HLS URL if present to dedicated sports HLS proxy
+      // Rewrite HLS URL if present to dedicated sports HLS proxy with full URL
       if (data.hlsUrl) {
-        data.hlsUrl = `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(data.hlsUrl)}`;
+        const host = req.get('host') || 'localhost:5050';
+        const proto = req.protocol || 'http';
+        data.hlsUrl = `${proto}://${host}/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(data.hlsUrl)}`;
       }
 
       if (isInit && data.token) {
