@@ -7,6 +7,8 @@
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { redisClient } = require('./streamCore');
 
 // Admin Credentials
@@ -507,9 +509,17 @@ router.post('/api/master/settings', requireMasterAuth, async (req, res) => {
 });
 
 // -------------------------------------------------------------
-// SERVE THE MASTER ADMIN DASHBOARD HTML UI (/master)
+// SERVE THE MASTER ADMIN DASHBOARD UI (/master)
 // -------------------------------------------------------------
 router.get('/master', (req, res) => {
+  const distHtml = path.join(__dirname, '../frontend/dist/index.html');
+  if (fs.existsSync(distHtml)) {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    return res.sendFile(distHtml);
+  }
+
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.send(`<!DOCTYPE html>

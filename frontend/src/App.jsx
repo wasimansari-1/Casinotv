@@ -15,8 +15,10 @@ import {
   Sparkles,
   ExternalLink,
   Trophy,
-  Activity
+  Activity,
+  Shield
 } from 'lucide-react';
+import MasterAdmin from './MasterAdmin';
 
 const CATEGORIES = [
   'ALL', 
@@ -32,7 +34,25 @@ const CATEGORIES = [
 const SPORT_FILTERS = ['ALL', 'Cricket', 'Soccer', 'Tennis'];
 
 export default function App() {
-  const [mainHub, setMainHub] = useState('casino'); // 'casino' | 'sports'
+  const [mainHub, setMainHub] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const p = (window.location.pathname + window.location.hash).toLowerCase();
+      if (p.includes('master')) return 'master';
+      if (p.includes('sports')) return 'sports';
+    }
+    return 'casino';
+  });
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const p = (window.location.pathname + window.location.hash).toLowerCase();
+      if (p.includes('master')) setMainHub('master');
+      else if (p.includes('sports')) setMainHub('sports');
+      else setMainHub('casino');
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
   
   // Casino State
   const [tables, setTables] = useState([]);
@@ -138,6 +158,17 @@ export default function App() {
     }
   };
 
+  if (mainHub === 'master') {
+    return (
+      <MasterAdmin
+        onBack={() => {
+          setMainHub('casino');
+          if (window.location.pathname !== '/') window.history.pushState(null, '', '/');
+        }}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#07090e] text-slate-100 flex flex-col font-sans selection:bg-amber-500 selection:text-black">
       {/* Top Navbar */}
@@ -160,10 +191,13 @@ export default function App() {
           </div>
         </div>
 
-        {/* Center: Hub Switcher (Casino vs Sports) */}
+        {/* Center: Hub Switcher (Casino vs Sports vs Master Guard) */}
         <div className="flex items-center bg-black/40 border border-white/10 p-1 rounded-2xl">
           <button
-            onClick={() => setMainHub('casino')}
+            onClick={() => {
+              setMainHub('casino');
+              if (window.location.pathname !== '/') window.history.pushState(null, '', '/');
+            }}
             className={`flex items-center gap-2 px-4 py-1.5 rounded-xl text-xs font-semibold transition-all ${
               mainHub === 'casino'
                 ? 'bg-gradient-to-r from-amber-500 to-rose-500 text-black shadow-md shadow-amber-500/20'
@@ -177,7 +211,10 @@ export default function App() {
           </button>
 
           <button
-            onClick={() => setMainHub('sports')}
+            onClick={() => {
+              setMainHub('sports');
+              if (window.location.pathname !== '/sports') window.history.pushState(null, '', '/sports');
+            }}
             className={`flex items-center gap-2 px-4 py-1.5 rounded-xl text-xs font-semibold transition-all ${
               mainHub === 'sports'
                 ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-black shadow-md shadow-emerald-500/20'
@@ -189,6 +226,21 @@ export default function App() {
             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-black/20 text-black font-bold">
               {sportsEvents.length}
             </span>
+          </button>
+
+          <button
+            onClick={() => {
+              setMainHub('master');
+              if (window.location.pathname !== '/master') window.history.pushState(null, '', '/master');
+            }}
+            className={`flex items-center gap-2 px-4 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+              mainHub === 'master'
+                ? 'bg-gradient-to-r from-rose-600 to-indigo-600 text-white shadow-md shadow-rose-600/30'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <Shield className="w-3.5 h-3.5 text-rose-400" />
+            <span>🛡️ Master Guard</span>
           </button>
         </div>
 
