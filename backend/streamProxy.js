@@ -99,8 +99,8 @@ async function fetchFullTsSegment(targetUrl) {
   return task;
 }
 
-// Memory cache for modified player HTML (TTL 8 Minutes) - background warmer renews at 7 min, eliminating cold-start black screens
-const CASINO_CACHE_TTL = 8 * 60 * 1000;
+// Memory cache for modified player HTML (TTL 40 Seconds) to deduplicate rapid clicks while ensuring fresh WebRTC sid on reload
+const CASINO_CACHE_TTL = 40 * 1000;
 const playerCache = new Map();
 const inFlightPlayers = new Map();
 const pingCache = new Map();
@@ -110,7 +110,7 @@ const tableTokenCache = new Map(); // eventId -> { token, wsUrl, streamId, expir
 async function warmCasinoTable(eventId) {
   // Coordinate across PM2 cluster: only 1 worker warms this table at a time
   const lockKey = `warmer:${eventId}`;
-  const acquired = await redisClient.acquireLock(lockKey, 30);
+  const acquired = await redisClient.acquireLock(lockKey, 300);
   if (!acquired) {
     return false;
   }
@@ -149,16 +149,61 @@ async function warmCasinoTable(eventId) {
       html = transformPlayerHtml(html, watchUrl, false, eventId, providerOrigin, session);
       playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + CASINO_CACHE_TTL });
       await redisClient.set(`html:${eventId}`, html, Math.floor(CASINO_CACHE_TTL / 1000)).catch(() => {});
-      console.log(`[Stream Warmer] Pre-warmed & cached table ${eventId} in memory/Redis (TTL: 8m)`);
+      console.log(`[Stream Warmer] Pre-warmed & cached table ${eventId} in memory/Redis (TTL: 10m)`);
 
       // Invalidate the single-use ticket from watchlink cache since it is now redeemed into HTML
       await invalidateWatchUrl(eventId);
+
+      // Pre-warm ping handshake to acquire and cache the valid JWT token in tableTokenCache!
+      const cfgMatch = html.match(/<script type="application\/json" id="cfg">([^<]+)<\/script>/);
+      if (cfgMatch) {
+        try {
+          const cfg = JSON.parse(cfgMatch[1]);
+          const targetUrl = cfg.pingUrl.includes('target=') 
+            ? decodeURIComponent(new URL(cfg.pingUrl, 'http://localhost').searchParams.get('target'))
+            : cfg.pingUrl;
+          if (targetUrl) {
+            const pingRes = await proxyFetch(targetUrl, {
+              method: 'POST',
+              session: session,
+              headers: { 
+                'Content-Type': 'application/json', 
+                'Origin': new URL(targetUrl).origin,
+                'Referer': watchUrl,
+                'User-Agent': UA,
+                'Accept': '*/*',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin'
+              },
+              body: JSON.stringify({ 
+                sid: cfg.sid, 
+                mode: 'connecting', 
+                init: true, 
+                page: providerOrigin,
+                tz: 'Asia/Kolkata', 
+                tzo: 330 
+              })
+            });
+            const pingData = await pingRes.json();
+            if (pingData && pingData.token && pingData.wsUrl) {
+              tableTokenCache.set(eventId, {
+                token: pingData.token,
+                wsUrl: pingData.wsUrl,
+                streamId: pingData.streamId || (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) || 'GAME10',
+                expiresAt: Date.now() + 15 * 60 * 1000
+              });
+              pingCache.set(targetUrl, { data: pingData, timestamp: Date.now() });
+              console.log(`[Stream Warmer] Pre-warmed valid token & handshake for table ${eventId} (${pingData.streamId})`);
+            }
+          }
+        } catch (_) {}
+      }
+
       return true;
     }
   } catch (err) {
     console.warn(`[Stream Warmer] Notice for table ${eventId}:`, err.message);
-  } finally {
-    await redisClient.releaseLock(lockKey).catch(() => {});
   }
   return false;
 }
@@ -169,33 +214,29 @@ async function warmAllCasinoTables() {
   _isWarming = true;
   try {
     const tableIds = Object.keys(GAME_MAP);
-    console.log(`[Stream Warmer] Gentle pre-warming for all ${tableIds.length} tables to ensure zero cold-start delay...`);
-    // Warm sequentially with 2.5s gentle spacing to protect against upstream rate limits
-    for (const id of tableIds) {
-      await warmCasinoTable(id);
-      await new Promise(r => setTimeout(r, 2500));
+    console.log(`[Stream Warmer] Fast parallel pre-warming for all ${tableIds.length} tables...`);
+    // Warm in parallel batches of 4 (1 table per provider)
+    const batchSize = 4;
+    for (let i = 0; i < tableIds.length; i += batchSize) {
+      const batch = tableIds.slice(i, i + batchSize);
+      await Promise.allSettled(batch.map(id => warmCasinoTable(id)));
+      if (i + batchSize < tableIds.length) {
+        await new Promise(r => setTimeout(r, 250));
+      }
     }
-    console.log(`[Stream Warmer] All ${tableIds.length} tables pre-warmed & ready in memory/Redis (TTL: 8m).`);
+    console.log(`[Stream Warmer] All ${tableIds.length} tables pre-warmed & ready in memory/Redis.`);
   } finally {
     _isWarming = false;
   }
 }
 
-// Start warmer 2s after boot, recurring every 7 minutes so cache never expires
-setTimeout(async () => {
-  try {
-    // Clear any stale locks, expired tickets, and old HTML on fresh boot
-    for (const id of Object.keys(GAME_MAP)) {
-      await redisClient.del(`warmer:${id}`).catch(() => {});
-      await redisClient.del(`watchlink:${id}`).catch(() => {});
-      await redisClient.del(`html:${id}`).catch(() => {});
-    }
-  } catch (_) {}
+// Start warmer 1s after boot, recurring every 8 minutes for all tables so cache never expires
+setTimeout(() => {
   warmAllCasinoTables().catch(() => {});
   setInterval(() => {
     warmAllCasinoTables().catch(() => {});
-  }, 7 * 60 * 1000);
-}, 2000);
+  }, 8 * 60 * 1000);
+}, 1000);
 
 // Health Check & Monitoring API (Real-Time Provider Observability)
 router.get('/health', async (req, res) => {
@@ -416,8 +457,8 @@ router.get('/player/:eventId', async (req, res) => {
       try {
         console.log(`[Casino Player] Fetching player for ${eventId} (attempt ${attempt})`);
         
-        // Force fresh WatchLink (tickets cannot be reused)
-        const watchData = await getWatchUrl(eventId, { forceFresh: true });
+        // Force fresh WatchLink if previous attempt failed
+        const watchData = await getWatchUrl(eventId, { forceFresh: attempt > 1 });
         const watchUrl = typeof watchData === 'string' ? watchData : watchData.url;
         const referer = watchData.origin ? (watchData.origin.endsWith('/') ? watchData.origin : `${watchData.origin}/`) : 'https://casino.nice444.com/';
         const session = watchData.session || null;
@@ -463,12 +504,57 @@ router.get('/player/:eventId', async (req, res) => {
 
         html = transformPlayerHtml(html, watchUrl, false, eventId, referer, session);
 
-        // Cache player HTML in RAM and distributed Redis
+        // Cache player HTML for 10 minutes in RAM and distributed Redis
         playerCache.set(`casino_${eventId}`, { html, expiresAt: Date.now() + CASINO_CACHE_TTL });
         redisClient.set(`html:${eventId}`, html, Math.floor(CASINO_CACHE_TTL / 1000)).catch(() => {});
 
         // Since this one-time ticket is now consumed into HTML, invalidate raw watchlink from cache
         await invalidateWatchUrl(eventId);
+
+        // Trigger asynchronous background pre-warming of the ping token so it is ready in RAM
+        const cfgMatch = html.match(/<script type="application\/json" id="cfg">([^<]+)<\/script>/);
+        if (cfgMatch) {
+          try {
+            const cfg = JSON.parse(cfgMatch[1]);
+            const targetUrl = cfg.pingUrl.includes('target=') 
+              ? decodeURIComponent(new URL(cfg.pingUrl, 'http://localhost').searchParams.get('target'))
+              : cfg.pingUrl;
+            if (targetUrl) {
+              proxyFetch(targetUrl, {
+                method: 'POST',
+                session: session,
+                headers: { 
+                  'Content-Type': 'application/json', 
+                  'Origin': new URL(targetUrl).origin,
+                  'Referer': watchUrl,
+                  'User-Agent': UA,
+                  'Accept': '*/*',
+                  'Sec-Fetch-Dest': 'empty',
+                  'Sec-Fetch-Mode': 'cors',
+                  'Sec-Fetch-Site': 'same-origin'
+                },
+                body: JSON.stringify({ 
+                  sid: cfg.sid, 
+                  mode: 'connecting', 
+                  init: true, 
+                  page: referer,
+                  tz: 'Asia/Kolkata', 
+                  tzo: 330 
+                })
+              }).then(r => r.json()).then(data => {
+                if (data && data.token && data.wsUrl) {
+                  tableTokenCache.set(eventId, {
+                    token: data.token,
+                    wsUrl: data.wsUrl,
+                    streamId: data.streamId || (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) || 'GAME10',
+                    expiresAt: Date.now() + 15 * 60 * 1000
+                  });
+                  pingCache.set(targetUrl, { data, timestamp: Date.now() });
+                }
+              }).catch(() => {});
+            }
+          } catch (_) {}
+        }
 
         return html;
       } catch (err) {
@@ -507,8 +593,8 @@ router.get('/player/:eventId', async (req, res) => {
       return res.send(stale.html);
     }
 
-    // Clean player fallback: Auto-retrying black screen (no synthetic loader or text)
-    const cleanPlayerHtml = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;}</style><script>setTimeout(function(){location.reload();}, 2000);</script></head><body></body></html>`;
+    // Clean player fallback: Auto-retrying black screen with centered loader GIF (no synthetic error card)
+    const cleanPlayerHtml = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#64748b;font-family:sans-serif}.msg{text-align:center}</style><script>setTimeout(function(){location.reload();}, 3000);</script></head><body><div class="msg"><img src="/api/stream/player-assets/loader.gif" style="width:48px;height:48px;display:block;margin:0 auto 10px;opacity:0.7"><div style="color:#94a3b8;font-size:12px;font-weight:500;">Connecting live stream...</div></div></body></html>`;
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     return res.status(200).send(cleanPlayerHtml);
   } finally {
@@ -644,6 +730,7 @@ function getPatchedPlayerJs() {
   // 3. Neutralize 'The table didn\'t open. Please refresh the page.' (variable l) and premature black screen
   text = text.replace(/if\(!p\.ready\)throw new Error\(l\);/g, 'if(!p.ready){p.ready=!0;if(!p.streamId)p.streamId=(t&&t.streamId)||"GAME30";if(!p.wsUrl)p.wsUrl="wss://livecdnplatin.com/UNIVERSE-GE/websocket";}');
   text = text.replace(/g\.say\(l,!0\)/g, '(function(){console.warn("[Auto-Retrying Stream]");return false;})()');
+  text = text.replace(/if\(p\.ended\)return;g\.hideLoading\(\);/g, 'if(p.ended)return;');
 
   // 4. Neutralize session killer ("The dealer has closed your session")
   text = text.replace(/403===a\.status/g, 'false');
@@ -795,10 +882,7 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
     const targetUrl = decodeURIComponent(target);
     const decodedWatchUrl = watchUrl ? decodeURIComponent(watchUrl) : targetUrl;
     const targetOrigin = new URL(targetUrl).origin;
-    let pageOrigin = origin ? decodeURIComponent(origin) : (decodedWatchUrl.includes('startexch') ? 'https://startexch99.com/' : 'https://nice444.com');
-    if (targetUrl.includes('livecdnplatin.com')) {
-      pageOrigin = 'https://nice444.com';
-    }
+    const pageOrigin = origin ? decodeURIComponent(origin) : (decodedWatchUrl.includes('startexch') ? 'https://startexch99.com/' : 'https://nice444.com/');
 
     // Check pingCache URL cache
     if (isInit && pingCache.has(targetUrl)) {
@@ -861,7 +945,25 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
       return res.status(200).json(data);
     }
 
-    // Fallback if upstream ping returned non-JSON, 403, or missing token
+    // Upstream returned non-JSON, 403, or missing token: Auto-heal on the fly!
+    if (eventId) {
+      console.log(`[Proxy-Ping] Stale session or missing token for table ${eventId}. Auto-refreshing fresh token on the fly...`);
+      await warmCasinoTable(eventId);
+      const freshToken = tableTokenCache.get(eventId);
+      if (freshToken && freshToken.token) {
+        return res.status(200).json({
+          ok: true,
+          state: "live",
+          streamId: freshToken.streamId || fallbackStreamId,
+          wsUrl: freshToken.wsUrl || fallbackWsUrl,
+          token: freshToken.token,
+          maintenance: null,
+          stop: false
+        });
+      }
+    }
+
+    // Fallback if warmCasinoTable couldn't get token
     const cachedToken = (eventId && tableTokenCache.get(eventId)?.token) || '';
     return res.status(200).json({
       ok: true,

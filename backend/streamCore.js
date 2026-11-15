@@ -30,21 +30,21 @@ const CONFIG = {
 
 let _cachedAgent = null;
 let _cachedProxyUrl = null;
-let _currentStickySession = 10000 + Math.floor(Math.random() * 80000); // Dynamic Indian Residential session pool
+let _currentStickySession = Math.floor(Math.random() * 10) + 1; // Strict 1 to 10 pool of Webshare Indian Residential sessions
 const _tableSessionMap = new Map();
 
 function getSessionForTable(tableId) {
   if (!tableId) return _currentStickySession;
   if (!_tableSessionMap.has(tableId)) {
     const hash = String(tableId).split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
-    _tableSessionMap.set(tableId, 10000 + (hash * 137 % 80000));
+    _tableSessionMap.set(tableId, (hash % 10) + 1);
   }
   return _tableSessionMap.get(tableId);
 }
 
 function rotateTableSession(tableId, reason = '') {
   const current = getSessionForTable(tableId);
-  const next = 10000 + Math.floor(Math.random() * 80000);
+  const next = (current % 10) + 1;
   _tableSessionMap.set(tableId, next);
   console.log(`[StreamCore] Rotated proxy session for table ${tableId} (#${current} -> #${next}) Reason: ${reason || 'unspecified'}`);
   return next;
@@ -52,7 +52,8 @@ function rotateTableSession(tableId, reason = '') {
 
 function getEffectiveProxyUrl(proxyUrlStr, sessionOverride = null) {
   if (!proxyUrlStr) return null;
-  const session = sessionOverride || _currentStickySession;
+  const rawSession = sessionOverride || _currentStickySession;
+  const session = ((Math.abs(Number(rawSession) || 1) - 1) % 10) + 1; // Strict 1 to 10 pool
   if (proxyUrlStr.includes('webshare.io')) {
     if (proxyUrlStr.includes('-rotate')) {
       return proxyUrlStr.replace('-rotate', `-${session}`);
@@ -77,13 +78,13 @@ function resetProxyAgent() {
 let _lastRotateTime = 0;
 function rotateStickySession(reason = '') {
   const now = Date.now();
-  // Cooldown: at least 5 seconds between rotations
-  if (now - _lastRotateTime < 5000) {
+  // Cooldown: at least 10 seconds between rotations
+  if (now - _lastRotateTime < 10000) {
     return _currentStickySession;
   }
   _lastRotateTime = now;
   const oldSession = _currentStickySession;
-  _currentStickySession = 10000 + Math.floor(Math.random() * 80000);
+  _currentStickySession = (_currentStickySession % 10) + 1;
   resetProxyAgent();
   console.log(`[StreamCore] Rotated sticky residential proxy session from #${oldSession} -> #${_currentStickySession} (Reason: ${reason || 'unspecified'})`);
   return _currentStickySession;
@@ -808,9 +809,14 @@ async function getWatchUrl(eventId, options = {}) {
     }
 
     try {
-      // Nice444 is the authoritative provider whitelisted by Platin CDN (frameAllow: nice444.com).
-      // CBTF is excluded for casino games to prevent Platin P1 anti-copy blocks ("copied player").
-      const providerList = ['nice444', 'startexch', 'asstarplay'];
+      // Distribute primary provider evenly across providers based on eventId
+      const allKeys = ['startexch', 'nice444', 'asstarplay', 'cbtf'];
+      const hash = eventId.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
+      const startIdx = hash % allKeys.length;
+      const providerList = [
+        ...allKeys.slice(startIdx),
+        ...allKeys.slice(0, startIdx)
+      ];
       const maxRetries = CONFIG.maxRetries;
       const backoffDelays = CONFIG.backoffMs;
       let lastError = null;
@@ -879,7 +885,7 @@ async function getWatchUrl(eventId, options = {}) {
                     url: data.data.url,
                     provider: provider.name,
                     provKey: provKey,
-                    origin: 'https://nice444.com',
+                    origin: provider.casinoBase,
                     session: tableSession,
                     expiresAt: Date.now() + (ttlSec * 1000)
                   };

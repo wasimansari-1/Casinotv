@@ -79,6 +79,7 @@
           this.loading.classList.remove("fade-out"));
       },
       hideLoading() {
+        if (!window.webrtcPlayer || !window.webrtcPlayer.everPlayed) return;
         (this.loading.classList.add("fade-out"),
           clearTimeout(this.hideTimer),
           (this.hideTimer = setTimeout(() => {
@@ -90,7 +91,7 @@
                 window.parent !== window &&
                 window.parent.postMessage({ hideLoader: !0 }, "*");
             } catch (e) {}
-          }, 800)));
+          }, 400)));
       },
       say(e, t) {
         console.log("[Notice]", e);
