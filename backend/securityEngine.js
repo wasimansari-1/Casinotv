@@ -39,7 +39,7 @@ for (const item of DEFAULT_DOMAINS) {
 
 const auditLogs = [];
 let enforceWhitelist = true;
-let allowDirectAccess = true; // Allows testing directly via browser address bar / curl if true
+let allowDirectAccess = false; // Strict Anti-Theft: Direct address bar / New tab / Postman blocked by default
 
 // Initialize Whitelist from Redis or Defaults
 async function initWhitelist() {
@@ -175,6 +175,18 @@ async function verifyAccess(req, streamType = 'casino') {
   if (clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
   const streamId = req.params.eventId || req.query.streamId || '';
 
+  // Block automated API tools (Postman, curl, insomnia, python-requests, etc.)
+  const ua = req.headers['user-agent'] || '';
+  if (ua.includes('PostmanRuntime') || ua.includes('curl/') || ua.includes('python-requests') || ua.includes('insomnia') || ua.includes('aiohttp') || ua.includes('Go-http-client')) {
+    logAttempt('API Tool / Postman / Curl', clientIp, streamType, streamId, 'BLOCKED', 'Direct API tool access blocked');
+    return {
+      allowed: false,
+      domain: 'API Client / Postman Blocked',
+      heading: 'Domain Not Whitelisted',
+      reason: 'Direct API tool access (Postman / Curl / Python) is strictly prohibited. Stream must be embedded inside an authorized whitelisted domain.'
+    };
+  }
+
   // Check 1: Did the request come from a whitelisted Client IP?
   const ipMatched = clientIp ? findMatchedEntry(clientIp) : null;
 
@@ -190,12 +202,12 @@ async function verifyAccess(req, streamType = 'casino') {
       logAttempt('Direct Browser Access', clientIp, streamType, streamId, 'ALLOWED', 'Direct testing permitted');
       return { allowed: true, domain: 'direct_visit' };
     }
-    logAttempt('Direct / No-Referer', clientIp, streamType, streamId, 'BLOCKED', 'Direct iframe embedding prohibited without Referer');
+    logAttempt('Direct / New Tab / Postman', clientIp, streamType, streamId, 'BLOCKED', 'Direct URL hit prohibited');
     return {
       allowed: false,
-      domain: clientIp || 'Direct Access',
-      heading: 'Domain / IP Not Whitelisted',
-      reason: 'Direct access blocked. Stream must be embedded within an authorized whitelisted domain or authorized IP.'
+      domain: clientIp || 'Direct Access / New Tab',
+      heading: 'Domain Not Whitelisted',
+      reason: 'Direct access via new tab, address bar, or external tools is blocked. Stream must be embedded within an authorized whitelisted domain or authorized IP.'
     };
   }
 
@@ -204,7 +216,7 @@ async function verifyAccess(req, streamType = 'casino') {
     return {
       allowed: false,
       domain: targetLabel,
-      heading: 'Domain / IP Not Whitelisted',
+      heading: 'Domain Not Whitelisted',
       reason: `"${targetLabel}" is not whitelisted by the administrator. Stream embedding is restricted.`
     };
   }
@@ -341,6 +353,81 @@ function renderUnauthorizedScreen(domain, streamType, reason, customHeading) {
       color: #94a3b8;
       margin-bottom: 24px;
     }
+    .contact-box {
+      background: #090d17;
+      border: 1px solid #1e293b;
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 20px;
+      text-align: left;
+    }
+    .contact-title {
+      font-size: 10px;
+      font-weight: 800;
+      color: #38bdf8;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      margin-bottom: 10px;
+      text-align: center;
+    }
+    .contact-card {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      gap: 8px;
+    }
+    .contact-card:last-child {
+      margin-bottom: 0;
+    }
+    .contact-label {
+      font-size: 10px;
+      color: #94a3b8;
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+    .contact-phone {
+      font-family: monospace;
+      font-size: 13px;
+      font-weight: 700;
+      color: #f8fafc;
+      letter-spacing: 0.3px;
+    }
+    .contact-links {
+      display: flex;
+      gap: 6px;
+      shrink: 0;
+    }
+    .btn-wa {
+      background: #10b981;
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 6px 10px;
+      border-radius: 6px;
+      text-decoration: none;
+      transition: background 0.2s;
+    }
+    .btn-wa:hover {
+      background: #059669;
+    }
+    .btn-call {
+      background: #3b82f6;
+      color: #ffffff;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 6px 10px;
+      border-radius: 6px;
+      text-decoration: none;
+      transition: background 0.2s;
+    }
+    .btn-call:hover {
+      background: #2563eb;
+    }
     .footer-note {
       font-size: 11px;
       color: #475569;
@@ -365,6 +452,34 @@ function renderUnauthorizedScreen(domain, streamType, reason, customHeading) {
     <h1>${String(heading).toUpperCase()}</h1>
     <div class="domain-pill">${domain || 'Unknown Domain'}</div>
     <p>${reason || 'This domain is not whitelisted by the stream administrator.'}</p>
+
+    <!-- Prominent Contact Details for Whitelisting -->
+    <div class="contact-box">
+      <div class="contact-title">FOR STREAM ACCESS & WHITELISTING CONTACT</div>
+      
+      <div class="contact-card">
+        <div>
+          <div class="contact-label">Admin Support 1</div>
+          <div class="contact-phone">+63 945 146 9623</div>
+        </div>
+        <div class="contact-links">
+          <a href="https://wa.me/639451469623" target="_blank" class="btn-wa">WhatsApp</a>
+          <a href="tel:+639451469623" class="btn-call">Call</a>
+        </div>
+      </div>
+
+      <div class="contact-card">
+        <div>
+          <div class="contact-label">Admin Support 2</div>
+          <div class="contact-phone">+63 915 922 4695</div>
+        </div>
+        <div class="contact-links">
+          <a href="https://wa.me/639159224695" target="_blank" class="btn-wa">WhatsApp</a>
+          <a href="tel:+639159224695" class="btn-call">Call</a>
+        </div>
+      </div>
+    </div>
+
     <div class="footer-note">
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
       <span>Protected by CSTV Master Guard Engine</span>
