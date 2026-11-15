@@ -99,8 +99,8 @@ async function fetchFullTsSegment(targetUrl) {
   return task;
 }
 
-// Memory cache for modified player HTML (TTL 40 Seconds) to deduplicate rapid clicks while ensuring fresh WebRTC sid on reload
-const CASINO_CACHE_TTL = 40 * 1000;
+// Memory cache for modified player HTML (TTL 8 Minutes) - background warmer renews at 7 min, eliminating cold-start black screens
+const CASINO_CACHE_TTL = 8 * 60 * 1000;
 const playerCache = new Map();
 const inFlightPlayers = new Map();
 const pingCache = new Map();
@@ -214,29 +214,25 @@ async function warmAllCasinoTables() {
   _isWarming = true;
   try {
     const tableIds = Object.keys(GAME_MAP);
-    console.log(`[Stream Warmer] Fast parallel pre-warming for all ${tableIds.length} tables...`);
-    // Warm in parallel batches of 4 (1 table per provider)
-    const batchSize = 4;
-    for (let i = 0; i < tableIds.length; i += batchSize) {
-      const batch = tableIds.slice(i, i + batchSize);
-      await Promise.allSettled(batch.map(id => warmCasinoTable(id)));
-      if (i + batchSize < tableIds.length) {
-        await new Promise(r => setTimeout(r, 250));
-      }
+    console.log(`[Stream Warmer] Gentle pre-warming for all ${tableIds.length} tables to ensure zero cold-start delay...`);
+    // Warm sequentially with 2.5s gentle spacing to protect against upstream rate limits
+    for (const id of tableIds) {
+      await warmCasinoTable(id);
+      await new Promise(r => setTimeout(r, 2500));
     }
-    console.log(`[Stream Warmer] All ${tableIds.length} tables pre-warmed & ready in memory/Redis.`);
+    console.log(`[Stream Warmer] All ${tableIds.length} tables pre-warmed & ready in memory/Redis (TTL: 8m).`);
   } finally {
     _isWarming = false;
   }
 }
 
-// Start warmer 1s after boot, recurring every 8 minutes for all tables so cache never expires
+// Start warmer 2s after boot, recurring every 7 minutes so cache never expires
 setTimeout(() => {
   warmAllCasinoTables().catch(() => {});
   setInterval(() => {
     warmAllCasinoTables().catch(() => {});
-  }, 8 * 60 * 1000);
-}, 1000);
+  }, 7 * 60 * 1000);
+}, 2000);
 
 // Health Check & Monitoring API (Real-Time Provider Observability)
 router.get('/health', async (req, res) => {

@@ -28,7 +28,7 @@ const sportsWatchLinkCache = new Map(); // streamId -> { url, origin, provider, 
 const sportsPingCache = new Map();   // targetUrl -> { data, timestamp }
 const inFlightSportsPlayers = new Map(); // deduplicate concurrent requests for same match
 
-const SPORTS_HTML_TTL = 45000; // 45 seconds HTML cache in RAM & Redis
+const SPORTS_HTML_TTL = 5 * 60 * 1000; // 5 minutes HTML cache in RAM & Redis
 
 // 1. Pre-patch and cache the raw LTVE sports player JavaScript in RAM memory
 let _cachedSportsPlayerJs = null;
@@ -212,7 +212,7 @@ async function getSportsWatchUrl(rawEventId, sportId = '4', forceFresh = false) 
 
 // 4. Transform Sports Player HTML for Zero-Latency Local Playback
 function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
-  // YouTube-style buffer spinner & video styling
+  // Broadcast-grade live sports styling & ultra-smooth GPU spinner
   const sportsStyle = `
     <style>
       html, body {
@@ -239,49 +239,78 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
         width: 0 !important;
       }
       #status {
-        display: none !important; /* Replaced by sleek YouTube-style spinner */
+        display: none !important; /* Replaced by broadcast-grade live spinner */
       }
-      /* YouTube-style buffer / loading spinner */
-      .yt-loader-container {
+      /* Broadcast-grade live stream loader */
+      .sports-loader-overlay {
         position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
+        inset: 0;
         display: flex;
         flex-direction: column;
         align-items: center;
         justify-content: center;
-        z-index: 9999;
+        background: #000;
+        z-index: 99999;
+        transition: opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1), visibility 0.4s ease;
         pointer-events: none;
-        transition: opacity 0.4s ease, visibility 0.4s ease;
       }
-      .yt-spinner-ring {
-        width: 54px;
-        height: 54px;
-        border: 4px solid rgba(255, 255, 255, 0.15);
-        border-top: 4px solid #ef4444; /* YouTube red */
-        border-right: 4px solid rgba(239, 68, 68, 0.5);
-        border-radius: 50%;
-        animation: yt-spin 0.75s linear infinite;
-        box-shadow: 0 0 20px rgba(239, 68, 68, 0.4);
+      .sports-spinner-wrapper {
+        width: 62px;
+        height: 62px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        filter: drop-shadow(0 0 16px rgba(239, 68, 68, 0.5));
       }
-      @keyframes yt-spin {
-        0% { transform: rotate(0deg); }
+      .sports-svg-spinner {
+        width: 100%;
+        height: 100%;
+        animation: svg-spin 1s linear infinite;
+      }
+      .spinner-path {
+        stroke-dasharray: 100, 200;
+        stroke-dashoffset: 0;
+        animation: svg-dash 1.4s ease-in-out infinite;
+      }
+      @keyframes svg-spin {
         100% { transform: rotate(360deg); }
       }
-      .yt-connecting-text {
-        margin-top: 14px;
+      @keyframes svg-dash {
+        0% { stroke-dasharray: 1, 200; stroke-dashoffset: 0; }
+        50% { stroke-dasharray: 89, 200; stroke-dashoffset: -35px; }
+        100% { stroke-dasharray: 89, 200; stroke-dashoffset: -124px; }
+      }
+      .sports-live-badge {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 20px;
+        background: rgba(15, 23, 42, 0.9);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 9999px;
+        padding: 6px 18px;
+        backdrop-filter: blur(10px);
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+      }
+      .live-dot {
+        width: 7.5px;
+        height: 7.5px;
+        border-radius: 50%;
+        background: #22c55e;
+        box-shadow: 0 0 10px #22c55e;
+        animation: live-pulse 1.4s ease-in-out infinite;
+      }
+      @keyframes live-pulse {
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.35; transform: scale(0.85); }
+      }
+      .live-status-text {
         color: #f1f5f9;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        font-size: 13px;
-        font-weight: 500;
-        letter-spacing: 0.5px;
-        background: rgba(15, 23, 42, 0.85);
-        padding: 5px 14px;
-        border-radius: 8px;
-        backdrop-filter: blur(8px);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.8px;
+        text-transform: uppercase;
       }
     </style>
   `;
@@ -336,11 +365,26 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
     `src="/api/stream/sports/player-assets/sports-player.js?v=${ts}"`
   );
 
-  // Insert YouTube spinner DOM element
+  // Insert broadcast-grade SVG live spinner DOM element
   const spinnerDom = `
-    <div id="yt-spinner" class="yt-loader-container">
-      <div class="yt-spinner-ring"></div>
-      <div class="yt-connecting-text">Connecting to Live Feed...</div>
+    <div id="sports-loader" class="sports-loader-overlay">
+      <div class="sports-spinner-wrapper">
+        <svg class="sports-svg-spinner" viewBox="0 0 50 50">
+          <defs>
+            <linearGradient id="spinner-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#ef4444" />
+              <stop offset="60%" stop-color="#f59e0b" />
+              <stop offset="100%" stop-color="#ef4444" stop-opacity="0.2" />
+            </linearGradient>
+          </defs>
+          <circle cx="25" cy="25" r="20" fill="none" stroke="rgba(255,255,255,0.08)" stroke-width="3.5" />
+          <circle class="spinner-path" cx="25" cy="25" r="20" fill="none" stroke="url(#spinner-grad)" stroke-width="3.5" stroke-linecap="round" />
+        </svg>
+      </div>
+      <div class="sports-live-badge">
+        <span class="live-dot"></span>
+        <span class="live-status-text">CONNECTING TO LIVE FEED...</span>
+      </div>
     </div>
   `;
   if (html.includes('<body')) {
@@ -367,41 +411,41 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
           });
         } catch(e) {}
 
-        // YouTube Spinner Controller
-        var spinner = document.getElementById('yt-spinner');
-        var textEl = spinner ? spinner.querySelector('.yt-connecting-text') : null;
+        // Broadcast Loader Controller
+        var loader = document.getElementById('sports-loader');
+        var textEl = loader ? loader.querySelector('.live-status-text') : null;
         var video = document.getElementById('video') || document.querySelector('video');
 
-        function hideSpinner() {
-          if (spinner && spinner.style.display !== 'none') {
-            spinner.style.opacity = '0';
-            spinner.style.visibility = 'hidden';
-            setTimeout(function() { if (spinner) spinner.style.display = 'none'; }, 400);
+        function hideLoader() {
+          if (loader && loader.style.display !== 'none') {
+            loader.style.opacity = '0';
+            loader.style.visibility = 'hidden';
+            setTimeout(function() { if (loader) loader.style.display = 'none'; }, 400);
           }
         }
 
-        function showSpinner(msg) {
-          if (spinner) {
+        function showLoader(msg) {
+          if (loader) {
             if (msg && textEl) textEl.textContent = msg;
-            spinner.style.display = 'flex';
-            spinner.style.visibility = 'visible';
-            setTimeout(function() { if (spinner) spinner.style.opacity = '1'; }, 10);
+            loader.style.display = 'flex';
+            loader.style.visibility = 'visible';
+            setTimeout(function() { if (loader) loader.style.opacity = '1'; }, 10);
           }
         }
 
         if (video) {
-          video.addEventListener('playing', hideSpinner);
-          video.addEventListener('canplay', hideSpinner);
+          video.addEventListener('playing', hideLoader);
+          video.addEventListener('canplay', hideLoader);
           video.addEventListener('timeupdate', function() {
-            if (video.currentTime > 0) hideSpinner();
+            if (video.currentTime > 0) hideLoader();
           });
-          video.addEventListener('waiting', function() { showSpinner('Buffering...'); });
+          video.addEventListener('waiting', function() { showLoader('BUFFERING...'); });
         }
 
-        // Auto-hide fallback after video starts receiving frames
+        // Auto-hide fallback once video frames start rendering
         var checkVideoPlaying = setInterval(function() {
           if (video && (video.currentTime > 0 || video.readyState >= 3)) {
-            hideSpinner();
+            hideLoader();
             clearInterval(checkVideoPlaying);
           }
         }, 300);
@@ -600,49 +644,36 @@ router.get('/events', async (req, res) => {
   return res.json({ success: true, count: sportsEventsCache.data?.length || 0, events: sportsEventsCache.data || [] });
 });
 
-// 4. Dedicated Sports TV Player Iframe
-router.get('/player/:eventId', async (req, res) => {
-  const { eventId } = req.params;
-  const sportId = req.query.sportId || '4';
+// 4. Dedicated Sports TV Player Fetcher with 2-Layer Cache & In-Flight Dedup
+async function getOrFetchSportsPlayerHtml(eventId, sportId = '4', isWarm = false) {
   const cacheKey = `sports_player_${eventId}`;
 
   // 1. Check local RAM cache (serves in 0ms)
   const cached = sportsPlayerCache.get(cacheKey);
   if (cached && Date.now() < cached.expiresAt && cached.html && !cached.html.includes('Live TV Feed Not Available')) {
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Permissions-Policy', 'unload=*');
-    return res.send(cached.html);
+    return cached.html;
   }
 
   // 2. Check distributed Redis cache
   const redisHtml = await redisClient.get(`html:sports:${eventId}`);
   if (redisHtml && typeof redisHtml === 'string' && redisHtml.includes('cfg')) {
     sportsPlayerCache.set(cacheKey, { html: redisHtml, expiresAt: Date.now() + SPORTS_HTML_TTL });
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Permissions-Policy', 'unload=*');
-    return res.send(redisHtml);
+    return redisHtml;
   }
 
   // 3. In-flight single-flight deduplication
   if (inFlightSportsPlayers.has(eventId)) {
     try {
-      const html = await inFlightSportsPlayers.get(eventId);
-      res.setHeader('Content-Type', 'text/html; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Permissions-Policy', 'unload=*');
-      return res.send(html);
+      return await inFlightSportsPlayers.get(eventId);
     } catch (_) {}
   }
 
   const task = (async () => {
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        console.log(`[SportsEngine] Fetching sports player for match ${eventId} (attempt ${attempt})`);
+        if (!isWarm) {
+          console.log(`[SportsEngine] Fetching sports player for match ${eventId} (attempt ${attempt})`);
+        }
         
         // Use forceFresh on attempt 2
         const watchData = await getSportsWatchUrl(eventId, sportId, attempt > 1);
@@ -663,7 +694,6 @@ router.get('/player/:eventId', async (req, res) => {
         if (pageRes.status === 403 || pageRes.status === 404 || !pageRes.ok) {
           console.warn(`[SportsEngine] Upstream watchUrl returned status ${pageRes.status} on session #${session}. Rotating session...`);
           rotateTableSession(eventId, `WatchUrl HTTP ${pageRes.status}`);
-          // Clear cached watchlink so attempt 2 generates a fresh one
           sportsWatchLinkCache.delete(`sports_watchlink:${watchData.streamId || eventId}`);
           await redisClient.del(`sports_watchlink:${watchData.streamId || eventId}`).catch(() => {});
           
@@ -686,14 +716,14 @@ router.get('/player/:eventId', async (req, res) => {
 
         const transformedHtml = transformSportsHtml(rawHtml, watchUrl, eventId, watchData.origin, session);
 
-        // Cache player HTML for 45s in RAM and Redis
+        // Cache player HTML for 5m in RAM and Redis
         sportsPlayerCache.set(cacheKey, { html: transformedHtml, expiresAt: Date.now() + SPORTS_HTML_TTL });
         await redisClient.set(`html:sports:${eventId}`, transformedHtml, Math.round(SPORTS_HTML_TTL / 1000));
         return transformedHtml;
       } catch (err) {
         const isNoTv = err.message && (err.message.includes('No live TV') || err.message.includes('Stream not found'));
         if (isNoTv) {
-          console.log(`[SportsEngine] Match ${eventId} has no active satellite broadcast feed upstream.`);
+          if (!isWarm) console.log(`[SportsEngine] Match ${eventId} has no active satellite broadcast feed upstream.`);
           return renderNoTvHtml();
         }
 
@@ -711,18 +741,60 @@ router.get('/player/:eventId', async (req, res) => {
 
   inFlightSportsPlayers.set(eventId, task);
   try {
-    const finalHtml = await task;
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Permissions-Policy', 'unload=*');
-    res.removeHeader('X-Frame-Options');
-    res.removeHeader('Content-Security-Policy');
-    return res.send(finalHtml);
+    return await task;
   } finally {
     inFlightSportsPlayers.delete(eventId);
   }
+}
+
+// Dedicated Sports TV Player Route
+router.get('/player/:eventId', async (req, res) => {
+  const { eventId } = req.params;
+  const sportId = req.query.sportId || '4';
+
+  const finalHtml = await getOrFetchSportsPlayerHtml(eventId, sportId);
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Permissions-Policy', 'unload=*');
+  res.removeHeader('X-Frame-Options');
+  res.removeHeader('Content-Security-Policy');
+  return res.send(finalHtml);
 });
+
+// Background Active In-Play Sports Pre-Warmer
+// Scans for top in-play matches and keeps them warm in Redis with gentle 3s spacing
+let _isSportsWarming = false;
+async function warmInPlaySportsMatches() {
+  if (_isSportsWarming) return;
+  _isSportsWarming = true;
+  try {
+    const events = sportsEventsCache.data || [];
+    const inPlayEvents = events.filter(e => e.inPlay).slice(0, 5);
+    if (!inPlayEvents.length) return;
+
+    console.log(`[Sports Warmer] Gentle pre-warming for ${inPlayEvents.length} active in-play matches...`);
+    for (const ev of inPlayEvents) {
+      try {
+        await getOrFetchSportsPlayerHtml(ev.id, ev.sportId, true);
+      } catch (_) {}
+      await new Promise(r => setTimeout(r, 3000));
+    }
+    console.log(`[Sports Warmer] In-play matches pre-warmed & ready in Redis.`);
+  } catch (err) {
+    console.warn(`[Sports Warmer] Error:`, err.message);
+  } finally {
+    _isSportsWarming = false;
+  }
+}
+
+// Start sports warmer 10s after boot, recurring every 4 minutes
+setTimeout(() => {
+  warmInPlaySportsMatches().catch(() => {});
+  setInterval(() => {
+    warmInPlaySportsMatches().catch(() => {});
+  }, 4 * 60 * 1000);
+}, 10000);
 
 // 5. Dedicated Sports Proxy-Ping
 router.post('/proxy-ping', async (req, res) => {
