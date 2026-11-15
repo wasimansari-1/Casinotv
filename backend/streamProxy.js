@@ -184,10 +184,11 @@ async function warmAllCasinoTables() {
 // Start warmer 2s after boot, recurring every 7 minutes so cache never expires
 setTimeout(async () => {
   try {
-    // Clear any stale locks and expired tickets on fresh boot
+    // Clear any stale locks, expired tickets, and old HTML on fresh boot
     for (const id of Object.keys(GAME_MAP)) {
       await redisClient.del(`warmer:${id}`).catch(() => {});
       await redisClient.del(`watchlink:${id}`).catch(() => {});
+      await redisClient.del(`html:${id}`).catch(() => {});
     }
   } catch (_) {}
   warmAllCasinoTables().catch(() => {});
@@ -794,7 +795,10 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
     const targetUrl = decodeURIComponent(target);
     const decodedWatchUrl = watchUrl ? decodeURIComponent(watchUrl) : targetUrl;
     const targetOrigin = new URL(targetUrl).origin;
-    const pageOrigin = origin ? decodeURIComponent(origin) : (decodedWatchUrl.includes('startexch') ? 'https://startexch99.com/' : 'https://nice444.com/');
+    let pageOrigin = origin ? decodeURIComponent(origin) : (decodedWatchUrl.includes('startexch') ? 'https://startexch99.com/' : 'https://nice444.com');
+    if (targetUrl.includes('livecdnplatin.com')) {
+      pageOrigin = 'https://nice444.com';
+    }
 
     // Check pingCache URL cache
     if (isInit && pingCache.has(targetUrl)) {
