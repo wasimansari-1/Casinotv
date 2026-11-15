@@ -809,3 +809,4 @@ export default function MasterAdmin({ onBack }) {
     </div>
   );
 }
+
