@@ -50,6 +50,7 @@ if (proxyUrl) {
 const express = require('express');
 const cors = require('cors');
 const streamProxy = require('./streamProxy');
+const sportsStreamEngine = require('./sportsStreamEngine');
 
 const app = express();
 const PORT = process.env.PORT || 5050;
@@ -58,7 +59,10 @@ const PORT = process.env.PORT || 5050;
 app.use(cors());
 app.use(express.json());
 
-// Mount the stream proxy engine
+// Mount the dedicated sports stream engine first (Completely isolated from Casino TV)
+app.use('/api/stream/sports', sportsStreamEngine);
+
+// Mount the stream proxy engine (Casino TV logic remains 100% untouched)
 app.use('/api/stream', streamProxy);
 
 // Serve frontend assets (React build if available, else public fallback)
