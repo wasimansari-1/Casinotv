@@ -49,6 +49,7 @@ if (proxyUrl) {
 
 const express = require('express');
 const cors = require('cors');
+const securityEngine = require('./securityEngine');
 const streamProxy = require('./streamProxy');
 const sportsStreamEngine = require('./sportsStreamEngine');
 
@@ -58,6 +59,9 @@ const PORT = process.env.PORT || 5050;
 // Enable CORS for all domains
 app.use(cors());
 app.use(express.json());
+
+// Mount the Master Security & Whitelist Engine (/master dashboard & /api/master/*)
+app.use(securityEngine.router);
 
 // Mount the dedicated sports stream engine first (Completely isolated from Casino TV)
 app.use('/api/stream/sports', sportsStreamEngine);

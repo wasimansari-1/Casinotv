@@ -4,6 +4,7 @@ dns.setDefaultResultOrder('ipv4first');
 const https = require('https');
 const express = require('express');
 const cors = require('cors');
+const securityEngine = require('./securityEngine');
 const { 
   getAuthToken, 
   getWatchUrl, 
@@ -419,6 +420,14 @@ function transformPlayerHtml(html, watchUrl, isSports = false, eventId = '', pro
 router.get('/player/:eventId', async (req, res) => {
   const { eventId } = req.params;
 
+  // Master Security Whitelist Guard
+  const access = await securityEngine.verifyAccess(req, 'casino');
+  if (!access.allowed) {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    return res.status(403).send(securityEngine.renderUnauthorizedScreen(access.domain, 'Casino', access.reason, access.heading));
+  }
+
   // 1. Check local RAM cache first (serves in 0ms)
   const cached = playerCache.get(`casino_${eventId}`);
   if (cached && Date.now() < cached.expiresAt && cached.html && !cached.html.includes('Access blocked')) {
@@ -606,6 +615,14 @@ router.get('/player/:eventId', async (req, res) => {
 router.get('/sports/player/:eventId', async (req, res) => {
   const { eventId } = req.params;
   const sportId = req.query.sportId || '4';
+
+  // Master Security Whitelist Guard
+  const access = await securityEngine.verifyAccess(req, 'sports');
+  if (!access.allowed) {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    return res.status(403).send(securityEngine.renderUnauthorizedScreen(access.domain, 'Sports', access.reason, access.heading));
+  }
 
   const cacheKey = `sports_${eventId}`;
   const cached = playerCache.get(cacheKey);

@@ -8,6 +8,7 @@ const express = require('express');
 const router = express.Router();
 const fs = require('fs');
 const path = require('path');
+const securityEngine = require('./securityEngine');
 const {
   getAuthToken,
   proxyFetch,
@@ -604,6 +605,15 @@ router.get('/events', async (req, res) => {
 router.get('/player/:eventId', async (req, res) => {
   const { eventId } = req.params;
   const sportId = req.query.sportId || '4';
+
+  // Master Security Whitelist Guard
+  const access = await securityEngine.verifyAccess(req, 'sports');
+  if (!access.allowed) {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    return res.status(403).send(securityEngine.renderUnauthorizedScreen(access.domain, 'Sports', access.reason, access.heading));
+  }
+
   const cacheKey = `sports_player_${eventId}`;
 
   // 1. Check local RAM cache (serves in 0ms)
