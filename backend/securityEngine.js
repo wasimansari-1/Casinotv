@@ -171,11 +171,21 @@ async function verifyAccess(req, streamType = 'casino') {
   }
 
   const domain = extractDomain(req);
-  const clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket?.remoteAddress || req.ip;
+  let clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket?.remoteAddress || req.ip || '';
+  if (clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
   const streamId = req.params.eventId || req.query.streamId || '';
 
-  // Direct Address Bar Visit (Empty Referer & Origin)
-  if (!domain) {
+  // Check 1: Did the request come from a whitelisted Client IP?
+  const ipMatched = clientIp ? findMatchedEntry(clientIp) : null;
+
+  // Check 2: Did the request come from a whitelisted Domain?
+  const domainMatched = domain ? findMatchedEntry(domain) : null;
+
+  const matched = domainMatched || ipMatched;
+  const targetLabel = domain || clientIp;
+
+  // Direct Address Bar Visit (Empty Referer & Origin) and no IP match
+  if (!domain && !ipMatched) {
     if (allowDirectAccess) {
       logAttempt('Direct Browser Access', clientIp, streamType, streamId, 'ALLOWED', 'Direct testing permitted');
       return { allowed: true, domain: 'direct_visit' };
@@ -183,62 +193,60 @@ async function verifyAccess(req, streamType = 'casino') {
     logAttempt('Direct / No-Referer', clientIp, streamType, streamId, 'BLOCKED', 'Direct iframe embedding prohibited without Referer');
     return {
       allowed: false,
-      domain: 'Direct Access',
-      heading: 'Domain Not Whitelisted',
-      reason: 'Direct access blocked. Stream must be embedded within an authorized whitelisted domain.'
+      domain: clientIp || 'Direct Access',
+      heading: 'Domain / IP Not Whitelisted',
+      reason: 'Direct access blocked. Stream must be embedded within an authorized whitelisted domain or authorized IP.'
     };
   }
-
-  const matched = findMatchedEntry(domain);
 
   if (!matched) {
-    logAttempt(domain, clientIp, streamType, streamId, 'BLOCKED', 'Domain not whitelisted');
+    logAttempt(targetLabel, clientIp, streamType, streamId, 'BLOCKED', 'Domain / IP not whitelisted');
     return {
       allowed: false,
-      domain,
-      heading: 'Domain Not Whitelisted',
-      reason: `The domain "${domain}" is not whitelisted by the administrator. Stream embedding is restricted.`
+      domain: targetLabel,
+      heading: 'Domain / IP Not Whitelisted',
+      reason: `"${targetLabel}" is not whitelisted by the administrator. Stream embedding is restricted.`
     };
   }
 
-  // Check if domain is blocked
+  // Check if domain/IP is blocked
   if (matched.status === 'blocked') {
-    logAttempt(domain, clientIp, streamType, streamId, 'BLOCKED', 'Domain access blocked');
+    logAttempt(targetLabel, clientIp, streamType, streamId, 'BLOCKED', 'Access blocked by administrator');
     return {
       allowed: false,
-      domain,
-      heading: 'Domain Access Blocked',
-      reason: `Access for domain "${domain}" has been suspended by the administrator.`
+      domain: targetLabel,
+      heading: 'Access Blocked',
+      reason: `Access for "${targetLabel}" has been suspended by the administrator.`
     };
   }
 
   // Check specific permission (Casino vs Sports)
   if (streamType === 'casino' && !matched.casino) {
-    logAttempt(domain, clientIp, 'casino', streamId, 'BLOCKED', 'Domain not whitelisted for Casino TV');
+    logAttempt(targetLabel, clientIp, 'casino', streamId, 'BLOCKED', 'Not whitelisted for Casino TV');
     return {
       allowed: false,
-      domain,
-      heading: 'Domain Not Whitelisted for Casino TV',
-      reason: `Domain "${domain}" is whitelisted for Sports TV only. Casino TV access is disabled.`
+      domain: targetLabel,
+      heading: 'Not Whitelisted for Casino TV',
+      reason: `"${targetLabel}" is whitelisted for Sports TV only. Casino TV access is disabled.`
     };
   }
 
   if (streamType === 'sports' && !matched.sports) {
-    logAttempt(domain, clientIp, 'sports', streamId, 'BLOCKED', 'Domain not whitelisted for Sports TV');
+    logAttempt(targetLabel, clientIp, 'sports', streamId, 'BLOCKED', 'Not whitelisted for Sports TV');
     return {
       allowed: false,
-      domain,
-      heading: 'Domain Not Whitelisted for Sports TV',
-      reason: `Domain "${domain}" is whitelisted for Casino TV only. Sports TV access is disabled.`
+      domain: targetLabel,
+      heading: 'Not Whitelisted for Sports TV',
+      reason: `"${targetLabel}" is whitelisted for Casino TV only. Sports TV access is disabled.`
     };
   }
 
   // Access Granted! Update hits & last access timestamp
   matched.hitCount = (matched.hitCount || 0) + 1;
   matched.lastAccess = new Date().toISOString();
-  logAttempt(domain, clientIp, streamType, streamId, 'ALLOWED', 'Access authorized');
+  logAttempt(targetLabel, clientIp, streamType, streamId, 'ALLOWED', 'Access authorized');
 
-  return { allowed: true, domain };
+  return { allowed: true, domain: targetLabel };
 }
 
 // -------------------------------------------------------------
@@ -455,9 +463,11 @@ router.post('/api/master/domains', requireMasterAuth, async (req, res) => {
 
   let clean = domain.trim().toLowerCase();
   clean = clean.replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
+  const isIp = /^(\d{1,3}\.){3}\d{1,3}$/.test(clean) || clean.includes(':');
 
   const entry = {
     domain: clean,
+    entryType: isIp ? 'ip' : 'domain',
     casino: casino !== undefined ? Boolean(casino) : true,
     sports: sports !== undefined ? Boolean(sports) : true,
     status: 'active',

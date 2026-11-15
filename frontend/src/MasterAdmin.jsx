@@ -5,6 +5,7 @@ import {
   ShieldAlert,
   Lock,
   Globe,
+  Server,
   Plus,
   Trash2,
   RefreshCw,
@@ -19,6 +20,8 @@ import {
   AlertCircle,
   ArrowLeft,
   Activity,
+  CheckCircle2,
+  XCircle,
   Sliders
 } from 'lucide-react';
 
@@ -46,15 +49,19 @@ export default function MasterAdmin({ onBack }) {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [activeTabFilter, setActiveTabFilter] = useState('ALL'); // 'ALL' | 'CASINO' | 'SPORTS' | 'IP' | 'DOMAIN' | 'BLOCKED'
 
-  // Add Domain Modal
-  const [modalOpen, setModalOpen] = useState(false);
-  const [newDomain, setNewDomain] = useState('');
-  const [newNote, setNewNote] = useState('');
+  // Inline Quick-Add Whitelist Form State
+  const [entryMode, setEntryMode] = useState('domain'); // 'domain' | 'ip'
+  const [targetInput, setTargetInput] = useState('');
+  const [partnerNote, setPartnerNote] = useState('');
   const [allowCasino, setAllowCasino] = useState(true);
   const [allowSports, setAllowSports] = useState(true);
-  const [modalError, setModalError] = useState('');
-  const [modalLoading, setModalLoading] = useState(false);
+  const [actionMsg, setActionMsg] = useState({ type: '', text: '' });
+  const [addingLoading, setAddingLoading] = useState(false);
+
+  // Helper to determine if a string looks like an IP
+  const isIpAddress = (val) => /^(\d{1,3}\.){3}\d{1,3}$/.test(val.trim()) || val.includes(':');
 
   // Authenticate Session
   const handleLogin = async (e) => {
@@ -135,6 +142,49 @@ export default function MasterAdmin({ onBack }) {
     }
   }, [token]);
 
+  // Add Domain / IP to Whitelist
+  const handleAddWhitelist = async (e) => {
+    e.preventDefault();
+    if (!targetInput.trim()) return;
+
+    setActionMsg({ type: '', text: '' });
+    setAddingLoading(true);
+
+    try {
+      const res = await fetch('/api/master/domains', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          domain: targetInput.trim(),
+          note: partnerNote.trim(),
+          casino: allowCasino,
+          sports: allowSports
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        const itemType = isIpAddress(targetInput) ? 'IP Address' : 'Domain';
+        setActionMsg({
+          type: 'success',
+          text: `✓ Successfully whitelisted ${itemType}: "${targetInput.trim()}" (Casino: ${allowCasino ? 'ON' : 'OFF'}, Sports: ${allowSports ? 'ON' : 'OFF'})`
+        });
+        setTargetInput('');
+        setPartnerNote('');
+        loadDashboardData();
+        setTimeout(() => setActionMsg({ type: '', text: '' }), 6000);
+      } else {
+        setActionMsg({ type: 'error', text: data.error || 'Failed to whitelist entry' });
+      }
+    } catch (err) {
+      setActionMsg({ type: 'error', text: 'Network or server error while whitelisting' });
+    } finally {
+      setAddingLoading(false);
+    }
+  };
+
   // Toggle Global Setting (Enforce / Direct Access)
   const handleToggleSetting = async (key, currentValue) => {
     try {
@@ -200,7 +250,7 @@ export default function MasterAdmin({ onBack }) {
 
   // Delete Domain
   const handleDeleteDomain = async (domain) => {
-    if (!window.confirm(`Are you sure you want to remove "${domain}" from whitelist registry?`)) return;
+    if (!window.confirm(`Are you sure you want to permanently remove "${domain}" from the whitelist?`)) return;
     try {
       const res = await fetch(`/api/master/domains/${encodeURIComponent(domain)}`, {
         method: 'DELETE',
@@ -216,58 +266,39 @@ export default function MasterAdmin({ onBack }) {
     }
   };
 
-  // Quick Whitelist from Logs
-  const handleQuickWhitelist = (domain) => {
-    setNewDomain(domain);
-    setNewNote('Authorized from security audit log');
-    setAllowCasino(true);
-    setAllowSports(true);
-    setModalError('');
-    setModalOpen(true);
+  // Quick Whitelist helper from Logs or Table
+  const quickFillWhitelist = (target, forCasino = true, forSports = true) => {
+    setTargetInput(target);
+    setPartnerNote(`Whitelisted from live stream access log`);
+    setAllowCasino(forCasino);
+    setAllowSports(forSports);
+    if (isIpAddress(target)) setEntryMode('ip');
+    else setEntryMode('domain');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  // Add Domain Submit
-  const handleAddDomain = async (e) => {
-    e.preventDefault();
-    if (!newDomain.trim()) return;
-    setModalError('');
-    setModalLoading(true);
-
-    try {
-      const res = await fetch('/api/master/domains', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          domain: newDomain.trim(),
-          note: newNote.trim(),
-          casino: allowCasino,
-          sports: allowSports
-        })
-      });
-      const data = await res.json();
-      if (data.success) {
-        setModalOpen(false);
-        setNewDomain('');
-        setNewNote('');
-        loadDashboardData();
-      } else {
-        setModalError(data.error || 'Failed to add domain');
-      }
-    } catch (err) {
-      setModalError('Server error while saving domain');
-    } finally {
-      setModalLoading(false);
-    }
-  };
-
-  // Filtered Domains
+  // Filtered Domains based on Tabs & Search
   const filteredDomains = domains.filter(d => {
     const q = searchQuery.toLowerCase().trim();
-    return d.domain.toLowerCase().includes(q) || (d.note && d.note.toLowerCase().includes(q));
+    const matchesSearch = d.domain.toLowerCase().includes(q) || (d.note && d.note.toLowerCase().includes(q));
+    if (!matchesSearch) return false;
+
+    const isIp = isIpAddress(d.domain);
+    if (activeTabFilter === 'CASINO') return d.casino && d.status === 'active';
+    if (activeTabFilter === 'SPORTS') return d.sports && d.status === 'active';
+    if (activeTabFilter === 'IP') return isIp;
+    if (activeTabFilter === 'DOMAIN') return !isIp;
+    if (activeTabFilter === 'BLOCKED') return d.status === 'blocked';
+    return true;
   });
+
+  // Counts for tabs
+  const countAll = domains.length;
+  const countCasino = domains.filter(d => d.casino && d.status === 'active').length;
+  const countSports = domains.filter(d => d.sports && d.status === 'active').length;
+  const countIp = domains.filter(d => isIpAddress(d.domain)).length;
+  const countDomain = domains.filter(d => !isIpAddress(d.domain)).length;
+  const countBlocked = domains.filter(d => d.status === 'blocked').length;
 
   // -------------------------------------------------------------
   // LOGIN SCREEN (If not authenticated)
@@ -275,13 +306,13 @@ export default function MasterAdmin({ onBack }) {
   if (!token) {
     return (
       <div className="min-h-screen bg-[#07090e] text-slate-200 flex items-center justify-center p-4">
-        <div className="w-full max-w-md bg-slate-900/90 border border-slate-800 rounded-2xl p-8 shadow-2xl backdrop-blur-xl relative">
+        <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl backdrop-blur-xl relative">
           <div className="flex flex-col items-center text-center mb-8">
             <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-rose-600 to-indigo-600 flex items-center justify-center shadow-lg shadow-rose-600/30 mb-4">
               <Shield className="w-7 h-7 text-white" />
             </div>
             <h1 className="text-2xl font-bold text-white tracking-tight">CSTV Master Guard</h1>
-            <p className="text-xs text-slate-400 mt-1">Domain Whitelisting & Anti-Theft Protection</p>
+            <p className="text-xs text-slate-400 mt-1">Domain & IP Whitelisting • Anti-Theft Access Control</p>
           </div>
 
           {loginError && (
@@ -294,16 +325,14 @@ export default function MasterAdmin({ onBack }) {
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
               <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Master ID</label>
-              <div className="relative">
-                <input
-                  type="text"
-                  required
-                  value={loginId}
-                  onChange={(e) => setLoginId(e.target.value)}
-                  placeholder="Enter Master ID"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-rose-500 focus:ring-1 focus:ring-rose-500 transition"
-                />
-              </div>
+              <input
+                type="text"
+                required
+                value={loginId}
+                onChange={(e) => setLoginId(e.target.value)}
+                placeholder="Enter Master ID"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-rose-500 focus:ring-1 focus:ring-rose-500 transition"
+              />
             </div>
 
             <div>
@@ -371,7 +400,7 @@ export default function MasterAdmin({ onBack }) {
                   PROTECTED
                 </span>
               </div>
-              <p className="text-[11px] text-slate-400">Strict Domain Whitelist & Anti-Theft Access Control</p>
+              <p className="text-[11px] text-slate-400">Strict Domain & IP Whitelisting Console</p>
             </div>
           </div>
 
@@ -411,7 +440,7 @@ export default function MasterAdmin({ onBack }) {
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
           <div className="bg-slate-900/70 border border-slate-800 p-4 rounded-xl">
             <div className="flex items-center justify-between text-slate-400 mb-1">
-              <span className="text-xs font-medium">Whitelisted Domains</span>
+              <span className="text-xs font-medium">Whitelisted Domains & IPs</span>
               <Globe className="w-4 h-4 text-emerald-400" />
             </div>
             <div className="text-2xl font-bold text-white font-mono">{stats.total}</div>
@@ -442,24 +471,220 @@ export default function MasterAdmin({ onBack }) {
           </div>
         </div>
 
-        {/* Master Control & Action Bar */}
+        {/* ------------------------------------------------------------- */}
+        {/* PROMINENT DIRECT WHITELIST CONSOLE (Domain & IP with Separate Controls) */}
+        {/* ------------------------------------------------------------- */}
+        <div className="bg-slate-900/90 border-2 border-emerald-500/30 rounded-2xl p-5 shadow-2xl relative overflow-hidden">
+          <div className="absolute top-0 right-0 w-96 h-96 bg-emerald-500/5 rounded-full blur-3xl pointer-events-none"></div>
+
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3 mb-4">
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
+                <Plus className="w-4 h-4" />
+              </div>
+              <h2 className="text-sm font-bold text-white uppercase tracking-wider">
+                Whitelist New Partner (Domain or Server IP)
+              </h2>
+            </div>
+            <span className="text-xs text-slate-400">
+              Authorize specific feeds (Casino TV only, Sports TV only, or Both)
+            </span>
+          </div>
+
+          {actionMsg.text && (
+            <div
+              className={`mb-4 p-3 rounded-xl text-xs font-medium flex items-center gap-2 ${
+                actionMsg.type === 'success'
+                  ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-300'
+                  : 'bg-rose-500/15 border border-rose-500/30 text-rose-300'
+              }`}
+            >
+              {actionMsg.type === 'success' ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
+              <span>{actionMsg.text}</span>
+            </div>
+          )}
+
+          <form onSubmit={handleAddWhitelist} className="space-y-4">
+            {/* Row 1: Target Type Switcher + Target Input + Note Input */}
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
+              {/* Type Switcher */}
+              <div className="md:col-span-3 flex bg-slate-950 border border-slate-800 p-1 rounded-xl">
+                <button
+                  type="button"
+                  onClick={() => setEntryMode('domain')}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-semibold rounded-lg transition ${
+                    entryMode === 'domain'
+                      ? 'bg-emerald-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Globe className="w-3.5 h-3.5" />
+                  <span>Domain</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEntryMode('ip')}
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-semibold rounded-lg transition ${
+                    entryMode === 'ip'
+                      ? 'bg-emerald-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  <Server className="w-3.5 h-3.5" />
+                  <span>Server IP</span>
+                </button>
+              </div>
+
+              {/* Target Input */}
+              <div className="md:col-span-5">
+                <input
+                  type="text"
+                  required
+                  placeholder={
+                    entryMode === 'domain'
+                      ? 'e.g. aura.igambli.com or *.igambli.com'
+                      : 'e.g. 103.21.244.2 or 72.61.172.110'
+                  }
+                  value={targetInput}
+                  onChange={(e) => setTargetInput(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-4 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 font-mono transition"
+                />
+              </div>
+
+              {/* Partner Note */}
+              <div className="md:col-span-4">
+                <input
+                  type="text"
+                  placeholder="Partner Note (e.g. Client Aura Live)"
+                  value={partnerNote}
+                  onChange={(e) => setPartnerNote(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700/80 rounded-xl px-4 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 transition"
+                />
+              </div>
+            </div>
+
+            {/* Row 2: Feed Selection Checkboxes + Quick Preset Buttons + Submit Button */}
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-center pt-1">
+              {/* Casino Permission Card */}
+              <div className="md:col-span-4">
+                <label
+                  className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition select-none ${
+                    allowCasino
+                      ? 'bg-amber-500/10 border-amber-500/50 text-amber-300'
+                      : 'bg-slate-950 border-slate-800 text-slate-500'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={allowCasino}
+                    onChange={(e) => setAllowCasino(e.target.checked)}
+                    className="w-4 h-4 rounded text-amber-500 focus:ring-amber-500 bg-slate-900 border-slate-700"
+                  />
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold flex items-center gap-1.5">
+                        <Tv className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Casino TV Feed</span>
+                      </span>
+                      <span
+                        className={`text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded ${
+                          allowCasino
+                            ? 'bg-amber-500/20 text-amber-300'
+                            : 'bg-slate-800 text-slate-500'
+                        }`}
+                      >
+                        {allowCasino ? '✓ ENABLED' : '✕ DISABLED'}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 block mt-0.5">
+                      All 17 tables (Teen Patti, Dragon Tiger, etc.)
+                    </span>
+                  </div>
+                </label>
+              </div>
+
+              {/* Sports Permission Card */}
+              <div className="md:col-span-4">
+                <label
+                  className={`flex items-center gap-3 p-3 rounded-xl border cursor-pointer transition select-none ${
+                    allowSports
+                      ? 'bg-sky-500/10 border-sky-500/50 text-sky-300'
+                      : 'bg-slate-950 border-slate-800 text-slate-500'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={allowSports}
+                    onChange={(e) => setAllowSports(e.target.checked)}
+                    className="w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-900 border-slate-700"
+                  />
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold flex items-center gap-1.5">
+                        <Trophy className="w-3.5 h-3.5 text-sky-400" />
+                        <span>Sports TV Feed</span>
+                      </span>
+                      <span
+                        className={`text-[9px] font-extrabold uppercase px-1.5 py-0.5 rounded ${
+                          allowSports
+                            ? 'bg-sky-500/20 text-sky-300'
+                            : 'bg-slate-800 text-slate-500'
+                        }`}
+                      >
+                        {allowSports ? '✓ ENABLED' : '✕ DISABLED'}
+                      </span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 block mt-0.5">
+                      Live Cricket, Soccer, Tennis streams
+                    </span>
+                  </div>
+                </label>
+              </div>
+
+              {/* Submit Action Button */}
+              <div className="md:col-span-4 flex items-center gap-2">
+                <button
+                  type="submit"
+                  disabled={addingLoading || (!allowCasino && !allowSports)}
+                  className="w-full bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-500 hover:from-emerald-500 hover:to-teal-400 text-white font-bold py-3 px-5 rounded-xl shadow-lg shadow-emerald-600/30 transition text-xs flex items-center justify-center gap-2 disabled:opacity-50"
+                >
+                  <Check className="w-4 h-4" />
+                  <span>{addingLoading ? 'Whitelisting...' : '+ Add to Whitelist Now'}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Presets */}
+            <div className="flex items-center gap-2 text-[11px] text-slate-400 pt-1">
+              <span>Quick Permission Presets:</span>
+              <button
+                type="button"
+                onClick={() => { setAllowCasino(true); setAllowSports(true); }}
+                className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium transition"
+              >
+                Both Active
+              </button>
+              <button
+                type="button"
+                onClick={() => { setAllowCasino(true); setAllowSports(false); }}
+                className="px-2 py-0.5 rounded bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 font-medium transition"
+              >
+                Casino Only
+              </button>
+              <button
+                type="button"
+                onClick={() => { setAllowCasino(false); setAllowSports(true); }}
+                className="px-2 py-0.5 rounded bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 font-medium transition"
+              >
+                Sports Only
+              </button>
+            </div>
+          </form>
+        </div>
+
+        {/* Global Security Controls Bar */}
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/70 border border-slate-800 p-4 rounded-xl">
           <div className="flex flex-wrap items-center gap-3">
-            <button
-              onClick={() => {
-                setNewDomain('');
-                setNewNote('');
-                setAllowCasino(true);
-                setAllowSports(true);
-                setModalError('');
-                setModalOpen(true);
-              }}
-              className="bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs py-2 px-3.5 rounded-lg shadow-md shadow-emerald-600/20 flex items-center gap-2 transition"
-            >
-              <Plus className="w-4 h-4" />
-              <span>+ Whitelist New Domain / IP</span>
-            </button>
-
             {/* Strict Enforcement Toggle */}
             <div className="flex items-center gap-2 bg-slate-950 border border-slate-800 px-3 py-1.5 rounded-lg">
               <span className="text-xs text-slate-400">Strict Enforcement:</span>
@@ -477,7 +702,7 @@ export default function MasterAdmin({ onBack }) {
 
             {/* Direct Browser Access Toggle */}
             <div className="flex items-center gap-2 bg-slate-950 border border-slate-800 px-3 py-1.5 rounded-lg">
-              <span className="text-xs text-slate-400">Direct Browser Test:</span>
+              <span className="text-xs text-slate-400">Direct Browser Test (No Referer):</span>
               <button
                 onClick={() => handleToggleSetting('allowDirectAccess', stats.allowDirectAccess)}
                 className={`text-xs font-bold px-2 py-0.5 rounded transition ${
@@ -495,34 +720,130 @@ export default function MasterAdmin({ onBack }) {
             <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-2.5" />
             <input
               type="text"
-              placeholder="Search domains..."
+              placeholder="Search domains & IPs..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full sm:w-64 bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+              className="w-full sm:w-64 bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
             />
           </div>
         </div>
 
-        {/* Authorized Domains Table */}
+        {/* Filter Tabs Bar (What is Active) */}
+        <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs">
+          <button
+            onClick={() => setActiveTabFilter('ALL')}
+            className={`px-3 py-1.5 rounded-lg font-semibold transition flex items-center gap-1.5 ${
+              activeTabFilter === 'ALL'
+                ? 'bg-white text-black shadow-md'
+                : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-white'
+            }`}
+          >
+            <span>All Entities</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-800 text-slate-300 font-mono">
+              {countAll}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setActiveTabFilter('CASINO')}
+            className={`px-3 py-1.5 rounded-lg font-semibold transition flex items-center gap-1.5 ${
+              activeTabFilter === 'CASINO'
+                ? 'bg-amber-500 text-black shadow-md'
+                : 'bg-slate-900 border border-slate-800 text-amber-300 hover:text-white'
+            }`}
+          >
+            <Tv className="w-3 h-3" />
+            <span>🎰 Casino Active</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-black/20 font-mono">
+              {countCasino}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setActiveTabFilter('SPORTS')}
+            className={`px-3 py-1.5 rounded-lg font-semibold transition flex items-center gap-1.5 ${
+              activeTabFilter === 'SPORTS'
+                ? 'bg-sky-500 text-black shadow-md'
+                : 'bg-slate-900 border border-slate-800 text-sky-300 hover:text-white'
+            }`}
+          >
+            <Trophy className="w-3 h-3" />
+            <span>🏏 Sports Active</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-black/20 font-mono">
+              {countSports}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setActiveTabFilter('DOMAIN')}
+            className={`px-3 py-1.5 rounded-lg font-semibold transition flex items-center gap-1.5 ${
+              activeTabFilter === 'DOMAIN'
+                ? 'bg-emerald-500 text-black shadow-md'
+                : 'bg-slate-900 border border-slate-800 text-emerald-300 hover:text-white'
+            }`}
+          >
+            <Globe className="w-3 h-3" />
+            <span>🌐 Domains Only</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-800 text-slate-300 font-mono">
+              {countDomain}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setActiveTabFilter('IP')}
+            className={`px-3 py-1.5 rounded-lg font-semibold transition flex items-center gap-1.5 ${
+              activeTabFilter === 'IP'
+                ? 'bg-indigo-500 text-white shadow-md'
+                : 'bg-slate-900 border border-slate-800 text-indigo-300 hover:text-white'
+            }`}
+          >
+            <Server className="w-3 h-3" />
+            <span>🖥️ Server IPs Only</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-800 text-slate-300 font-mono">
+              {countIp}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setActiveTabFilter('BLOCKED')}
+            className={`px-3 py-1.5 rounded-lg font-semibold transition flex items-center gap-1.5 ${
+              activeTabFilter === 'BLOCKED'
+                ? 'bg-rose-600 text-white shadow-md'
+                : 'bg-slate-900 border border-slate-800 text-rose-400 hover:text-white'
+            }`}
+          >
+            <XCircle className="w-3 h-3" />
+            <span>🚫 Blocked</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-800 text-slate-300 font-mono">
+              {countBlocked}
+            </span>
+          </button>
+        </div>
+
+        {/* Authorized Domains & IPs Table */}
         <div className="bg-slate-900/70 border border-slate-800 rounded-xl overflow-hidden shadow-xl">
           <div className="px-5 py-4 border-b border-slate-800 flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <h2 className="text-sm font-bold text-white uppercase tracking-wider">Authorized Whitelist Registry</h2>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 font-mono">
-                {filteredDomains.length}
+              <h2 className="text-sm font-bold text-white uppercase tracking-wider">
+                Whitelisted Entities (Domains & IPs)
+              </h2>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 font-mono">
+                {filteredDomains.length} Active in view
               </span>
             </div>
-            <span className="text-xs text-slate-400 hidden sm:inline">Click badges to toggle Casino or Sports permissions</span>
+            <span className="text-xs text-slate-400 hidden sm:inline">
+              Click on Casino or Sports badge to toggle authorization immediately
+            </span>
           </div>
 
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
               <thead className="bg-slate-950/90 text-slate-400 uppercase tracking-wider font-semibold border-b border-slate-800">
                 <tr>
-                  <th className="py-3 px-5">Domain / Hostname</th>
-                  <th className="py-3 px-4 text-center">Casino TV</th>
-                  <th className="py-3 px-4 text-center">Sports TV</th>
-                  <th className="py-3 px-4 text-center">Status</th>
+                  <th className="py-3 px-5">Target (Domain / IP)</th>
+                  <th className="py-3 px-4 text-center">🎰 Casino TV Status</th>
+                  <th className="py-3 px-4 text-center">🏏 Sports TV Status</th>
+                  <th className="py-3 px-4 text-center">Overall State</th>
                   <th className="py-3 px-4 text-center">Hits</th>
                   <th className="py-3 px-5 text-right">Actions</th>
                 </tr>
@@ -531,85 +852,106 @@ export default function MasterAdmin({ onBack }) {
                 {filteredDomains.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="py-8 text-center text-slate-500">
-                      No matching whitelisted domains found.
+                      No matching whitelisted entries found in this category.
                     </td>
                   </tr>
                 ) : (
                   filteredDomains.map(item => {
                     const isBlocked = item.status === 'blocked';
+                    const isIp = isIpAddress(item.domain);
                     return (
                       <tr key={item.domain} className="hover:bg-slate-800/30 transition">
                         <td className="py-3.5 px-5">
                           <div className="flex items-center gap-2.5">
-                            <div className="w-7 h-7 rounded-lg bg-slate-800 flex items-center justify-center text-slate-400 shrink-0">
-                              <Globe className="w-3.5 h-3.5" />
+                            <div className="w-8 h-8 rounded-lg bg-slate-800 flex items-center justify-center text-slate-400 shrink-0">
+                              {isIp ? <Server className="w-4 h-4 text-indigo-400" /> : <Globe className="w-4 h-4 text-emerald-400" />}
                             </div>
                             <div>
-                              <div className="font-mono text-white text-xs font-semibold">{item.domain}</div>
-                              <div className="text-[11px] text-slate-400">{item.note || 'Authorized Client'}</div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono text-white text-xs font-bold">{item.domain}</span>
+                                <span
+                                  className={`text-[9px] font-extrabold uppercase px-1.5 py-0.2 rounded border ${
+                                    isIp
+                                      ? 'bg-indigo-500/10 text-indigo-300 border-indigo-500/30'
+                                      : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                                  }`}
+                                >
+                                  {isIp ? 'SERVER IP' : 'DOMAIN'}
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-slate-400 mt-0.5">{item.note || 'Authorized Entity'}</div>
                             </div>
                           </div>
                         </td>
 
+                        {/* Casino TV Interactive Pill */}
                         <td className="py-3.5 px-4 text-center">
                           <button
                             onClick={() => handleTogglePermission(item.domain, 'casino', item.casino)}
-                            className={`px-2.5 py-1 rounded text-[10px] font-bold uppercase transition ${
+                            title="Click to toggle Casino TV access"
+                            className={`px-3 py-1.5 rounded-lg text-[10px] font-extrabold uppercase transition flex items-center justify-center gap-1.5 mx-auto ${
                               item.casino
-                                ? 'bg-amber-500/15 text-amber-300 border border-amber-500/40 hover:bg-amber-500/25'
-                                : 'bg-slate-800 text-slate-500 hover:text-slate-300'
+                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50 hover:bg-amber-500/30 shadow-sm'
+                                : 'bg-slate-800/80 text-slate-500 hover:text-slate-300 border border-slate-700/50'
                             }`}
                           >
-                            {item.casino ? '✓ Allowed' : '✕ Disabled'}
+                            <Tv className="w-3 h-3" />
+                            <span>{item.casino ? '✓ ACTIVE' : '✕ DISABLED'}</span>
                           </button>
                         </td>
 
+                        {/* Sports TV Interactive Pill */}
                         <td className="py-3.5 px-4 text-center">
                           <button
                             onClick={() => handleTogglePermission(item.domain, 'sports', item.sports)}
-                            className={`px-2.5 py-1 rounded text-[10px] font-bold uppercase transition ${
+                            title="Click to toggle Sports TV access"
+                            className={`px-3 py-1.5 rounded-lg text-[10px] font-extrabold uppercase transition flex items-center justify-center gap-1.5 mx-auto ${
                               item.sports
-                                ? 'bg-sky-500/15 text-sky-300 border border-sky-500/40 hover:bg-sky-500/25'
-                                : 'bg-slate-800 text-slate-500 hover:text-slate-300'
+                                ? 'bg-sky-500/20 text-sky-300 border border-sky-500/50 hover:bg-sky-500/30 shadow-sm'
+                                : 'bg-slate-800/80 text-slate-500 hover:text-slate-300 border border-slate-700/50'
                             }`}
                           >
-                            {item.sports ? '✓ Allowed' : '✕ Disabled'}
+                            <Trophy className="w-3 h-3" />
+                            <span>{item.sports ? '✓ ACTIVE' : '✕ DISABLED'}</span>
                           </button>
                         </td>
 
+                        {/* Status */}
                         <td className="py-3.5 px-4 text-center">
                           <span
-                            className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-extrabold uppercase ${
                               isBlocked
                                 ? 'bg-rose-500/10 text-rose-400 border border-rose-500/30'
                                 : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
                             }`}
                           >
-                            <span className={`w-1.5 h-1.5 rounded-full ${isBlocked ? 'bg-rose-400' : 'bg-emerald-400'}`}></span>
-                            {isBlocked ? 'BLOCKED' : 'ACTIVE'}
+                            <span className={`w-1.5 h-1.5 rounded-full ${isBlocked ? 'bg-rose-400' : 'bg-emerald-400 animate-pulse'}`}></span>
+                            {isBlocked ? 'BLOCKED' : 'LIVE'}
                           </span>
                         </td>
 
-                        <td className="py-3.5 px-4 text-center font-mono text-slate-300">
+                        {/* Hits Counter */}
+                        <td className="py-3.5 px-4 text-center font-mono text-slate-300 font-semibold">
                           {item.hitCount || 0}
                         </td>
 
+                        {/* Actions */}
                         <td className="py-3.5 px-5 text-right">
                           <div className="flex items-center justify-end gap-2">
                             <button
                               onClick={() => handleToggleStatus(item.domain, item.status)}
-                              className={`px-2 py-1 text-xs rounded transition font-medium ${
+                              className={`px-2.5 py-1 text-xs rounded-lg transition font-medium border ${
                                 isBlocked
-                                  ? 'bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20'
-                                  : 'bg-amber-500/10 text-amber-400 hover:bg-amber-500/20'
+                                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/20'
+                                  : 'bg-amber-500/10 text-amber-400 border-amber-500/30 hover:bg-amber-500/20'
                               }`}
                             >
                               {isBlocked ? 'Unblock' : 'Block'}
                             </button>
                             <button
                               onClick={() => handleDeleteDomain(item.domain)}
-                              className="p-1 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded transition"
-                              title="Delete domain"
+                              className="p-1.5 text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 rounded-lg transition"
+                              title="Delete from whitelist"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                             </button>
@@ -631,7 +973,7 @@ export default function MasterAdmin({ onBack }) {
               <h2 className="text-sm font-bold text-white uppercase tracking-wider">Live Security Access Logs</h2>
               <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
             </div>
-            <span className="text-xs text-slate-400">Real-time attempt interception</span>
+            <span className="text-xs text-slate-400">Real-time incoming connection attempt interception</span>
           </div>
 
           <div className="overflow-x-auto max-h-80">
@@ -643,7 +985,7 @@ export default function MasterAdmin({ onBack }) {
                   <th className="py-2.5 px-4">Origin Domain / Referer</th>
                   <th className="py-2.5 px-4">Client IP</th>
                   <th className="py-2.5 px-4 text-center">Verdict</th>
-                  <th className="py-2.5 px-5">Security Note</th>
+                  <th className="py-2.5 px-5">Security Verdict & 1-Click Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60">
@@ -685,15 +1027,17 @@ export default function MasterAdmin({ onBack }) {
                           </span>
                         </td>
                         <td className="py-2.5 px-5 text-slate-400 text-[11px] font-sans">
-                          {l.reason}
-                          {!isAllowed && l.domain !== 'Direct Access' && l.domain !== 'Direct / No-Referer' && (
-                            <button
-                              onClick={() => handleQuickWhitelist(l.domain)}
-                              className="ml-2 text-emerald-400 hover:underline text-[10px] font-semibold"
-                            >
-                              + Whitelist
-                            </button>
-                          )}
+                          <div className="flex items-center gap-2">
+                            <span>{l.reason}</span>
+                            {!isAllowed && l.domain !== 'Direct Access' && l.domain !== 'Direct / No-Referer' && (
+                              <button
+                                onClick={() => quickFillWhitelist(l.domain, l.type === 'casino', l.type === 'sports')}
+                                className="text-emerald-400 hover:text-emerald-300 underline font-semibold text-[10px]"
+                              >
+                                + Whitelist {l.domain}
+                              </button>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     );
@@ -704,109 +1048,6 @@ export default function MasterAdmin({ onBack }) {
           </div>
         </div>
       </main>
-
-      {/* ADD DOMAIN MODAL */}
-      {modalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
-          <div className="bg-slate-900 border border-slate-700 w-full max-w-md p-6 rounded-2xl shadow-2xl relative">
-            <div className="flex items-center justify-between mb-4 border-b border-slate-800 pb-3">
-              <h3 className="text-base font-bold text-white flex items-center gap-2">
-                <Globe className="w-4 h-4 text-emerald-400" />
-                <span>Whitelist New Domain / Partner</span>
-              </h3>
-              <button
-                onClick={() => setModalOpen(false)}
-                className="text-slate-400 hover:text-white p-1"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {modalError && (
-              <div className="mb-4 p-2.5 bg-rose-500/10 border border-rose-500/30 rounded-lg text-rose-400 text-xs flex items-center gap-1.5">
-                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                <span>{modalError}</span>
-              </div>
-            )}
-
-            <form onSubmit={handleAddDomain} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">Domain or Subdomain</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. aura.igambli.com or *.igambli.com"
-                  value={newDomain}
-                  onChange={(e) => setNewDomain(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3.5 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono"
-                />
-                <p className="text-[11px] text-slate-500 mt-1">Wildcards supported (*.domain.com)</p>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">Partner Note / Label</label>
-                <input
-                  type="text"
-                  placeholder="e.g. Client Aura Live Production"
-                  value={newNote}
-                  onChange={(e) => setNewNote(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-700 rounded-lg px-3.5 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
-                />
-              </div>
-
-              <div className="pt-2">
-                <label className="block text-xs font-semibold text-slate-300 mb-2">Feed Authorization</label>
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="flex items-center gap-2.5 p-3 bg-slate-950 border border-slate-800 rounded-lg cursor-pointer hover:border-amber-500/50 transition">
-                    <input
-                      type="checkbox"
-                      checked={allowCasino}
-                      onChange={(e) => setAllowCasino(e.target.checked)}
-                      className="w-4 h-4 rounded text-amber-500 focus:ring-amber-500 bg-slate-800 border-slate-700"
-                    />
-                    <div>
-                      <span className="text-xs font-bold text-amber-400 block">Casino TV</span>
-                      <span className="text-[10px] text-slate-400">All 17 tables</span>
-                    </div>
-                  </label>
-
-                  <label className="flex items-center gap-2.5 p-3 bg-slate-950 border border-slate-800 rounded-lg cursor-pointer hover:border-sky-500/50 transition">
-                    <input
-                      type="checkbox"
-                      checked={allowSports}
-                      onChange={(e) => setAllowSports(e.target.checked)}
-                      className="w-4 h-4 rounded text-sky-500 focus:ring-sky-500 bg-slate-800 border-slate-700"
-                    />
-                    <div>
-                      <span className="text-xs font-bold text-sky-400 block">Sports TV</span>
-                      <span className="text-[10px] text-slate-400">Cricket, Soccer</span>
-                    </div>
-                  </label>
-                </div>
-              </div>
-
-              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-800 mt-4">
-                <button
-                  type="button"
-                  onClick={() => setModalOpen(false)}
-                  className="px-4 py-2 text-xs text-slate-400 hover:text-white bg-slate-950 rounded-lg border border-slate-800 transition"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={modalLoading}
-                  className="px-4 py-2 text-xs font-semibold text-white bg-emerald-600 hover:bg-emerald-500 rounded-lg shadow-md shadow-emerald-600/30 transition flex items-center gap-1.5 disabled:opacity-50"
-                >
-                  <Check className="w-3.5 h-3.5" />
-                  <span>{modalLoading ? 'Saving...' : 'Authorize & Save'}</span>
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
-
