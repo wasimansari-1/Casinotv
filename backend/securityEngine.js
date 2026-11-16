@@ -16,41 +16,97 @@ const ADMIN_ID = 'Igwasim';
 const ADMIN_PASS = 'Asdf123#';
 const JWT_SECRET = 'cstv_master_secret_key_889922_guard';
 
-// Default Pre-Seeded Whitelist Entries
+const DB_FILE = path.join(__dirname, 'whitelist_database.json');
+
+// Default Pre-Seeded Whitelist Entries (Fallbacks)
 const DEFAULT_DOMAINS = [
-  { domain: 'chimneysolutions.info', casino: true, sports: true, status: 'active', note: 'Primary Domain' },
-  { domain: 'cstv.chimneysolutions.info', casino: true, sports: true, status: 'active', note: 'Streaming Subdomain' },
-  { domain: '72.61.172.110', casino: true, sports: true, status: 'active', note: 'VPS Host IP' },
-  { domain: 'localhost', casino: true, sports: true, status: 'active', note: 'Local Testing' },
-  { domain: '127.0.0.1', casino: true, sports: true, status: 'active', note: 'Loopback IP' },
-  { domain: 'aura.igambli.com', casino: true, sports: true, status: 'active', note: 'Client: Aura Igambli' }
+  { domain: 'exchange444.com', entryType: 'domain', casino: true, sports: true, status: 'active', note: 'Authorized Entity' },
+  { domain: 'dream444.fun', entryType: 'domain', casino: true, sports: false, status: 'active', note: 'Authorized Entity' },
+  { domain: 'chimneysolutions.info', entryType: 'domain', casino: true, sports: true, status: 'active', note: 'Primary Domain' },
+  { domain: 'cstv.chimneysolutions.info', entryType: 'domain', casino: true, sports: true, status: 'active', note: 'Streaming Subdomain' },
+  { domain: '72.61.172.110', entryType: 'ip', casino: true, sports: true, status: 'active', note: 'VPS Host IP' },
+  { domain: 'localhost', entryType: 'domain', casino: true, sports: true, status: 'active', note: 'Local Testing' },
+  { domain: '127.0.0.1', entryType: 'ip', casino: true, sports: true, status: 'active', note: 'Loopback IP' },
+  { domain: 'aura.igambli.com', entryType: 'domain', casino: true, sports: true, status: 'active', note: 'Client: Aura Igambli' }
 ];
 
-// In-Memory Fallback Cache (Synchronously seeded, then updated with Redis)
 const whitelistMap = new Map();
-for (const item of DEFAULT_DOMAINS) {
-  whitelistMap.set(item.domain.toLowerCase(), {
-    ...item,
-    hitCount: 0,
-    lastAccess: null,
-    createdAt: new Date().toISOString()
-  });
-}
-
 const auditLogs = [];
 let enforceWhitelist = true;
 let allowDirectAccess = false; // Strict Anti-Theft: Direct address bar / New tab / Postman blocked by default
 
-// Initialize Whitelist from Redis or Defaults
+// 1. Save Permanently to Local Disk Database (whitelist_database.json)
+function saveToDisk() {
+  try {
+    const list = Array.from(whitelistMap.values());
+    const payload = {
+      settings: { enforceWhitelist, allowDirectAccess },
+      domains: list,
+      updatedAt: new Date().toISOString()
+    };
+    fs.writeFileSync(DB_FILE, JSON.stringify(payload, null, 2), 'utf8');
+  } catch (err) {
+    console.error('[SecurityEngine] Error saving whitelist to disk:', err.message);
+  }
+}
+
+// 2. Load from Local Disk Database synchronously on boot
+function loadFromDisk() {
+  try {
+    if (fs.existsSync(DB_FILE)) {
+      const raw = fs.readFileSync(DB_FILE, 'utf8');
+      const data = JSON.parse(raw);
+      if (data.settings) {
+        if (data.settings.enforceWhitelist !== undefined) enforceWhitelist = Boolean(data.settings.enforceWhitelist);
+        if (data.settings.allowDirectAccess !== undefined) allowDirectAccess = Boolean(data.settings.allowDirectAccess);
+      }
+      if (Array.isArray(data.domains) && data.domains.length > 0) {
+        whitelistMap.clear();
+        for (const item of data.domains) {
+          whitelistMap.set(item.domain.toLowerCase(), item);
+        }
+        console.log(`[SecurityEngine] Successfully loaded ${whitelistMap.size} entities from permanent disk database (${DB_FILE})`);
+        return true;
+      }
+    }
+  } catch (err) {
+    console.warn('[SecurityEngine] Could not read disk database:', err.message);
+  }
+  return false;
+}
+
+// Synchronously load on startup (First from disk, then fallback to defaults)
+if (!loadFromDisk()) {
+  for (const item of DEFAULT_DOMAINS) {
+    whitelistMap.set(item.domain.toLowerCase(), {
+      ...item,
+      hitCount: 0,
+      lastAccess: null,
+      createdAt: new Date().toISOString()
+    });
+  }
+  saveToDisk();
+}
+
+// 3. Synchronize Whitelist to Both Disk and Redis (NO EXPIRY / NO TTL)
+async function syncToRedis() {
+  // Always save to disk immediately
+  saveToDisk();
+
+  // Save to Redis permanently (NO TTL expiry!)
+  try {
+    const list = Array.from(whitelistMap.values());
+    await redisClient.set('cstv:security:domains', JSON.stringify(list));
+    await redisClient.set('cstv:security:settings', JSON.stringify({ enforceWhitelist, allowDirectAccess }));
+  } catch (e) {
+    console.warn('[SecurityEngine] Redis sync warning:', e.message);
+  }
+}
+
+// 4. Initialize Whitelist from Storage (Disk + Redis Reconciliation)
 async function initWhitelist() {
   try {
-    const rawSettings = await redisClient.get('cstv:security:settings');
-    if (rawSettings) {
-      const parsed = typeof rawSettings === 'string' ? JSON.parse(rawSettings) : rawSettings;
-      if (parsed.enforceWhitelist !== undefined) enforceWhitelist = Boolean(parsed.enforceWhitelist);
-      if (parsed.allowDirectAccess !== undefined) allowDirectAccess = Boolean(parsed.allowDirectAccess);
-    }
-
+    // Check if Redis has newer list
     const redisDomains = await redisClient.get('cstv:security:domains');
     if (redisDomains) {
       const list = typeof redisDomains === 'string' ? JSON.parse(redisDomains) : redisDomains;
@@ -58,26 +114,21 @@ async function initWhitelist() {
         for (const item of list) {
           whitelistMap.set(item.domain.toLowerCase(), item);
         }
-        console.log(`[SecurityEngine] Loaded ${whitelistMap.size} whitelisted domains from Redis`);
-        return;
       }
     }
 
-    await syncToRedis();
-    console.log(`[SecurityEngine] Seeded ${whitelistMap.size} default whitelisted domains in Redis`);
-  } catch (err) {
-    console.warn('[SecurityEngine] Initialization warning:', err.message);
-  }
-}
+    const rawSettings = await redisClient.get('cstv:security:settings');
+    if (rawSettings) {
+      const parsed = typeof rawSettings === 'string' ? JSON.parse(rawSettings) : rawSettings;
+      if (parsed.enforceWhitelist !== undefined) enforceWhitelist = Boolean(parsed.enforceWhitelist);
+      if (parsed.allowDirectAccess !== undefined) allowDirectAccess = Boolean(parsed.allowDirectAccess);
+    }
 
-// Synchronize Whitelist to Redis
-async function syncToRedis() {
-  try {
-    const list = Array.from(whitelistMap.values());
-    await redisClient.set('cstv:security:domains', JSON.stringify(list), 3600 * 24 * 30);
-    await redisClient.set('cstv:security:settings', JSON.stringify({ enforceWhitelist, allowDirectAccess }), 3600 * 24 * 30);
-  } catch (e) {
-    console.warn('[SecurityEngine] Redis sync error:', e.message);
+    // Save final reconciled state to disk & Redis
+    await syncToRedis();
+  } catch (err) {
+    console.warn('[SecurityEngine] Redis initialization note:', err.message);
+    saveToDisk();
   }
 }
 
