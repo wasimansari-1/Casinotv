@@ -189,3 +189,4 @@ pm2 restart casinotv-stream --update-env
 # Check logs
 pm2 logs casinotv-stream --lines 50
 ```
+

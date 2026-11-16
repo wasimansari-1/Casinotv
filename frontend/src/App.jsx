@@ -227,21 +227,6 @@ export default function App() {
               {sportsEvents.length}
             </span>
           </button>
-
-          <button
-            onClick={() => {
-              setMainHub('master');
-              if (window.location.pathname !== '/master') window.history.pushState(null, '', '/master');
-            }}
-            className={`flex items-center gap-2 px-4 py-1.5 rounded-xl text-xs font-semibold transition-all ${
-              mainHub === 'master'
-                ? 'bg-gradient-to-r from-rose-600 to-indigo-600 text-white shadow-md shadow-rose-600/30'
-                : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Shield className="w-3.5 h-3.5 text-rose-400" />
-            <span>🛡️ Master Guard</span>
-          </button>
         </div>
 
         {/* Right Search Input */}
