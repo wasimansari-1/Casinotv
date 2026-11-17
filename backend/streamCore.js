@@ -917,8 +917,9 @@ async function getWatchUrl(eventId, options = {}) {
     }
 
     try {
-      // Distribute primary provider evenly across providers based on eventId
-      const allKeys = ['startexch', 'nice444', 'asstarplay', 'cbtf'];
+      // Primary Casino Exchange Providers: Startexch99 (3 accounts) & Nice444 (2 accounts)
+      // Both are high-speed, verified Diamond/Universe exchange endpoints (0ms fallback, no 8s timeouts)
+      const allKeys = ['startexch', 'nice444'];
       const hash = eventId.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
       const startIdx = hash % allKeys.length;
       const providerList = [

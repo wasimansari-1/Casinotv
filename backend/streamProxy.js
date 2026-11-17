@@ -101,13 +101,33 @@ async function fetchFullTsSegment(targetUrl) {
   return task;
 }
 
-// Memory cache for modified player HTML (TTL 5 Minutes) to deduplicate rapid clicks while ensuring zero bandwidth waste
-const CASINO_CACHE_TTL = 300 * 1000;
+// Memory cache for modified player HTML (TTL 3 Minutes) to prevent serving stale tickets
+const CASINO_CACHE_TTL = 180 * 1000;
 const playerCache = new Map();
 const inFlightPlayers = new Map();
 const inFlightPings = new Map();
 const pingCache = new Map();
 const tableTokenCache = new Map(); // eventId -> { token, wsUrl, streamId, expiresAt }
+
+// Calculate accurate token expiry from JWT payload to prevent serving expired tokens
+function resolveTokenExpiry(token, fallbackMs = 60000) {
+  try {
+    if (token && typeof token === 'string' && token.includes('.')) {
+      const parts = token.split('.');
+      if (parts.length === 3) {
+        const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+        if (payload && payload.exp) {
+          const expMs = payload.exp * 1000;
+          const remainingMs = expMs - Date.now() - 25000; // 25s safety margin before actual JWT expiry
+          if (remainingMs > 5000) {
+            return Date.now() + Math.min(remainingMs, 120000); // Cap at 2 minutes max
+          }
+        }
+      }
+    }
+  } catch (_) {}
+  return Date.now() + fallbackMs; // Default safe 60 seconds
+}
 
 // Helper: Pre-warm a single casino table in memory with distributed lock
 async function warmCasinoTable(eventId) {
@@ -194,7 +214,7 @@ async function warmCasinoTable(eventId) {
                 token: pingData.token,
                 wsUrl: pingData.wsUrl,
                 streamId: pingData.streamId || (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) || 'GAME10',
-                expiresAt: Date.now() + 15 * 60 * 1000
+                expiresAt: resolveTokenExpiry(pingData.token)
               });
               pingCache.set(targetUrl, { data: pingData, timestamp: Date.now() });
               console.log(`[Stream Warmer] Pre-warmed valid token & handshake for table ${eventId} (${pingData.streamId})`);
@@ -344,7 +364,7 @@ function transformPlayerHtml(html, watchUrl, isSports = false, eventId = '', pro
       
       const modifiedCfg = {
         ...originalCfg,
-        streamId: (eventId && GAME_MAP[eventId]) ? GAME_MAP[eventId].streamId : (originalCfg.streamId || 'GAME30'),
+        streamId: originalCfg.streamId || ((eventId && GAME_MAP[eventId]) ? GAME_MAP[eventId].streamId : 'GAME10'),
         pingUrl: proxiedPingUrl,
         flagUrl: "/api/stream/dummy-flag",
         byeUrl: "/api/stream/dummy-bye",
@@ -566,7 +586,7 @@ router.get('/player/:eventId', async (req, res) => {
                     token: data.token,
                     wsUrl: data.wsUrl,
                     streamId: data.streamId || (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) || 'GAME10',
-                    expiresAt: Date.now() + 15 * 60 * 1000
+                    expiresAt: resolveTokenExpiry(data.token)
                   });
                   pingCache.set(targetUrl, { data, timestamp: Date.now() });
                 }
@@ -877,11 +897,27 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
   const fallbackStreamId = (eventId && GAME_MAP[eventId]) ? GAME_MAP[eventId].streamId : 'GAME10';
   const fallbackWsUrl = 'wss://livecdnplatin.com/UNIVERSE-GE/websocket';
   const isInit = Boolean(req.body?.init);
+  const isConnecting = req.body?.mode === 'connecting';
+  const isRoutineHeartbeat = !isInit && !isConnecting && req.body?.mode === 'playing';
 
-  // 1. FAST RAM PATH:
-  // For BOTH initial connect AND routine heartbeats:
-  // If we already have a valid token in memory/Redis, answer IMMEDIATELY from RAM in 0ms!
-  // This shields Webshare proxy from millions of client pings (0 MB proxy quota used!)
+  // 1. FAST RAM PATH FOR ROUTINE HEARTBEATS:
+  // If the player is already streaming (mode: 'playing'), reply from RAM in 0ms!
+  // This shields Webshare proxy from millions of routine pings!
+  if (isRoutineHeartbeat) {
+    const cachedToken = (eventId && tableTokenCache.get(eventId)?.token) || '';
+    return res.status(200).json({
+      ok: true,
+      state: "live",
+      streamId: (eventId && GAME_MAP[eventId]?.streamId) || fallbackStreamId,
+      token: cachedToken,
+      wsUrl: fallbackWsUrl,
+      maintenance: null,
+      stop: false
+    });
+  }
+
+  // 2. FOR INITIAL CONNECT / RECONNECT (isInit or isConnecting):
+  // Check if we have a fresh, unexpired token in RAM:
   if (eventId && tableTokenCache.has(eventId)) {
     const cached = tableTokenCache.get(eventId);
     if (cached && (Date.now() < cached.expiresAt) && cached.token) {
@@ -984,7 +1020,7 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
               token: pingResData.token,
               wsUrl: pingResData.wsUrl,
               streamId: pingResData.streamId,
-              expiresAt: Date.now() + 15 * 60 * 1000
+              expiresAt: resolveTokenExpiry(pingResData.token)
             });
             pingCache.set(targetUrl, { data: pingResData, timestamp: Date.now() });
           }
