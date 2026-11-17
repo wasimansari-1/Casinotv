@@ -784,10 +784,10 @@ router.post('/proxy-ping', async (req, res) => {
   const pageOrigin = origin ? decodeURIComponent(origin) : 'https://nice444.com/';
   const session = req.query.session ? parseInt(req.query.session, 10) : getSessionForTable(eventId || targetUrl);
 
-  // Serve fast cached ping if valid
-  if (isInit && sportsPingCache.has(targetUrl)) {
+  // Serve fast cached ping from RAM for BOTH init and routine heartbeats (Zero proxy quota!)
+  if (sportsPingCache.has(targetUrl)) {
     const cachedPing = sportsPingCache.get(targetUrl);
-    if (cachedPing && cachedPing.data && (Date.now() - cachedPing.timestamp < 120000) && cachedPing.data.token) {
+    if (cachedPing && cachedPing.data && (Date.now() - cachedPing.timestamp < 180000) && cachedPing.data.token) {
       return res.status(200).json(cachedPing.data);
     }
   }

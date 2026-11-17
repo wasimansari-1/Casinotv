@@ -864,8 +864,11 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
   const fallbackWsUrl = 'wss://livecdnplatin.com/UNIVERSE-GE/websocket';
   const isInit = Boolean(req.body?.init);
 
-  // 1. FAST RAM PATH: If we already have a valid token in memory for this eventId, return it INSTANTLY (0ms!)
-  if (isInit && eventId && tableTokenCache.has(eventId)) {
+  // 1. FAST RAM PATH:
+  // For BOTH initial connect AND routine heartbeats:
+  // If we already have a valid token in memory/Redis, answer IMMEDIATELY from RAM in 0ms!
+  // This shields Webshare proxy from millions of client pings (0 MB proxy quota used!)
+  if (eventId && tableTokenCache.has(eventId)) {
     const cached = tableTokenCache.get(eventId);
     if (cached && (Date.now() < cached.expiresAt) && cached.token) {
       return res.status(200).json({
@@ -877,6 +880,18 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
         maintenance: null,
         stop: false
       });
+    }
+  }
+
+  // 2. Also check URL-based pingCache for fast RAM response (TTL 3 minutes)
+  const rawTarget = req.query.target;
+  if (rawTarget) {
+    const decodedTargetUrl = decodeURIComponent(rawTarget);
+    if (pingCache.has(decodedTargetUrl)) {
+      const cachedPing = pingCache.get(decodedTargetUrl);
+      if (cachedPing && cachedPing.data && (Date.now() - cachedPing.timestamp < 180000) && cachedPing.data.token) {
+        return res.status(200).json(cachedPing.data);
+      }
     }
   }
 
@@ -892,8 +907,8 @@ router.post('/proxy-ping', express.json(), async (req, res) => {
     const targetOrigin = new URL(targetUrl).origin;
     const pageOrigin = origin ? decodeURIComponent(origin) : (decodedWatchUrl.includes('startexch') ? 'https://startexch99.com/' : 'https://nice444.com/');
 
-    // Check pingCache URL cache
-    if (isInit && pingCache.has(targetUrl)) {
+    // Check pingCache URL cache (Serves in 0ms for both init and routine heartbeats)
+    if (pingCache.has(targetUrl)) {
       const cachedPing = pingCache.get(targetUrl);
       if (cachedPing && cachedPing.data && (Date.now() - cachedPing.timestamp < 180000) && cachedPing.data.token) {
         return res.status(200).json(cachedPing.data);
