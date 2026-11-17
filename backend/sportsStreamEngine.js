@@ -155,7 +155,7 @@ async function getSportsWatchUrl(rawEventId, sportId = '4', forceFresh = false) 
   }
 
   const session = getSessionForTable(betfairId);
-  const providerList = ['nice444', 'startexch', 'asstarplay'];
+  const providerList = ['nice444', 'startexch'];
 
   for (const provKey of providerList) {
     const provider = PROVIDERS[provKey];
@@ -313,11 +313,11 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
         devtoolsRedirect: "",
         blockedUrl: "",
         home: "",
-        startMode: "webrtc", // Instant zero-latency WebRTC first, auto-fallbacks to HLS if needed
-        forceHls: false,
-        webrtcTimeout: 20,
+        startMode: "hls", // Satellite TV feeds use HLS (starts playing in 1-2s directly!)
+        forceHls: true,   // Bypasses 20s WebRTC timeout and perpetual loading spinner
+        webrtcTimeout: 5,
         freezeSeconds: 120, // Prevents false freeze reloads
-        offlineRetry: 5,
+        offlineRetry: 3,
         frameAllow: {
           enforce: false,
           outer: { apps: false, hosts: [], sites: [] },
@@ -727,6 +727,54 @@ router.get('/player/:eventId', async (req, res) => {
 
         const transformedHtml = transformSportsHtml(rawHtml, watchUrl, eventId, watchData.origin, session);
 
+        // Fast pre-warm initial sports ping token so it is ready in RAM when player loads
+        const cfgMatch = transformedHtml.match(/<script type="application\/json" id="cfg">([^<]+)<\/script>/);
+        if (cfgMatch) {
+          try {
+            const cfg = JSON.parse(cfgMatch[1]);
+            const targetUrl = cfg.pingUrl.includes('target=') 
+              ? decodeURIComponent(new URL(cfg.pingUrl, 'http://localhost').searchParams.get('target'))
+              : cfg.pingUrl;
+            if (targetUrl) {
+              const pingPromise = proxyFetch(targetUrl, {
+                method: 'POST',
+                session,
+                headers: { 
+                  'Content-Type': 'application/json', 
+                  'Origin': new URL(targetUrl).origin,
+                  'Referer': watchUrl,
+                  'User-Agent': UA,
+                  'Accept': '*/*',
+                  'Sec-Fetch-Dest': 'empty',
+                  'Sec-Fetch-Mode': 'cors',
+                  'Sec-Fetch-Site': 'same-origin'
+                },
+                body: JSON.stringify({ 
+                  sid: cfg.sid, 
+                  mode: 'connecting', 
+                  init: true, 
+                  page: watchData.origin || 'https://nice444.com',
+                  tz: 'Asia/Kolkata', 
+                  tzo: 330 
+                }),
+                timeout: 2500
+              }).then(r => r.json()).then(data => {
+                if (data && typeof data === 'object') {
+                  if (data.stop) data.stop = false;
+                  if (data.hlsUrl) {
+                    data.hlsUrl = `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(data.hlsUrl)}`;
+                  }
+                  sportsPingCache.set(targetUrl, { data, timestamp: Date.now() });
+                }
+                return data;
+              }).catch(() => null);
+
+              // Race with max 1000ms so we don't delay HTML delivery
+              await Promise.race([pingPromise, new Promise(r => setTimeout(r, 1000))]);
+            }
+          } catch (_) {}
+        }
+
         // Cache player HTML for 45s in RAM and Redis
         sportsPlayerCache.set(cacheKey, { html: transformedHtml, expiresAt: Date.now() + SPORTS_HTML_TTL });
         await redisClient.set(`html:sports:${eventId}`, transformedHtml, Math.round(SPORTS_HTML_TTL / 1000));
@@ -822,11 +870,9 @@ router.post('/proxy-ping', async (req, res) => {
     if (data && typeof data === 'object') {
       if (data.stop) data.stop = false;
 
-      // Rewrite HLS URL if present to dedicated sports HLS proxy with full URL
+      // Rewrite HLS URL if present to dedicated sports HLS proxy with clean relative URL (zero mixed content HTTP/HTTPS block)
       if (data.hlsUrl) {
-        const host = req.get('host') || 'localhost:5050';
-        const proto = req.protocol || 'http';
-        data.hlsUrl = `${proto}://${host}/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(data.hlsUrl)}`;
+        data.hlsUrl = `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(data.hlsUrl)}`;
       }
 
       if (isInit && data.token) {
@@ -873,6 +919,10 @@ router.get('/hls/live.m3u8', async (req, res) => {
 
     const rewritten = text.split('\n').map(line => {
       const trimmed = line.trim();
+      if (trimmed.endsWith('.m3u8') || trimmed.includes('.m3u8?')) {
+        const fullVariantUrl = new URL(trimmed, upstreamUrl).href;
+        return `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(fullVariantUrl)}`;
+      }
       if (trimmed.endsWith('.ts') || trimmed.includes('.ts?')) {
         const fullSegUrl = new URL(trimmed, upstreamUrl).href;
         return `/api/stream/sports/hls/chunk.ts?url=${encodeURIComponent(fullSegUrl)}`;
