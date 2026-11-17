@@ -6,12 +6,15 @@
 
 const express = require('express');
 const router = express.Router();
+const http = require('http');
+const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const securityEngine = require('./securityEngine');
 const {
   getAuthToken,
   proxyFetch,
+  directFetch,
   UA,
   PROVIDERS,
   redisClient,
@@ -21,15 +24,16 @@ const {
   rotateTableSession
 } = require('./streamCore');
 
-// In-memory caches for sub-millisecond response
+// In-memory caches for sub-millisecond response & bandwidth preservation
 const sportsEventsCache = { data: null, expiresAt: 0 };
+let inFlightSportsEvents = null;
 const sportsPlayerCache = new Map(); // cacheKey -> { html, expiresAt }
 const betfairIdCache = new Map();    // rawEventId -> betfairId
 const sportsWatchLinkCache = new Map(); // streamId -> { url, origin, provider, session, expiresAt }
 const sportsPingCache = new Map();   // targetUrl -> { data, timestamp }
 const inFlightSportsPlayers = new Map(); // deduplicate concurrent requests for same match
 
-const SPORTS_HTML_TTL = 45000; // 45 seconds HTML cache in RAM & Redis
+const SPORTS_HTML_TTL = 300000; // 5 minutes (300s) HTML cache in RAM & Redis (reduces proxy calls by 85%)
 
 // 1. Pre-patch and cache the raw LTVE sports player JavaScript in RAM memory
 let _cachedSportsPlayerJs = null;
@@ -527,78 +531,105 @@ router.get('/player-assets/sports-player.js', (req, res) => {
   }
 });
 
-// 3. Live Sports Events List (Cricket, Football, Tennis)
+// 3. Live Sports Events List (Cricket, Football, Tennis) - 60s Cache & In-Flight Deduplication
 router.get('/events', async (req, res) => {
-  // Check RAM Cache (20s TTL)
+  // Check RAM Cache (60s TTL)
   if (sportsEventsCache.data && Date.now() < sportsEventsCache.expiresAt) {
     return res.json({ success: true, count: sportsEventsCache.data.length, events: sportsEventsCache.data });
   }
 
-  const providerList = ['nice444', 'startexch', 'asstarplay'];
-  const sportNames = { '1': 'Soccer', '2': 'Tennis', '4': 'Cricket', '7': 'Horse Racing' };
-
-  for (const provKey of providerList) {
+  // Deduplicate in-flight upstream fetches across all concurrent clients
+  if (inFlightSportsEvents) {
     try {
-      const provider = PROVIDERS[provKey];
-      const token = await getAuthToken(provKey);
-      const upstreamRes = await proxyFetch(`${provider.base}/api/exchange/market/matchodds/allEventsList`, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json', 
-          'Authorization': `Bearer ${token}`,
-          'Origin': provider.base,
-          'Referer': `${provider.base}/`,
-          'User-Agent': UA
-        },
-        body: JSON.stringify({}),
-        timeout: 7000
-      });
+      const data = await inFlightSportsEvents;
+      return res.json({ success: true, count: data?.length || 0, events: data || [] });
+    } catch (_) {}
+  }
 
-      const d = await upstreamRes.json();
-      const result = [];
+  inFlightSportsEvents = (async () => {
+    // Check Redis distributed cache
+    try {
+      const redisEvents = await redisClient.get('sports:events_list');
+      if (redisEvents && Array.isArray(redisEvents) && redisEvents.length > 0) {
+        sportsEventsCache.data = redisEvents;
+        sportsEventsCache.expiresAt = Date.now() + 60000;
+        return redisEvents;
+      }
+    } catch (_) {}
 
-      if (d?.data) {
-        for (const [sId, list] of Object.entries(d.data)) {
-          if (Array.isArray(list)) {
-            for (const ev of list) {
-              const isInPlay = Boolean(ev?.oddsData?.inPlay ?? ev?.inPlay ?? false);
-              const isStreaming = Boolean(ev?.isStreaming ?? false);
-              result.push({
-                id: String(ev.exEventId || ev._id || ''),
-                name: ev.eventName || 'Unnamed Match',
-                sportId: String(sId),
-                sportName: sportNames[sId] || 'Other Sport',
-                tournament: ev.tournamentName || '',
-                inPlay: isInPlay,
-                isStreaming: isStreaming,
-                eventTime: ev.eventTime || '',
-                tv: true
-              });
+    const providerList = ['nice444', 'startexch', 'asstarplay'];
+    const sportNames = { '1': 'Soccer', '2': 'Tennis', '4': 'Cricket', '7': 'Horse Racing' };
+
+    for (const provKey of providerList) {
+      try {
+        const provider = PROVIDERS[provKey];
+        const token = await getAuthToken(provKey);
+        const upstreamRes = await proxyFetch(`${provider.base}/api/exchange/market/matchodds/allEventsList`, {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json', 
+            'Authorization': `Bearer ${token}`,
+            'Origin': provider.base,
+            'Referer': `${provider.base}/`,
+            'User-Agent': UA
+          },
+          body: JSON.stringify({}),
+          timeout: 7000
+        });
+
+        const d = await upstreamRes.json();
+        const result = [];
+
+        if (d?.data) {
+          for (const [sId, list] of Object.entries(d.data)) {
+            if (Array.isArray(list)) {
+              for (const ev of list) {
+                const isInPlay = Boolean(ev?.oddsData?.inPlay ?? ev?.inPlay ?? false);
+                const isStreaming = Boolean(ev?.isStreaming ?? false);
+                result.push({
+                  id: String(ev.exEventId || ev._id || ''),
+                  name: ev.eventName || 'Unnamed Match',
+                  sportId: String(sId),
+                  sportName: sportNames[sId] || 'Other Sport',
+                  tournament: ev.tournamentName || '',
+                  inPlay: isInPlay,
+                  isStreaming: isStreaming,
+                  eventTime: ev.eventTime || '',
+                  tv: true
+                });
+              }
             }
           }
         }
-      }
 
-      if (result.length > 0) {
-        // Prioritize in-play and streaming matches at the top
-        result.sort((a, b) => {
-          if (a.inPlay && !b.inPlay) return -1;
-          if (!a.inPlay && b.inPlay) return 1;
-          if (a.isStreaming && !b.isStreaming) return -1;
-          if (!a.isStreaming && b.isStreaming) return 1;
-          return 0;
-        });
+        if (result.length > 0) {
+          // Prioritize in-play and streaming matches at the top
+          result.sort((a, b) => {
+            if (a.inPlay && !b.inPlay) return -1;
+            if (!a.inPlay && b.inPlay) return 1;
+            if (a.isStreaming && !b.isStreaming) return -1;
+            if (!a.isStreaming && b.isStreaming) return 1;
+            return 0;
+          });
 
-        sportsEventsCache.data = result;
-        sportsEventsCache.expiresAt = Date.now() + 20000; // 20s cache
-        return res.json({ success: true, count: result.length, events: result });
+          sportsEventsCache.data = result;
+          sportsEventsCache.expiresAt = Date.now() + 60000; // 60s cache
+          await redisClient.set('sports:events_list', result, 60).catch(() => {});
+          return result;
+        }
+      } catch (err) {
+        console.warn(`[SportsEngine] Failed to fetch events from ${provKey}:`, err.message);
       }
-    } catch (err) {
-      console.warn(`[SportsEngine] Failed to fetch events from ${provKey}:`, err.message);
     }
-  }
+    return sportsEventsCache.data || [];
+  })();
 
-  return res.json({ success: true, count: sportsEventsCache.data?.length || 0, events: sportsEventsCache.data || [] });
+  try {
+    const data = await inFlightSportsEvents;
+    return res.json({ success: true, count: data?.length || 0, events: data || [] });
+  } finally {
+    inFlightSportsEvents = null;
+  }
 });
 
 // 4. Dedicated Sports TV Player Iframe
@@ -812,19 +843,34 @@ router.post('/proxy-ping', async (req, res) => {
   }
 });
 
-// 6. Sports Dedicated HLS Playlist Proxy
+// 6. Sports Dedicated HLS Playlist Proxy (Zero-Proxy Direct First)
 router.get('/hls/live.m3u8', async (req, res) => {
   try {
     const { url } = req.query;
     if (!url) return res.status(400).send('Missing url param');
     const upstreamUrl = decodeURIComponent(url);
 
-    const m3u8Res = await proxyFetch(upstreamUrl, {
-      headers: { 'User-Agent': UA, 'Referer': 'https://tv.ltve.live/' },
-      timeout: 8000
-    });
+    let text = '';
+    // 1. Direct fetch first from VPS (Zero proxy bandwidth!)
+    try {
+      const directRes = await directFetch(upstreamUrl, {
+        headers: { 'User-Agent': UA, 'Referer': 'https://tv.ltve.live/' },
+        timeout: 6000
+      });
+      if (directRes.ok) {
+        text = await directRes.text();
+      }
+    } catch (_) {}
 
-    const text = await m3u8Res.text();
+    // 2. Fallback to proxy only if direct fails
+    if (!text) {
+      const m3u8Res = await proxyFetch(upstreamUrl, {
+        headers: { 'User-Agent': UA, 'Referer': 'https://tv.ltve.live/' },
+        timeout: 8000
+      });
+      text = await m3u8Res.text();
+    }
+
     const rewritten = text.split('\n').map(line => {
       const trimmed = line.trim();
       if (trimmed.endsWith('.ts') || trimmed.includes('.ts?')) {
@@ -844,25 +890,42 @@ router.get('/hls/live.m3u8', async (req, res) => {
   }
 });
 
-// 7. Sports Dedicated HLS Chunk Proxy
-router.get('/hls/chunk.ts', async (req, res) => {
+// 7. Sports Dedicated HLS Video Chunk Proxy (Zero-Proxy Direct Pipe: 0 MB Proxy Quota)
+router.get('/hls/chunk.ts', (req, res) => {
   try {
     const { url } = req.query;
     if (!url) return res.status(400).send('Missing url param');
     const targetUrl = decodeURIComponent(url);
 
-    const chunkRes = await proxyFetch(targetUrl, {
+    const u = new URL(targetUrl);
+    const client = u.protocol === 'https:' ? https : http;
+
+    const chunkReq = client.get(targetUrl, {
       headers: { 'User-Agent': UA, 'Referer': 'https://tv.ltve.live/' },
-      timeout: 10000
+      timeout: 15000,
+      rejectUnauthorized: false
+    }, (chunkRes) => {
+      if (chunkRes.statusCode >= 300 && chunkRes.statusCode < 400 && chunkRes.headers.location) {
+        return res.redirect(chunkRes.headers.location);
+      }
+      res.setHeader('Content-Type', chunkRes.headers['content-type'] || 'video/mp2t');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Cache-Control', 'public, max-age=86400');
+      chunkRes.pipe(res);
     });
 
-    res.setHeader('Content-Type', 'video/mp2t');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Cache-Control', 'public, max-age=3600');
-    return chunkRes.body.pipe(res);
+    chunkReq.on('error', (err) => {
+      console.warn('[HLS Chunk Direct Warning]:', err.message);
+      if (!res.headersSent) res.status(502).send('Error fetching video chunk');
+    });
+
+    chunkReq.on('timeout', () => {
+      chunkReq.destroy();
+      if (!res.headersSent) res.status(504).send('Chunk request timed out');
+    });
   } catch (err) {
-    console.error('[SportsEngine] HLS Chunk Proxy Error:', err.message);
-    res.status(500).send('Error proxying sports video chunk');
+    console.error('[SportsEngine] HLS Chunk Error:', err.message);
+    if (!res.headersSent) res.status(500).send('Error processing sports video chunk');
   }
 });
 

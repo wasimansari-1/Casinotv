@@ -268,6 +268,91 @@ function proxyFetch(urlStr, options = {}, redirectCount = 0, retryCount = 0) {
   });
 }
 
+// ============================================================================
+// Zero-Proxy Direct Fetch (Pipes directly from VPS - 0 MB proxy quota consumed)
+// Used for public CDN video streams, .m3u8 playlists, .ts segments & static assets
+// ============================================================================
+function directFetch(urlStr, options = {}, redirectCount = 0) {
+  if (redirectCount > 5) return Promise.reject(new Error('Too many redirects'));
+
+  return new Promise((resolve, reject) => {
+    try {
+      const u = new URL(urlStr);
+      const isHttps = u.protocol === 'https:';
+      const lib = isHttps ? https : http;
+
+      const headers = { ...(options.headers || {}) };
+      let body = options.body;
+      if (body && typeof body === 'object' && !(body instanceof Buffer)) {
+        body = JSON.stringify(body);
+        if (!headers['Content-Type'] && !headers['content-type']) {
+          headers['Content-Type'] = 'application/json';
+        }
+      }
+      if (body) {
+        headers['Content-Length'] = Buffer.byteLength(body);
+      }
+
+      const req = lib.request({
+        protocol: u.protocol,
+        hostname: u.hostname,
+        port: u.port || (isHttps ? 443 : 80),
+        path: u.pathname + u.search,
+        method: options.method || 'GET',
+        headers: headers,
+        timeout: options.timeout || 12000,
+        rejectUnauthorized: false
+      }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          const redirectUrl = new URL(res.headers.location, urlStr).href;
+          return resolve(directFetch(redirectUrl, options, redirectCount + 1));
+        }
+
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => {
+          const fullBuf = Buffer.concat(chunks);
+          resolve({
+            status: res.statusCode,
+            statusText: res.statusMessage,
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            headers: {
+              get(name) {
+                return res.headers[name.toLowerCase()] || null;
+              },
+              raw() { return res.headers; }
+            },
+            async text() {
+              return fullBuf.toString('utf8');
+            },
+            async json() {
+              return JSON.parse(fullBuf.toString('utf8'));
+            },
+            async arrayBuffer() {
+              return fullBuf.buffer.slice(fullBuf.byteOffset, fullBuf.byteOffset + fullBuf.byteLength);
+            },
+            async buffer() {
+              return fullBuf;
+            }
+          });
+        });
+      });
+
+      req.on('timeout', () => {
+        req.destroy(new Error('Direct request timed out'));
+      });
+      req.on('error', (err) => {
+        reject(err);
+      });
+
+      if (body) req.write(body);
+      req.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 // 4-Provider Multi-Account Redundancy Pool (from Internatniol)
@@ -1253,6 +1338,7 @@ module.exports = {
   PROVIDERS,
   UA,
   proxyFetch,
+  directFetch,
   getProxyAgent,
   resetProxyAgent,
   rotateStickySession,

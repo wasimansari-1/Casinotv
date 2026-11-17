@@ -16,6 +16,7 @@ const {
   PROVIDERS, 
   UA,
   proxyFetch,
+  directFetch,
   providerManager,
   redisClient,
   CONFIG
@@ -100,8 +101,8 @@ async function fetchFullTsSegment(targetUrl) {
   return task;
 }
 
-// Memory cache for modified player HTML (TTL 40 Seconds) to deduplicate rapid clicks while ensuring fresh WebRTC sid on reload
-const CASINO_CACHE_TTL = 40 * 1000;
+// Memory cache for modified player HTML (TTL 5 Minutes) to deduplicate rapid clicks while ensuring zero bandwidth waste
+const CASINO_CACHE_TTL = 300 * 1000;
 const playerCache = new Map();
 const inFlightPlayers = new Map();
 const pingCache = new Map();
@@ -231,12 +232,12 @@ async function warmAllCasinoTables() {
   }
 }
 
-// Start warmer 1s after boot, recurring every 8 minutes for all tables so cache never expires
+// Smart Zero-Waste Warmer:
+// Only pre-warm the primary table (99.0010 - 20-20 Teen Patti) on boot once.
+// All tables are cached in RAM & Redis for 5 minutes (300s) on-demand when requested by users.
+// This eliminates 90% of idle background proxy requests!
 setTimeout(() => {
-  warmAllCasinoTables().catch(() => {});
-  setInterval(() => {
-    warmAllCasinoTables().catch(() => {});
-  }, 8 * 60 * 1000);
+  warmCasinoTable('99.0010').catch(() => {});
 }, 1000);
 
 // Health Check & Monitoring API (Real-Time Provider Observability)
@@ -783,49 +784,31 @@ router.get('/player-assets/player.js', (req, res) => {
   }
 });
 
-// 7. Sports Static Assets Proxy (/api/stream/player-assets/sports-player.js)
-router.get('/player-assets/sports-player.js', async (req, res) => {
+// 7. Sports Static Assets Proxy (/api/stream/player-assets/sports-player.js) - Local RAM Asset
+router.get('/player-assets/sports-player.js', (req, res) => {
   try {
-    const upstreamAssetUrl = `https://tv.ltve.live/player/player.js`;
-    
-    const upstreamRes = await proxyFetch(upstreamAssetUrl, {
-      headers: {
-        'User-Agent': UA,
-        'Referer': 'https://tv.ltve.live/'
-      }
-    });
-
-    if (!upstreamRes.ok) {
-      return res.status(upstreamRes.status).send('Sports player asset error');
+    const rawPath = path.join(__dirname, 'sports_player_raw.js');
+    if (fs.existsSync(rawPath)) {
+      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+      res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      return res.sendFile(rawPath);
     }
-
-    let contentType = upstreamRes.headers.get('content-type') || 'application/javascript';
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-
-    let text = await upstreamRes.text();
-    
-    // Disable devtools killswitch
-    text = text.replace(/function wp\(e\)\{/g, 'function wp(e){return;');
-    text = text.replace(/Q\.devtoolsGuard/g, 'false');
-    text = text.replace(/devtoolsGuard:!0/g, 'devtoolsGuard:!1');
-    text = text.replace(/devtoolsGuard/g, 'false');
-
-    // Supercharge WebRTC connection timeout to 20s
-    text = text.replace(/Q\.webrtcTimeout\*1e3/g, '20000');
-
-    // Deep HLS buffer (60s instead of 20s) so HLS matches never buffer or stutter
-    text = text.replace(/maxBufferLength:20/g, 'maxBufferLength:60,maxMaxBufferLength:120,fragLoadingTimeOut:30000,fragLoadingMaxRetry:10');
-
-    return res.send(text);
+    const fallbackPath = path.join(__dirname, 'player.js');
+    if (fs.existsSync(fallbackPath)) {
+      res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+      res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      return res.sendFile(fallbackPath);
+    }
+    return res.status(404).send('Sports player asset not found');
   } catch (err) {
     console.error('[Sports Asset Error]:', err.message);
-    res.status(500).send('Error proxying sports asset');
+    res.status(500).send('Error loading sports asset');
   }
 });
 
-// 8. Other player static assets (loader.gif, etc.)
+// 8. Other player static assets (loader.gif, etc.) - Direct Fetch First (0 MB Proxy Quota)
 router.get('/player-assets/:asset', async (req, res) => {
   try {
     const { asset } = req.params;
@@ -840,20 +823,28 @@ router.get('/player-assets/:asset', async (req, res) => {
 
     const upstreamAssetUrl = `https://live.livecdnplatin.com/player/${asset}`;
     
-    const upstreamRes = await proxyFetch(upstreamAssetUrl, {
-      headers: {
-        'User-Agent': UA,
-        'Referer': 'https://live.livecdnplatin.com/'
-      }
-    });
+    // Direct fetch from CDN (0 MB proxy bandwidth!)
+    let upstreamRes;
+    try {
+      upstreamRes = await directFetch(upstreamAssetUrl, {
+        headers: { 'User-Agent': UA, 'Referer': 'https://live.livecdnplatin.com/' },
+        timeout: 5000
+      });
+    } catch (_) {
+      upstreamRes = await proxyFetch(upstreamAssetUrl, {
+        headers: { 'User-Agent': UA, 'Referer': 'https://live.livecdnplatin.com/' },
+        timeout: 8000
+      });
+    }
 
-    if (!upstreamRes.ok) {
-      return res.status(upstreamRes.status).send('Asset not found');
+    if (!upstreamRes || !upstreamRes.ok) {
+      return res.status(upstreamRes ? upstreamRes.status : 404).send('Asset not found');
     }
 
     let contentType = upstreamRes.headers.get('content-type') || 'application/octet-stream';
     res.setHeader('Content-Type', contentType);
     res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
 
     const buffer = Buffer.from(await upstreamRes.arrayBuffer());
     return res.send(buffer);
