@@ -30,6 +30,7 @@ const CONFIG = {
 
 let _cachedAgent = null;
 let _cachedProxyUrl = null;
+const _sessionAgentPool = new Map(); // effectiveProxyUrl -> https.Agent with persistent Keep-Alive
 let _currentStickySession = Math.floor(Math.random() * 10) + 1; // Strict 1 to 10 pool of Webshare Indian Residential sessions
 const _tableSessionMap = new Map();
 
@@ -66,6 +67,10 @@ function getEffectiveProxyUrl(proxyUrlStr, sessionOverride = null) {
 }
 
 function resetProxyAgent() {
+  for (const agent of _sessionAgentPool.values()) {
+    try { agent.destroy(); } catch (_) {}
+  }
+  _sessionAgentPool.clear();
   if (_cachedAgent) {
     try {
       _cachedAgent.destroy();
@@ -92,20 +97,31 @@ function rotateStickySession(reason = '') {
 
 function getProxyAgent(proxyUrlStr, sessionOverride = null) {
   const effectiveProxyUrl = getEffectiveProxyUrl(proxyUrlStr, sessionOverride);
-  if (!sessionOverride && _cachedAgent && _cachedProxyUrl === effectiveProxyUrl) {
-    return _cachedAgent;
+  if (_sessionAgentPool.has(effectiveProxyUrl)) {
+    return _sessionAgentPool.get(effectiveProxyUrl);
   }
+
   const pUrl = new URL(effectiveProxyUrl);
   const proxyAuth = pUrl.username 
     ? 'Basic ' + Buffer.from(decodeURIComponent(pUrl.username) + ':' + decodeURIComponent(pUrl.password)).toString('base64') 
     : null;
 
   const agent = new https.Agent({
-    keepAlive: false,
-    timeout: 20000
+    keepAlive: true,
+    keepAliveMsecs: 30000,
+    maxSockets: 30,
+    maxFreeSockets: 10,
+    timeout: 15000
   });
 
   agent.createConnection = function(options, callback) {
+    let called = false;
+    function done(err, sock) {
+      if (called) return;
+      called = true;
+      callback(err, sock);
+    }
+
     const targetHost = options.host || options.hostname;
     const targetPort = options.port || 443;
     const connectReq = http.request({
@@ -116,7 +132,8 @@ function getProxyAgent(proxyUrlStr, sessionOverride = null) {
       headers: {
         'Host': targetHost + ':' + targetPort,
         ...(proxyAuth ? { 'Proxy-Authorization': proxyAuth } : {})
-      }
+      },
+      timeout: 10000
     });
 
     connectReq.on('connect', (res, socket, head) => {
@@ -125,7 +142,7 @@ function getProxyAgent(proxyUrlStr, sessionOverride = null) {
         if (res.statusCode === 502 || res.statusCode === 503) {
           rotateStickySession('Proxy CONNECT status ' + res.statusCode);
         }
-        return callback(new Error('Proxy CONNECT rejected with status ' + res.statusCode));
+        return done(new Error('Proxy CONNECT rejected with status ' + res.statusCode));
       }
       if (head && head.length > 0) {
         socket.unshift(head);
@@ -135,20 +152,26 @@ function getProxyAgent(proxyUrlStr, sessionOverride = null) {
         servername: options.servername || targetHost,
         rejectUnauthorized: false
       }, () => {
-        callback(null, tlsSocket);
+        done(null, tlsSocket);
       });
       tlsSocket.on('error', (err) => {
-        socket.destroy();
-        callback(err);
+        try { socket.destroy(); } catch (_) {}
+        done(err);
       });
     });
 
+    connectReq.on('timeout', () => {
+      connectReq.destroy();
+      done(new Error('Proxy CONNECT request timed out'));
+    });
+
     connectReq.on('error', (err) => {
-      callback(err);
+      done(err);
     });
     connectReq.end();
   };
 
+  _sessionAgentPool.set(effectiveProxyUrl, agent);
   if (!sessionOverride) {
     _cachedAgent = agent;
     _cachedProxyUrl = effectiveProxyUrl;
