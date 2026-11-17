@@ -244,49 +244,42 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
         width: 0 !important;
       }
       #status {
-        display: none !important; /* Replaced by sleek YouTube-style spinner */
+        display: none !important;
       }
-      /* YouTube-style buffer / loading spinner */
-      .yt-loader-container {
+      /* Broadcast-Grade Minimalist Sports Stream Loader */
+      .stream-loader {
         position: absolute;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
         display: flex;
-        flex-direction: column;
         align-items: center;
         justify-content: center;
+        background: transparent;
         z-index: 9999;
         pointer-events: none;
-        transition: opacity 0.4s ease, visibility 0.4s ease;
+        transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1), visibility 0.3s;
       }
-      .yt-spinner-ring {
-        width: 54px;
-        height: 54px;
-        border: 4px solid rgba(255, 255, 255, 0.15);
-        border-top: 4px solid #ef4444; /* YouTube red */
-        border-right: 4px solid rgba(239, 68, 68, 0.5);
-        border-radius: 50%;
-        animation: yt-spin 0.75s linear infinite;
-        box-shadow: 0 0 20px rgba(239, 68, 68, 0.4);
+      .stream-spinner {
+        width: 44px;
+        height: 44px;
+        animation: stream-rotate 1.4s linear infinite;
+        will-change: transform;
       }
-      @keyframes yt-spin {
-        0% { transform: rotate(0deg); }
+      .stream-path {
+        stroke: #38bdf8; /* Modern Broadcast Cyan / Azure */
+        stroke-linecap: round;
+        animation: stream-dash 1.4s ease-in-out infinite;
+        filter: drop-shadow(0 0 8px rgba(56, 189, 248, 0.45));
+      }
+      @keyframes stream-rotate {
         100% { transform: rotate(360deg); }
       }
-      .yt-connecting-text {
-        margin-top: 14px;
-        color: #f1f5f9;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        font-size: 13px;
-        font-weight: 500;
-        letter-spacing: 0.5px;
-        background: rgba(15, 23, 42, 0.85);
-        padding: 5px 14px;
-        border-radius: 8px;
-        backdrop-filter: blur(8px);
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+      @keyframes stream-dash {
+        0% { stroke-dasharray: 1, 150; stroke-dashoffset: 0; }
+        50% { stroke-dasharray: 90, 150; stroke-dashoffset: -35; }
+        100% { stroke-dasharray: 90, 150; stroke-dashoffset: -124; }
       }
     </style>
   `;
@@ -341,11 +334,12 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
     `src="/api/stream/sports/player-assets/sports-player.js?v=${ts}"`
   );
 
-  // Insert YouTube spinner DOM element
+  // Insert Broadcast-Grade Minimalist Spinner (Clean SVG ring on black screen, zero clunky text)
   const spinnerDom = `
-    <div id="yt-spinner" class="yt-loader-container">
-      <div class="yt-spinner-ring"></div>
-      <div class="yt-connecting-text">Connecting to Live Feed...</div>
+    <div id="stream-loader" class="stream-loader">
+      <svg class="stream-spinner" viewBox="0 0 50 50">
+        <circle class="stream-path" cx="25" cy="25" r="20" fill="none" stroke-width="3.5" />
+      </svg>
     </div>
   `;
   if (html.includes('<body')) {
@@ -372,44 +366,42 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
           });
         } catch(e) {}
 
-        // YouTube Spinner Controller
-        var spinner = document.getElementById('yt-spinner');
-        var textEl = spinner ? spinner.querySelector('.yt-connecting-text') : null;
+        // Stream Loader Controller (Silent, smooth fade-out on video start)
+        var loader = document.getElementById('stream-loader');
         var video = document.getElementById('video') || document.querySelector('video');
 
-        function hideSpinner() {
-          if (spinner && spinner.style.display !== 'none') {
-            spinner.style.opacity = '0';
-            spinner.style.visibility = 'hidden';
-            setTimeout(function() { if (spinner) spinner.style.display = 'none'; }, 400);
+        function hideLoader() {
+          if (loader && loader.style.display !== 'none') {
+            loader.style.opacity = '0';
+            loader.style.visibility = 'hidden';
+            setTimeout(function() { if (loader) loader.style.display = 'none'; }, 300);
           }
         }
 
-        function showSpinner(msg) {
-          if (spinner) {
-            if (msg && textEl) textEl.textContent = msg;
-            spinner.style.display = 'flex';
-            spinner.style.visibility = 'visible';
-            setTimeout(function() { if (spinner) spinner.style.opacity = '1'; }, 10);
+        function showLoader() {
+          if (loader) {
+            loader.style.display = 'flex';
+            loader.style.visibility = 'visible';
+            setTimeout(function() { if (loader) loader.style.opacity = '1'; }, 10);
           }
         }
 
         if (video) {
-          video.addEventListener('playing', hideSpinner);
-          video.addEventListener('canplay', hideSpinner);
+          video.addEventListener('playing', hideLoader);
+          video.addEventListener('canplay', hideLoader);
           video.addEventListener('timeupdate', function() {
-            if (video.currentTime > 0) hideSpinner();
+            if (video.currentTime > 0) hideLoader();
           });
-          video.addEventListener('waiting', function() { showSpinner('Buffering...'); });
+          video.addEventListener('waiting', showLoader);
         }
 
-        // Auto-hide fallback after video starts receiving frames
+        // Auto-dismiss as soon as video decodes first frame
         var checkVideoPlaying = setInterval(function() {
           if (video && (video.currentTime > 0 || video.readyState >= 3)) {
-            hideSpinner();
+            hideLoader();
             clearInterval(checkVideoPlaying);
           }
-        }, 300);
+        }, 200);
       })();
     </script>
   `;
