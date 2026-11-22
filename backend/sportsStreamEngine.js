@@ -1015,7 +1015,15 @@ router.post("/proxy-ping", async (req, res) => {
 
       // Rewrite wsUrl to WebSocket tunnel proxy to bypass Origin 403 blocks
       if (data.wsUrl && !data.wsUrl.startsWith('/api/stream/ws')) {
-        data.wsUrl = `/api/stream/ws?target=${encodeURIComponent(data.wsUrl)}`;
+        let cleanWs = String(data.wsUrl).trim();
+        if (cleanWs.startsWith('//')) {
+          cleanWs = `wss:${cleanWs}`;
+        } else if (cleanWs.startsWith('/')) {
+          cleanWs = `wss://player.ltve.live${cleanWs}`;
+        } else if (!cleanWs.startsWith('ws://') && !cleanWs.startsWith('wss://')) {
+          cleanWs = `wss://${cleanWs}`;
+        }
+        data.wsUrl = `/api/stream/ws?target=${encodeURIComponent(cleanWs)}`;
       }
 
       if (!data.streamId) {

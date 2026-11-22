@@ -109,7 +109,23 @@ function handleWebSocketProxy(clientReq, clientSocket, clientHead) {
     const rawTarget = reqUrl.searchParams.get('target');
     let targetWsUrl = rawTarget ? decodeURIComponent(rawTarget) : 'wss://livecdnplatin.com/UNIVERSE-GE/websocket';
 
-    const parsedTarget = new URL(targetWsUrl);
+    // Normalize targetWsUrl: Handle relative paths and protocol-less URLs safely
+    targetWsUrl = String(targetWsUrl).trim();
+    if (targetWsUrl.startsWith('//')) {
+      targetWsUrl = 'wss:' + targetWsUrl;
+    } else if (targetWsUrl.startsWith('/')) {
+      targetWsUrl = 'wss://livecdnplatin.com' + targetWsUrl;
+    } else if (!targetWsUrl.startsWith('ws://') && !targetWsUrl.startsWith('wss://')) {
+      targetWsUrl = 'wss://' + targetWsUrl;
+    }
+
+    let parsedTarget;
+    try {
+      parsedTarget = new URL(targetWsUrl);
+    } catch (_) {
+      parsedTarget = new URL('wss://livecdnplatin.com/UNIVERSE-GE/websocket');
+    }
+
     const isSecure = parsedTarget.protocol === 'wss:' || parsedTarget.protocol === 'https:';
     const port = parsedTarget.port || (isSecure ? 443 : 80);
     const client = isSecure ? https : http;

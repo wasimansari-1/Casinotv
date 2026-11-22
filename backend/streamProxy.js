@@ -148,10 +148,18 @@ function resolveTokenExpiry(token, fallbackMs = 60000) {
 
 // Helper: Return proxied WebSocket URL so browsers never get blocked by upstream Origin 403 checks
 const fallbackWsUrl = `/api/stream/ws?target=${encodeURIComponent('wss://livecdnplatin.com/UNIVERSE-GE/websocket')}`;
-function getProxiedWsUrl(originalWsUrl) {
+function getProxiedWsUrl(originalWsUrl, defaultHost = 'livecdnplatin.com') {
   if (!originalWsUrl) return fallbackWsUrl;
-  if (originalWsUrl.startsWith('/api/stream/ws')) return originalWsUrl;
-  return `/api/stream/ws?target=${encodeURIComponent(originalWsUrl)}`;
+  let clean = String(originalWsUrl).trim();
+  if (clean.startsWith('/api/stream/ws')) return clean;
+  if (clean.startsWith('//')) {
+    clean = `wss:${clean}`;
+  } else if (clean.startsWith('/')) {
+    clean = `wss://${defaultHost}${clean}`;
+  } else if (!clean.startsWith('ws://') && !clean.startsWith('wss://')) {
+    clean = `wss://${clean}`;
+  }
+  return `/api/stream/ws?target=${encodeURIComponent(clean)}`;
 }
 
 // Helper: Pre-warm a single casino table in memory with distributed lock
