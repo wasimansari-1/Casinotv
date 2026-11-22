@@ -152,12 +152,14 @@ function getProxiedWsUrl(originalWsUrl, defaultHost = 'livecdnplatin.com') {
   if (!originalWsUrl) return fallbackWsUrl;
   let clean = String(originalWsUrl).trim();
   if (clean.startsWith('/api/stream/ws')) return clean;
-  if (clean.startsWith('//')) {
+  if (clean === 'edge' || clean.startsWith('edge/') || clean.startsWith('/edge/')) {
+    clean = `wss://${defaultHost}/UNIVERSE-GE/websocket`;
+  } else if (clean.startsWith('//')) {
     clean = `wss:${clean}`;
   } else if (clean.startsWith('/')) {
     clean = `wss://${defaultHost}${clean}`;
   } else if (!clean.startsWith('ws://') && !clean.startsWith('wss://')) {
-    clean = `wss://${clean}`;
+    clean = `wss://${defaultHost}/${clean}`;
   }
   return `/api/stream/ws?target=${encodeURIComponent(clean)}`;
 }

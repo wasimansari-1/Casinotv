@@ -111,7 +111,9 @@ function handleWebSocketProxy(clientReq, clientSocket, clientHead) {
 
     // Normalize targetWsUrl: Handle relative paths and protocol-less URLs safely
     targetWsUrl = String(targetWsUrl).trim();
-    if (targetWsUrl.startsWith('//')) {
+    if (targetWsUrl === 'edge' || targetWsUrl.startsWith('edge/') || targetWsUrl.startsWith('/edge/')) {
+      targetWsUrl = 'wss://livecdnplatin.com/UNIVERSE-GE/websocket';
+    } else if (targetWsUrl.startsWith('//')) {
       targetWsUrl = 'wss:' + targetWsUrl;
     } else if (targetWsUrl.startsWith('/')) {
       targetWsUrl = 'wss://livecdnplatin.com' + targetWsUrl;
@@ -122,6 +124,9 @@ function handleWebSocketProxy(clientReq, clientSocket, clientHead) {
     let parsedTarget;
     try {
       parsedTarget = new URL(targetWsUrl);
+      if (!parsedTarget.hostname.includes('.') || parsedTarget.hostname === 'edge') {
+        parsedTarget = new URL('wss://livecdnplatin.com/UNIVERSE-GE/websocket');
+      }
     } catch (_) {
       parsedTarget = new URL('wss://livecdnplatin.com/UNIVERSE-GE/websocket');
     }
