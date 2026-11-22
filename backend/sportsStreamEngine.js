@@ -447,7 +447,6 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
 
         // Stream Loader Controller (Silent, smooth fade-out on video start)
         var loader = document.getElementById('stream-loader');
-        var video = document.getElementById('video') || document.querySelector('video');
 
         function hideLoader() {
           if (loader && loader.style.display !== 'none') {
@@ -465,22 +464,28 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
           }
         }
 
-        if (video) {
-          video.addEventListener('playing', hideLoader);
-          video.addEventListener('canplay', hideLoader);
-          video.addEventListener('timeupdate', function() {
-            if (video.currentTime > 0) hideLoader();
-          });
-          video.addEventListener('waiting', showLoader);
-        }
-
-        // Auto-dismiss as soon as video decodes first frame
+        // Periodically monitor video element (handles dynamically injected <video> tags)
         var checkVideoPlaying = setInterval(function() {
-          if (video && (video.currentTime > 0 || video.readyState >= 3)) {
-            hideLoader();
-            clearInterval(checkVideoPlaying);
+          var v = document.getElementById('video') || document.querySelector('video');
+          if (v) {
+            v.removeEventListener('playing', hideLoader);
+            v.addEventListener('playing', hideLoader);
+            v.removeEventListener('canplay', hideLoader);
+            v.addEventListener('canplay', hideLoader);
+            v.removeEventListener('waiting', showLoader);
+            v.addEventListener('waiting', showLoader);
+            if (v.currentTime > 0 || v.readyState >= 2 || (!v.paused && !v.ended)) {
+              hideLoader();
+              clearInterval(checkVideoPlaying);
+            }
           }
-        }, 200);
+        }, 150);
+
+        // Safety fallback: auto-hide loader after 4.5 seconds so user never gets stuck with a spinning circle
+        setTimeout(function() {
+          hideLoader();
+          clearInterval(checkVideoPlaying);
+        }, 4500);
       })();
     </script>
   `;

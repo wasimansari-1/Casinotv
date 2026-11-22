@@ -21,6 +21,7 @@ fi
 # 2. Reset and pull latest cleanly
 echo "📥 2. Pulling latest code cleanly from GitHub (origin/main)..."
 git update-index --no-assume-unchanged backend/whitelist_database.json 2>/dev/null || true
+git checkout -f 2>/dev/null || true
 rm -f backend/whitelist_database.json 2>/dev/null || true
 git fetch origin main
 git reset --hard origin/main
@@ -45,9 +46,15 @@ pm2 restart casinotv-stream --update-env
 # 6. Verify health
 sleep 2
 echo "🏥 6. Verifying API health status..."
+PORT_NUM="${PORT:-5050}"
 if command -v curl >/dev/null 2>&1; then
-  curl -s http://localhost:3000/api/stream/health | grep -q "ok" && echo "✅ Service is HEALTHY and serving zero-latency streams!" || echo "⚠️ Service online (check pm2 logs casinotv-stream if needed)"
+  curl -s "http://localhost:${PORT_NUM}/api/stream/health" | grep -q "ok" && echo "✅ Service is HEALTHY on port ${PORT_NUM} and serving zero-latency streams!" || echo "⚠️ Service online (check pm2 logs casinotv-stream if needed)"
 fi
+
+echo "========================================================"
+echo "📋 Recent 25 lines of casinotv-stream logs:"
+echo "========================================================"
+pm2 logs casinotv-stream --lines 25 --nostream
 
 echo "========================================================"
 echo "✅ FRESH DEPLOYMENT COMPLETED SUCCESSFULLY!"
