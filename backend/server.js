@@ -153,7 +153,6 @@ function handleWebSocketProxy(clientReq, clientSocket, clientHead) {
         'Upgrade': 'websocket',
         'Sec-WebSocket-Version': clientReq.headers['sec-websocket-version'] || '13',
         'Sec-WebSocket-Key': clientReq.headers['sec-websocket-key'],
-        'Sec-WebSocket-Extensions': clientReq.headers['sec-websocket-extensions'] || '',
         'Origin': spoofedOrigin,
         'User-Agent': clientReq.headers['user-agent'] || 'Mozilla/5.0'
       },
