@@ -127,10 +127,12 @@ const tableTokenCache = new Map(); // eventId -> { token, wsUrl, streamId, expir
 // Calculate accurate token expiry from JWT payload to prevent serving expired tokens
 function resolveTokenExpiry(token, fallbackMs = 60000) {
   try {
-    if (token && typeof token === 'string' && token.includes('.')) {
-      const parts = token.split('.');
+    if (token && typeof token === "string" && token.includes(".")) {
+      const parts = token.split(".");
       if (parts.length === 3) {
-        const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+        const payload = JSON.parse(
+          Buffer.from(parts[1], "base64").toString("utf8"),
+        );
         if (payload && payload.exp) {
           const expMs = payload.exp * 1000;
           const remainingMs = expMs - Date.now() - 25000; // 25s safety margin before actual JWT expiry
@@ -268,8 +270,11 @@ async function warmCasinoTable(eventId) {
               tableTokenCache.set(eventId, {
                 token: pingData.token,
                 wsUrl: proxiedWs,
-                streamId: pingData.streamId || (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) || 'GAME10',
-                expiresAt: resolveTokenExpiry(pingData.token)
+                streamId:
+                  pingData.streamId ||
+                  (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) ||
+                  "GAME10",
+                expiresAt: resolveTokenExpiry(pingData.token),
               });
               pingCache.set(targetUrl, {
                 data: { ...pingData, wsUrl: proxiedWs },
@@ -443,7 +448,11 @@ function transformPlayerHtml(
 
       const modifiedCfg = {
         ...originalCfg,
-        streamId: originalCfg.streamId || ((eventId && GAME_MAP[eventId]) ? GAME_MAP[eventId].streamId : 'GAME10'),
+        streamId:
+          originalCfg.streamId ||
+          (eventId && GAME_MAP[eventId]
+            ? GAME_MAP[eventId].streamId
+            : "GAME10"),
         pingUrl: proxiedPingUrl,
         flagUrl: "/api/stream/dummy-flag",
         byeUrl: "/api/stream/dummy-bye",
@@ -728,19 +737,25 @@ router.get("/player/:eventId", async (req, res) => {
                   tz: "Asia/Kolkata",
                   tzo: 330,
                 }),
-                timeout: 2500
-              }).then(r => r.json()).then(data => {
-                if (data && data.token && data.wsUrl) {
-                  tableTokenCache.set(eventId, {
-                    token: data.token,
-                    wsUrl: data.wsUrl,
-                    streamId: data.streamId || (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) || 'GAME10',
-                    expiresAt: resolveTokenExpiry(data.token)
-                  });
-                  pingCache.set(targetUrl, { data, timestamp: Date.now() });
-                }
-                return data;
-              }).catch(() => null);
+                timeout: 2500,
+              })
+                .then((r) => r.json())
+                .then((data) => {
+                  if (data && data.token && data.wsUrl) {
+                    tableTokenCache.set(eventId, {
+                      token: data.token,
+                      wsUrl: data.wsUrl,
+                      streamId:
+                        data.streamId ||
+                        (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) ||
+                        "GAME10",
+                      expiresAt: resolveTokenExpiry(data.token),
+                    });
+                    pingCache.set(targetUrl, { data, timestamp: Date.now() });
+                  }
+                  return data;
+                })
+                .catch(() => null);
 
               // Race with 1200ms: with Keep-Alive connection pool, proxy handshake takes ~350ms,
               // so it completes well before 1200ms without blocking user!
@@ -1097,14 +1112,15 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
   const fallbackStreamId =
     eventId && GAME_MAP[eventId] ? GAME_MAP[eventId].streamId : "GAME10";
   const isInit = Boolean(req.body?.init);
-  const isConnecting = req.body?.mode === 'connecting';
-  const isRoutineHeartbeat = !isInit && !isConnecting && req.body?.mode === 'playing';
+  const isConnecting = req.body?.mode === "connecting";
+  const isRoutineHeartbeat =
+    !isInit && !isConnecting && req.body?.mode === "playing";
 
   // 1. FAST RAM PATH FOR ROUTINE HEARTBEATS:
   // If the player is already streaming (mode: 'playing'), reply from RAM in 0ms!
   // This shields Webshare proxy from millions of routine pings!
   if (isRoutineHeartbeat) {
-    const cachedToken = (eventId && tableTokenCache.get(eventId)?.token) || '';
+    const cachedToken = (eventId && tableTokenCache.get(eventId)?.token) || "";
     const cachedWs = (eventId && tableTokenCache.get(eventId)?.wsUrl) || fallbackWsUrl;
     return res.status(200).json({
       ok: true,
@@ -1113,7 +1129,7 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
       token: cachedToken,
       wsUrl: getProxiedWsUrl(cachedWs),
       maintenance: null,
-      stop: false
+      stop: false,
     });
   }
 
@@ -1255,7 +1271,7 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
               token: pingResData.token,
               wsUrl: pingResData.wsUrl,
               streamId: pingResData.streamId,
-              expiresAt: resolveTokenExpiry(pingResData.token)
+              expiresAt: resolveTokenExpiry(pingResData.token),
             });
             pingCache.set(targetUrl, {
               data: pingResData,
