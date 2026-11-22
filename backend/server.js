@@ -156,6 +156,15 @@ function handleWebSocketProxy(clientReq, clientSocket, clientHead) {
     });
 
     upstreamReq.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
+      // Clear HTTP request timeouts once upgraded to persistent WebSocket tunnel
+      upstreamReq.setTimeout(0);
+      upstreamSocket.setTimeout(0);
+      clientSocket.setTimeout(0);
+      clientSocket.setNoDelay(true);
+      upstreamSocket.setNoDelay(true);
+      clientSocket.setKeepAlive(true, 30000);
+      upstreamSocket.setKeepAlive(true, 30000);
+
       const headers = [
         'HTTP/1.1 101 Switching Protocols',
         'Upgrade: websocket',
