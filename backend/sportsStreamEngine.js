@@ -427,10 +427,31 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
     html = `${spinnerDom}${html}`;
   }
 
-  // Client runtime patch
+  // Client runtime patch with Master Guard Anti-Theft Protection
+  const allowedOriginsJson = JSON.stringify(securityEngine.getAllowedDomainsList());
   const clientPatch = `
     <script>
       (function() {
+        var allowed = ${allowedOriginsJson};
+        try {
+          if (window.location.ancestorOrigins && window.location.ancestorOrigins.length > 0) {
+            for (var i = 0; i < window.location.ancestorOrigins.length; i++) {
+              var aOrigin = window.location.ancestorOrigins[i];
+              var aHost = new URL(aOrigin).hostname.toLowerCase();
+              var ok = false;
+              for (var j = 0; j < allowed.length; j++) {
+                var d = allowed[j].toLowerCase();
+                if (aHost === d || aHost.endsWith('.' + d)) { ok = true; break; }
+              }
+              if (!ok) {
+                document.documentElement.innerHTML = '<div style="background:#090d16;color:#ef4444;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:sans-serif;font-weight:700;font-size:16px;text-align:center;padding:20px;"><div>UNAUTHORIZED EMBED DETECTED</div><div style="font-size:12px;color:#94a3b8;margin-top:8px;">Domain ' + aHost + ' is not authorized by stream administrator.</div></div>';
+                if (window.stop) window.stop();
+                throw new Error('Framing blocked by anti-theft guard: ' + aHost);
+              }
+            }
+          }
+        } catch(e) {}
+
         if (navigator.sendBeacon) navigator.sendBeacon = function() { return true; };
         window.location.replace = function() { return false; };
         var _origAddEvent = window.addEventListener;
@@ -786,8 +807,8 @@ router.get("/player/:eventId", async (req, res) => {
     });
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-    res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Permissions-Policy", "unload=*");
+    res.setHeader("Content-Security-Policy", securityEngine.getFrameAncestorsCSP());
     return res.send(redisHtml);
   }
 
@@ -797,8 +818,8 @@ router.get("/player/:eventId", async (req, res) => {
       const html = await inFlightSportsPlayers.get(eventId);
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-      res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Permissions-Policy", "unload=*");
+      res.setHeader("Content-Security-Policy", securityEngine.getFrameAncestorsCSP());
       return res.send(html);
     } catch (_) {}
   }
@@ -919,10 +940,8 @@ router.get("/player/:eventId", async (req, res) => {
     const finalHtml = await task;
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-    res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Permissions-Policy", "unload=*");
-    res.removeHeader("X-Frame-Options");
-    res.removeHeader("Content-Security-Policy");
+    res.setHeader("Content-Security-Policy", securityEngine.getFrameAncestorsCSP());
     return res.send(finalHtml);
   } finally {
     inFlightSportsPlayers.delete(eventId);
@@ -931,6 +950,11 @@ router.get("/player/:eventId", async (req, res) => {
 
 // 5. Dedicated Sports Proxy-Ping
 router.post("/proxy-ping", async (req, res) => {
+  const access = await securityEngine.verifyAccess(req, "sports");
+  if (!access.allowed) {
+    return res.status(403).json({ error: "Unauthorized: Domain or IP not whitelisted", reason: access.reason });
+  }
+
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "*");

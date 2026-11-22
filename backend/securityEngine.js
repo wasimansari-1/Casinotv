@@ -20,8 +20,10 @@ const DB_FILE = path.join(__dirname, 'whitelist_database.json');
 
 // Default Pre-Seeded Whitelist Entries (Fallbacks)
 const DEFAULT_DOMAINS = [
-  { domain: 'exchange444.com', entryType: 'domain', casino: true, sports: true, status: 'active', note: 'Authorized Entity' },
+  { domain: 'punt666.biz', entryType: 'domain', casino: true, sports: true, status: 'active', note: 'Authorized Entity' },
   { domain: 'dream444.fun', entryType: 'domain', casino: true, sports: false, status: 'active', note: 'Authorized Entity' },
+  { domain: 'exchange444.com', entryType: 'domain', casino: true, sports: true, status: 'active', note: 'Authorized Entity' },
+  { domain: 'universeapi.site', entryType: 'domain', casino: true, sports: true, status: 'active', note: 'Authorized Entity' },
   { domain: 'chimneysolutions.info', entryType: 'domain', casino: true, sports: true, status: 'active', note: 'Primary Domain' },
   { domain: 'cstv.chimneysolutions.info', entryType: 'domain', casino: true, sports: true, status: 'active', note: 'Streaming Subdomain' },
   { domain: '72.61.172.110', entryType: 'ip', casino: true, sports: true, status: 'active', note: 'VPS Host IP' },
@@ -161,11 +163,11 @@ function logAttempt(domain, ip, type, streamId, action, reason) {
   }).catch(() => {});
 }
 
-// Clean & Normalize Domain from Header / Referer
+// Clean & Normalize Domain from Browser-Secured Header / Referer (Anti-Theft Hardened: Query params strictly rejected)
 function extractDomain(req) {
-  const referer = req.headers.referer || req.headers.referrer;
-  const origin = req.headers.origin;
-  const rawTarget = referer || origin || req.query.domain || req.query.ref;
+  const referer = req.headers?.referer || req.headers?.referrer;
+  const origin = req.headers?.origin;
+  const rawTarget = referer || origin;
 
   if (rawTarget && typeof rawTarget === 'string') {
     try {
@@ -179,12 +181,91 @@ function extractDomain(req) {
     } catch (_) {}
   }
 
-  // If no referer/origin, check query or client IP
-  if (req.query.origin) {
-    return String(req.query.origin).replace(/^https?:\/\//, '').split('/')[0].split(':')[0].toLowerCase();
+  return '';
+}
+
+// Dynamic CSP frame-ancestors Generator (Unbypassable Browser Enforced Framing Lock)
+function getFrameAncestorsCSP() {
+  if (!enforceWhitelist) {
+    return "frame-ancestors *;";
+  }
+  const hosts = new Set();
+  hosts.add("'self'");
+  hosts.add("https://cstv.chimneysolutions.info");
+  hosts.add("http://cstv.chimneysolutions.info");
+  hosts.add("https://chimneysolutions.info");
+  hosts.add("http://chimneysolutions.info");
+  hosts.add("http://localhost:*");
+  hosts.add("http://127.0.0.1:*");
+
+  for (const [key, entry] of whitelistMap.entries()) {
+    if (entry.status !== 'active') continue;
+    if (entry.entryType === 'domain') {
+      let clean = key.trim().toLowerCase();
+      if (clean.startsWith('*.')) clean = clean.slice(2);
+      hosts.add(`https://${clean}`);
+      hosts.add(`https://*.${clean}`);
+      hosts.add(`http://${clean}`);
+      hosts.add(`http://*.${clean}`);
+    } else if (entry.entryType === 'ip') {
+      hosts.add(`http://${key}`);
+      hosts.add(`https://${key}`);
+    }
+  }
+  return `frame-ancestors ${Array.from(hosts).join(' ')};`;
+}
+
+// Return active authorized domain list for client-side ancestorOrigins verification
+function getAllowedDomainsList() {
+  const list = [
+    'chimneysolutions.info',
+    'cstv.chimneysolutions.info',
+    'localhost',
+    '127.0.0.1'
+  ];
+  for (const [key, entry] of whitelistMap.entries()) {
+    if (entry.status === 'active' && entry.entryType === 'domain') {
+      let clean = key.trim().toLowerCase();
+      if (clean.startsWith('*.')) clean = clean.slice(2);
+      if (!list.includes(clean)) list.push(clean);
+    }
+  }
+  return list;
+}
+
+// WebSocket Upgrade Access Verification (RFC 6455 Origin Gatekeeper)
+function verifyWebSocketAccess(req) {
+  if (!enforceWhitelist) return true;
+
+  const originHeader = req.headers?.origin || req.headers?.referer || '';
+  let domain = '';
+  if (originHeader && typeof originHeader === 'string') {
+    try {
+      const parsed = new URL(originHeader.startsWith('http') ? originHeader : `http://${originHeader}`);
+      domain = parsed.hostname.toLowerCase().trim();
+    } catch (_) {}
   }
 
-  return '';
+  let clientIp = req.headers?.['x-forwarded-for']?.split(',')[0].trim() || req.socket?.remoteAddress || '';
+  if (clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
+
+  // Allow self origin
+  if (domain === 'cstv.chimneysolutions.info' || domain === 'chimneysolutions.info' || domain === 'localhost' || domain === '127.0.0.1') {
+    return true;
+  }
+
+  const domainMatched = domain ? findMatchedEntry(domain) : null;
+  const ipMatched = clientIp ? findMatchedEntry(clientIp) : null;
+
+  if (domainMatched && domainMatched.status === 'active') return true;
+  if (ipMatched && ipMatched.status === 'active') return true;
+
+  if (!domain && !clientIp && allowDirectAccess) return true;
+  return false;
+}
+
+function isEnforceWhitelist() {
+  return enforceWhitelist;
 }
 
 // Match Domain with Wildcard support (*.example.com)
@@ -1297,5 +1378,11 @@ module.exports = {
   router,
   verifyAccess,
   renderUnauthorizedScreen,
-  initWhitelist
+  initWhitelist,
+  findMatchedEntry,
+  getFrameAncestorsCSP,
+  getAllowedDomainsList,
+  verifyWebSocketAccess,
+  isEnforceWhitelist,
+  extractDomain
 };

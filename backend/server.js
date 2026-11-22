@@ -211,9 +211,14 @@ function handleWebSocketProxy(clientReq, clientSocket, clientHead) {
 
 const server = http.createServer(app);
 
-// Handle WebSocket upgrade requests
+// Handle WebSocket upgrade requests with Master Guard Whitelist Enforcement
 server.on('upgrade', (req, socket, head) => {
   if (req.url && (req.url.startsWith('/api/stream/ws') || req.url.startsWith('/ws'))) {
+    if (!securityEngine.verifyWebSocketAccess(req)) {
+      socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     handleWebSocketProxy(req, socket, head);
   } else {
     socket.destroy();
