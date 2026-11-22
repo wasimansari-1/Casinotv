@@ -144,11 +144,19 @@ function resolveTokenExpiry(token, fallbackMs = 60000) {
   return Date.now() + fallbackMs; // Default safe 60 seconds
 }
 
+// Helper: Return proxied WebSocket URL so browsers never get blocked by upstream Origin 403 checks
+const fallbackWsUrl = `/api/stream/ws?target=${encodeURIComponent('wss://livecdnplatin.com/UNIVERSE-GE/websocket')}`;
+function getProxiedWsUrl(originalWsUrl) {
+  if (!originalWsUrl) return fallbackWsUrl;
+  if (originalWsUrl.startsWith('/api/stream/ws')) return originalWsUrl;
+  return `/api/stream/ws?target=${encodeURIComponent(originalWsUrl)}`;
+}
+
 // Helper: Pre-warm a single casino table in memory with distributed lock
 async function warmCasinoTable(eventId) {
   // Coordinate across PM2 cluster: only 1 worker warms this table at a time
   const lockKey = `warmer:${eventId}`;
-  const acquired = await redisClient.acquireLock(lockKey, 300);
+  const acquired = await redisClient.acquireLock(lockKey, 30);
   if (!acquired) {
     return false;
   }
@@ -256,14 +264,15 @@ async function warmCasinoTable(eventId) {
             });
             const pingData = await pingRes.json();
             if (pingData && pingData.token && pingData.wsUrl) {
+              const proxiedWs = getProxiedWsUrl(pingData.wsUrl);
               tableTokenCache.set(eventId, {
                 token: pingData.token,
-                wsUrl: pingData.wsUrl,
+                wsUrl: proxiedWs,
                 streamId: pingData.streamId || (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) || 'GAME10',
                 expiresAt: resolveTokenExpiry(pingData.token)
               });
               pingCache.set(targetUrl, {
-                data: pingData,
+                data: { ...pingData, wsUrl: proxiedWs },
                 timestamp: Date.now(),
               });
               console.log(
@@ -278,6 +287,9 @@ async function warmCasinoTable(eventId) {
     }
   } catch (err) {
     console.warn(`[Stream Warmer] Notice for table ${eventId}:`, err.message);
+    return false;
+  } finally {
+    await redisClient.releaseLock(lockKey).catch(() => {});
   }
   return false;
 }
@@ -1084,7 +1096,6 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
   const eventId = req.query.eventId || "";
   const fallbackStreamId =
     eventId && GAME_MAP[eventId] ? GAME_MAP[eventId].streamId : "GAME10";
-  const fallbackWsUrl = "wss://livecdnplatin.com/UNIVERSE-GE/websocket";
   const isInit = Boolean(req.body?.init);
   const isConnecting = req.body?.mode === 'connecting';
   const isRoutineHeartbeat = !isInit && !isConnecting && req.body?.mode === 'playing';
@@ -1094,12 +1105,13 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
   // This shields Webshare proxy from millions of routine pings!
   if (isRoutineHeartbeat) {
     const cachedToken = (eventId && tableTokenCache.get(eventId)?.token) || '';
+    const cachedWs = (eventId && tableTokenCache.get(eventId)?.wsUrl) || fallbackWsUrl;
     return res.status(200).json({
       ok: true,
       state: "live",
       streamId: (eventId && GAME_MAP[eventId]?.streamId) || fallbackStreamId,
       token: cachedToken,
-      wsUrl: fallbackWsUrl,
+      wsUrl: getProxiedWsUrl(cachedWs),
       maintenance: null,
       stop: false
     });
@@ -1115,7 +1127,7 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
         state: "live",
         streamId: cached.streamId || fallbackStreamId,
         token: cached.token,
-        wsUrl: cached.wsUrl || fallbackWsUrl,
+        wsUrl: getProxiedWsUrl(cached.wsUrl || fallbackWsUrl),
         maintenance: null,
         stop: false,
       });
@@ -1134,7 +1146,10 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
         Date.now() - cachedPing.timestamp < 180000 &&
         cachedPing.data.token
       ) {
-        return res.status(200).json(cachedPing.data);
+        return res.status(200).json({
+          ...cachedPing.data,
+          wsUrl: getProxiedWsUrl(cachedPing.data.wsUrl)
+        });
       }
     }
   }
@@ -1143,11 +1158,12 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
     const { target, watchUrl, origin } = req.query;
     if (!target) {
       const fallbackToken = tableTokenCache.get(eventId)?.token || "";
+      const cachedWs = (eventId && tableTokenCache.get(eventId)?.wsUrl) || fallbackWsUrl;
       return res.status(200).json({
         ok: true,
         state: "live",
         streamId: fallbackStreamId,
-        wsUrl: fallbackWsUrl,
+        wsUrl: getProxiedWsUrl(cachedWs),
         token: fallbackToken,
       });
     }
@@ -1170,7 +1186,10 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
         Date.now() - cachedPing.timestamp < 180000 &&
         cachedPing.data.token
       ) {
-        return res.status(200).json(cachedPing.data);
+        return res.status(200).json({
+          ...cachedPing.data,
+          wsUrl: getProxiedWsUrl(cachedPing.data.wsUrl)
+        });
       }
     }
 
@@ -1230,7 +1249,7 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
         if (isInit) {
           if (!pingResData.streamId && fallbackStreamId)
             pingResData.streamId = fallbackStreamId;
-          if (!pingResData.wsUrl) pingResData.wsUrl = fallbackWsUrl;
+          pingResData.wsUrl = getProxiedWsUrl(pingResData.wsUrl);
           if (pingResData.token) {
             tableTokenCache.set(eventId, {
               token: pingResData.token,
@@ -1273,7 +1292,7 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
           ok: true,
           state: "live",
           streamId: freshToken.streamId || fallbackStreamId,
-          wsUrl: freshToken.wsUrl || fallbackWsUrl,
+          wsUrl: getProxiedWsUrl(freshToken.wsUrl || fallbackWsUrl),
           token: freshToken.token,
           maintenance: null,
           stop: false,
@@ -1283,22 +1302,24 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
 
     // Fallback if warmCasinoTable couldn't get token
     const cachedToken = (eventId && tableTokenCache.get(eventId)?.token) || "";
+    const cachedWs = (eventId && tableTokenCache.get(eventId)?.wsUrl) || fallbackWsUrl;
     return res.status(200).json({
       ok: true,
       state: "live",
       streamId: fallbackStreamId,
-      wsUrl: fallbackWsUrl,
+      wsUrl: getProxiedWsUrl(cachedWs),
       token: cachedToken,
       maintenance: null,
       stop: false,
     });
   } catch (err) {
     const cachedToken = (eventId && tableTokenCache.get(eventId)?.token) || "";
+    const cachedWs = (eventId && tableTokenCache.get(eventId)?.wsUrl) || fallbackWsUrl;
     return res.status(200).json({
       ok: true,
       state: "live",
       streamId: fallbackStreamId,
-      wsUrl: fallbackWsUrl,
+      wsUrl: getProxiedWsUrl(cachedWs),
       token: cachedToken,
       maintenance: null,
       stop: false,

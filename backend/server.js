@@ -49,6 +49,8 @@ if (proxyUrl) {
 
 const express = require('express');
 const cors = require('cors');
+const http = require('http');
+const https = require('https');
 const securityEngine = require('./securityEngine');
 const streamProxy = require('./streamProxy');
 const sportsStreamEngine = require('./sportsStreamEngine');
@@ -100,11 +102,101 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal Server Error', details: err.message });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+// Zero-Latency WebSocket Tunnel Proxy (Bypasses Upstream Origin 403 Forbidden Locks)
+function handleWebSocketProxy(clientReq, clientSocket, clientHead) {
+  try {
+    const reqUrl = new URL(clientReq.url, 'http://localhost');
+    const rawTarget = reqUrl.searchParams.get('target');
+    let targetWsUrl = rawTarget ? decodeURIComponent(rawTarget) : 'wss://livecdnplatin.com/UNIVERSE-GE/websocket';
+
+    const parsedTarget = new URL(targetWsUrl);
+    const isSecure = parsedTarget.protocol === 'wss:' || parsedTarget.protocol === 'https:';
+    const port = parsedTarget.port || (isSecure ? 443 : 80);
+    const client = isSecure ? https : http;
+
+    // Spoof origin so upstream never rejects client connection
+    let spoofedOrigin = 'https://live.livecdnplatin.com';
+    if (parsedTarget.hostname.includes('ltve.live')) {
+      spoofedOrigin = 'https://tv.ltve.live';
+    } else if (parsedTarget.hostname.includes('livecdnplatin.com')) {
+      spoofedOrigin = 'https://live.livecdnplatin.com';
+    }
+
+    const upstreamReq = client.request({
+      hostname: parsedTarget.hostname,
+      port: port,
+      path: parsedTarget.pathname + parsedTarget.search,
+      method: 'GET',
+      headers: {
+        'Connection': 'Upgrade',
+        'Upgrade': 'websocket',
+        'Sec-WebSocket-Version': clientReq.headers['sec-websocket-version'] || '13',
+        'Sec-WebSocket-Key': clientReq.headers['sec-websocket-key'],
+        'Sec-WebSocket-Extensions': clientReq.headers['sec-websocket-extensions'] || '',
+        'Origin': spoofedOrigin,
+        'User-Agent': clientReq.headers['user-agent'] || 'Mozilla/5.0'
+      },
+      timeout: 12000
+    });
+
+    upstreamReq.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
+      const headers = [
+        'HTTP/1.1 101 Switching Protocols',
+        'Upgrade: websocket',
+        'Connection: Upgrade',
+        `Sec-WebSocket-Accept: ${upstreamRes.headers['sec-websocket-accept']}`
+      ];
+      if (upstreamRes.headers['sec-websocket-protocol']) {
+        headers.push(`Sec-WebSocket-Protocol: ${upstreamRes.headers['sec-websocket-protocol']}`);
+      }
+      clientSocket.write(headers.join('\r\n') + '\r\n\r\n');
+
+      if (upstreamHead && upstreamHead.length > 0) clientSocket.write(upstreamHead);
+      if (clientHead && clientHead.length > 0) upstreamSocket.write(clientHead);
+
+      clientSocket.pipe(upstreamSocket);
+      upstreamSocket.pipe(clientSocket);
+
+      clientSocket.on('error', () => upstreamSocket.destroy());
+      upstreamSocket.on('error', () => clientSocket.destroy());
+      clientSocket.on('close', () => upstreamSocket.destroy());
+      upstreamSocket.on('close', () => clientSocket.destroy());
+    });
+
+    upstreamReq.on('error', (err) => {
+      console.warn('[WS Tunnel Notice]:', err.message);
+      clientSocket.destroy();
+    });
+
+    upstreamReq.on('timeout', () => {
+      upstreamReq.destroy();
+      clientSocket.destroy();
+    });
+
+    upstreamReq.end();
+  } catch (err) {
+    console.error('[WS Proxy Error]:', err.message);
+    clientSocket.destroy();
+  }
+}
+
+const server = http.createServer(app);
+
+// Handle WebSocket upgrade requests
+server.on('upgrade', (req, socket, head) => {
+  if (req.url && (req.url.startsWith('/api/stream/ws') || req.url.startsWith('/ws'))) {
+    handleWebSocketProxy(req, socket, head);
+  } else {
+    socket.destroy();
+  }
+});
+
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`=================================================`);
   console.log(`🚀 Casino TV Stream Proxy Server is LIVE!`);
   console.log(`🌐 Local URL: http://localhost:${PORT}`);
   console.log(`📺 React + Tailwind Dashboard: http://localhost:${PORT}`);
   console.log(`🎯 API Tables List: http://localhost:${PORT}/api/stream/tables`);
+  console.log(`🔌 WebRTC WebSocket Tunnel: http://localhost:${PORT}/api/stream/ws`);
   console.log(`=================================================`);
 });

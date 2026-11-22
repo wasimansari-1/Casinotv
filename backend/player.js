@@ -770,7 +770,10 @@
       connectWebSocket() {
         return new Promise((e, i) => {
           clearTimeout(this.connectTimer);
-          const n = new WebSocket(p.wsUrl);
+          const wsTarget = (p.wsUrl && p.wsUrl.startsWith("/"))
+            ? (location.protocol === "https:" ? "wss://" : "ws://") + location.host + p.wsUrl
+            : p.wsUrl;
+          const n = new WebSocket(wsTarget);
           this.ws = n;
           let s = !1,
             r = !1;
