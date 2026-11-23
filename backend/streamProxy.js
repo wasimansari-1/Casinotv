@@ -357,12 +357,13 @@ async function runContinuousWarmerCycle() {
   try {
     const tableIds = Object.keys(GAME_MAP);
     console.log(`[Stream Warmer Daemon] Starting autonomous background refresh for all ${tableIds.length} tables...`);
-    for (const tableId of tableIds) {
-      try {
-        await warmCasinoTable(tableId);
-      } catch (_) {}
-      // Stagger by 1200ms: 17 tables * 1.2s = ~20s total cycle, 0% upstream rate-limit
-      await new Promise((r) => setTimeout(r, 1200));
+    const batchSize = 3;
+    for (let i = 0; i < tableIds.length; i += batchSize) {
+      const batch = tableIds.slice(i, i + batchSize);
+      await Promise.allSettled(batch.map((id) => warmCasinoTable(id)));
+      if (i + batchSize < tableIds.length) {
+        await new Promise((r) => setTimeout(r, 350));
+      }
     }
     console.log(`[Stream Warmer Daemon] Cycle completed: all ${tableIds.length} tables active in Redis & RAM.`);
   } catch (err) {
@@ -1026,6 +1027,16 @@ function getPatchedPlayerJs() {
   text = text.replace(
     /showNetworkLostEffects\(\)\{/g,
     "showNetworkLostEffects(){return;",
+  );
+
+  // 1b. Once stream plays, NEVER show loader again (Eliminates flashing loaders during active streaming)
+  text = text.replace(
+    /showLoading\(\)\{/g,
+    "showLoading(){if(window.webrtcPlayer&&window.webrtcPlayer.everPlayed)return;",
+  );
+  text = text.replace(
+    /if\(!window\.webrtcPlayer\|\|!window\.webrtcPlayer\.everPlayed\)return;/g,
+    "",
   );
 
   // 2. Infinite retry on table startup instead of giving up after 5 tries
