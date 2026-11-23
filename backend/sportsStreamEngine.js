@@ -70,17 +70,16 @@ function getPatchedSportsPlayerJs() {
   }
 
   // High-performance stream optimizations
-  // 1. Rock-Solid 5-Second Buffer Delay & Zero-Buffering Gap Bridging:
-  // Maintains 5s safety buffer (liveSyncDuration: 5) so network jitter never drains the buffer!
+  // 1. HLS Buffer & Gap Bridging: 30s lookahead, 0.5s hole auto-skip, 0.1s instant nudge, multi-threaded worker
   js = js.replace(
     /liveSyncDurationCount:4,liveMaxLatencyDurationCount:10,maxBufferLength:20,backBufferLength:10/g,
-    "liveSyncDuration:5,liveSyncDurationCount:3,liveMaxLatencyDuration:10,maxBufferLength:30,maxMaxBufferLength:60,backBufferLength:20,maxBufferHole:0.5,nudgeOffset:0.1,nudgeMaxRetry:8,highBufferWatchdogPeriod:2,fragLoadingTimeOut:20000,fragLoadingMaxRetry:8,fragLoadingRetryDelay:500,manifestLoadingTimeOut:15000,manifestLoadingMaxRetry:8,manifestLoadingRetryDelay:500,enableWorker:!0,lowLatencyMode:!1"
+    "liveSyncDurationCount:3,liveMaxLatencyDurationCount:8,maxBufferLength:30,maxMaxBufferLength:60,backBufferLength:15,maxBufferHole:0.5,nudgeOffset:0.1,nudgeMaxRetry:5,highBufferWatchdogPeriod:1,enableWorker:!0,lowLatencyMode:!0"
   );
 
   // 2. Debounced Buffering Indicator & Instant 0.1s Auto-Unsticker (Eliminates flashing Buffering... text)
   js = js.replace(
     /\$\.addEventListener\(`waiting`,\(\)=>\{vp===`hls`&&Tp\(`Buffering…`\)\}\)/g,
-    "(()=>{var _b, _l=-1, _s=0; $.addEventListener(`waiting`,()=>{clearTimeout(_b);_b=setTimeout(()=>{if(vp===`hls`&&($.paused||$.readyState<3)){Tp(`Buffering…`)}},1500)}); $.addEventListener(`playing`,()=>{clearTimeout(_b);Tp(``)}); $.addEventListener(`timeupdate`,()=>{if($.currentTime>0&&!$.paused){clearTimeout(_b);if(gp&&gp.textContent===`Buffering…`)Tp(``)}}); setInterval(()=>{if(vp===`hls`&&!$.paused&&!$.ended&&$.readyState>=2){if($.currentTime===_l){_s++;if(_s>=2){try{$.currentTime+=0.08}catch(_){}_s=0}}else{_s=0;_l=$.currentTime}}},500)})()"
+    "(()=>{var _b, _l=-1, _s=0; $.addEventListener(`waiting`,()=>{clearTimeout(_b);_b=setTimeout(()=>{if(vp===`hls`&&($.paused||$.readyState<3)){Tp(`Buffering…`)}},1200)}); $.addEventListener(`playing`,()=>{clearTimeout(_b);Tp(``)}); $.addEventListener(`timeupdate`,()=>{if($.currentTime>0&&!$.paused){clearTimeout(_b);if(gp&&gp.textContent===`Buffering…`)Tp(``)}}); setInterval(()=>{if(vp===`hls`&&!$.paused&&!$.ended&&$.readyState>=2){if($.currentTime===_l){_s++;if(_s>=2){try{$.currentTime+=0.08}catch(_){}_s=0}}else{_s=0;_l=$.currentTime}}},500)})()"
   );
 
   // 3. WebRTC Multi-Cloud STUN Redundancy: Google STUN 1 + 2 + Cloudflare STUN for instant 0ms ICE
