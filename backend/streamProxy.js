@@ -1377,86 +1377,33 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
     });
   }
 
-  // 2. FOR INITIAL CONNECT / RECONNECT (isInit or isConnecting):
-  // Check if we have a valid UNEXPIRED token in RAM:
-  if (eventId && tableTokenCache.has(eventId)) {
-    const cached = tableTokenCache.get(eventId);
-    if (cached && cached.token && Date.now() < (cached.expiresAt || 0)) {
-      return res.status(200).json({
-        ok: true,
-        state: "live",
-        streamId: cached.streamId || fallbackStreamId,
-        token: cached.token,
-        wsUrl: getProxiedWsUrl(cached.wsUrl || fallbackWsUrl),
-        maintenance: null,
-        stop: false,
-      });
-    }
-  }
-
-  // 2b. Check distributed Redis cache (shared across all PM2 workers in 0.2ms)
-  if (eventId) {
-    try {
-      const redisToken = await redisClient.get(`table_token:${eventId}`);
-      if (redisToken && redisToken.token && Date.now() < (redisToken.expiresAt || 0)) {
-        tableTokenCache.set(eventId, redisToken);
-        return res.status(200).json({
-          ok: true,
-          state: "live",
-          streamId: redisToken.streamId || fallbackStreamId,
-          token: redisToken.token,
-          wsUrl: getProxiedWsUrl(redisToken.wsUrl || fallbackWsUrl),
-          maintenance: null,
-          stop: false,
-        });
-      }
-    } catch (_) {}
-  }
-
-  // 2. Also check URL-based pingCache for fast RAM response (TTL 3 minutes)
+  // 2. FOR DIRECT/RAW HIT WITHOUT TARGET URL (e.g. manual curl test or fallback):
   const rawTarget = req.query.target;
-  if (rawTarget) {
-    const decodedTargetUrl = decodeURIComponent(rawTarget);
-    if (pingCache.has(decodedTargetUrl)) {
-      const cachedPing = pingCache.get(decodedTargetUrl);
-      if (
-        cachedPing &&
-        cachedPing.data &&
-        Date.now() - cachedPing.timestamp < 180000 &&
-        cachedPing.data.token
-      ) {
-        return res.status(200).json({
-          ...cachedPing.data,
-          wsUrl: getProxiedWsUrl(cachedPing.data.wsUrl)
-        });
-      }
+  if (!rawTarget) {
+    let cached = tableTokenCache.get(eventId);
+    if (!cached || !cached.token) {
+      try {
+        const redisData = await redisClient.get(`table_token:${eventId}`);
+        if (redisData && redisData.token) cached = redisData;
+      } catch (_) {}
     }
+    if ((!cached || !cached.token) && eventId) {
+      await warmCasinoTable(eventId);
+      cached = tableTokenCache.get(eventId);
+    }
+    const token = cached?.token || "";
+    const ws = cached?.wsUrl || fallbackWsUrl;
+    return res.status(200).json({
+      ok: true,
+      state: "live",
+      streamId: cached?.streamId || fallbackStreamId,
+      wsUrl: getProxiedWsUrl(ws),
+      token: token,
+    });
   }
 
   try {
     const { target, watchUrl, origin } = req.query;
-    if (!target) {
-      let cached = tableTokenCache.get(eventId);
-      if (!cached || !cached.token) {
-        try {
-          const redisData = await redisClient.get(`table_token:${eventId}`);
-          if (redisData && redisData.token) cached = redisData;
-        } catch (_) {}
-      }
-      if ((!cached || !cached.token) && eventId) {
-        await warmCasinoTable(eventId);
-        cached = tableTokenCache.get(eventId);
-      }
-      const token = cached?.token || "";
-      const ws = cached?.wsUrl || fallbackWsUrl;
-      return res.status(200).json({
-        ok: true,
-        state: "live",
-        streamId: cached?.streamId || fallbackStreamId,
-        wsUrl: getProxiedWsUrl(ws),
-        token: token,
-      });
-    }
 
     const targetUrl = decodeURIComponent(target);
     const decodedWatchUrl = watchUrl ? decodeURIComponent(watchUrl) : targetUrl;

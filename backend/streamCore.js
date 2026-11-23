@@ -45,7 +45,7 @@ function getSessionForTable(tableId) {
 
 function rotateTableSession(tableId, reason = '') {
   const current = getSessionForTable(tableId);
-  const next = (current % 10) + 1;
+  const next = Math.floor(Math.random() * 500) + 1;
   _tableSessionMap.set(tableId, next);
   console.log(`[StreamCore] Rotated proxy session for table ${tableId} (#${current} -> #${next}) Reason: ${reason || 'unspecified'}`);
   return next;
@@ -54,7 +54,7 @@ function rotateTableSession(tableId, reason = '') {
 function getEffectiveProxyUrl(proxyUrlStr, sessionOverride = null) {
   if (!proxyUrlStr) return null;
   const rawSession = sessionOverride || _currentStickySession;
-  const session = ((Math.abs(Number(rawSession) || 1) - 1) % 10) + 1; // Strict 1 to 10 pool
+  const session = ((Math.abs(Number(rawSession) || 1) - 1) % 500) + 1; // 500 clean residential IPs
   if (proxyUrlStr.includes('webshare.io')) {
     if (proxyUrlStr.includes('-rotate')) {
       return proxyUrlStr.replace('-rotate', `-${session}`);
@@ -83,15 +83,15 @@ function resetProxyAgent() {
 let _lastRotateTime = 0;
 function rotateStickySession(reason = '') {
   const now = Date.now();
-  const isUrgent = reason.includes('502') || reason.includes('503') || reason.includes('status');
-  // Cooldown: 1 second for urgent 502/503 errors, 10 seconds for routine rotations
-  const minInterval = isUrgent ? 1000 : 10000;
+  const isUrgent = reason.includes('502') || reason.includes('503') || reason.includes('status') || reason.includes('blocked');
+  // Cooldown: 500ms for urgent 502/blocked errors, 10s for routine rotations
+  const minInterval = isUrgent ? 500 : 10000;
   if (now - _lastRotateTime < minInterval) {
     return _currentStickySession;
   }
   _lastRotateTime = now;
   const oldSession = _currentStickySession;
-  _currentStickySession = (_currentStickySession % 10) + 1;
+  _currentStickySession = Math.floor(Math.random() * 500) + 1;
   resetProxyAgent();
   console.log(`[StreamCore] Rotated sticky residential proxy session from #${oldSession} -> #${_currentStickySession} (Reason: ${reason || 'unspecified'})`);
   return _currentStickySession;
