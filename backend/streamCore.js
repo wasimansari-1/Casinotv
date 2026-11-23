@@ -15,8 +15,8 @@ const CONFIG = {
   concurrency: Math.max(1, parseInt(process.env.PROVIDER_CONCURRENCY, 10) || 4),
   // Minimum interval between requests to the same provider in ms (default: 100)
   minIntervalMs: Math.max(20, parseInt(process.env.PROVIDER_MIN_INTERVAL_MS, 10) || 100),
-  // Maximum retries for temporary failures (default: 1 fast retry)
-  maxRetries: Math.max(0, parseInt(process.env.PROVIDER_MAX_RETRIES, 10) || 1),
+  // Maximum retries for temporary failures (default: 5 fast session rotations)
+  maxRetries: Math.max(0, parseInt(process.env.PROVIDER_MAX_RETRIES, 10) || 5),
   // Exponential backoff delays in ms
   backoffMs: [
     parseInt(process.env.PROVIDER_BACKOFF_1_MS, 10) || 150,
@@ -379,6 +379,20 @@ function directFetch(urlStr, options = {}, redirectCount = 0) {
 }
 
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+const CLEAN_INDIAN_IPS = [
+  '103.21.124.1',
+  '49.36.1.1',
+  '122.160.1.1',
+  '106.192.1.1',
+  '182.72.1.1',
+  '114.79.191.63'
+];
+
+function getCleanIndianIp(key = '') {
+  const hash = String(key).split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
+  return CLEAN_INDIAN_IPS[hash % CLEAN_INDIAN_IPS.length];
+}
 
 // 4-Provider Multi-Account Redundancy Pool (from Internatniol)
 const PROVIDERS = {
@@ -970,20 +984,24 @@ async function getWatchUrl(eventId, options = {}) {
               let data = null;
 
               try {
+                const watchHeaders = {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${token}`,
+                  'Origin': provider.base,
+                  'Referer': `${provider.base}/`,
+                  'User-Agent': UA
+                };
+                const watchBody = JSON.stringify({
+                  streamId: eventId,
+                  timestamp: Date.now()
+                });
+
+                // Fetch through dedicated residential proxy session for this table
                 res = await proxyFetch(`${provider.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`, {
                   method: 'POST',
                   session: tableSession,
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`,
-                    'Origin': provider.casinoBase,
-                    'Referer': `${provider.casinoBase}/`,
-                    'User-Agent': UA
-                  },
-                  body: JSON.stringify({
-                    streamId: eventId,
-                    timestamp: Date.now()
-                  }),
+                  headers: watchHeaders,
+                  body: watchBody,
                   timeout: 8000
                 });
 
@@ -1002,7 +1020,7 @@ async function getWatchUrl(eventId, options = {}) {
                     url: data.data.url,
                     provider: provider.name,
                     provKey: provKey,
-                    origin: provider.casinoBase,
+                    origin: provider.base,
                     session: tableSession,
                     expiresAt: Date.now() + (ttlSec * 1000)
                   };
@@ -1047,13 +1065,13 @@ async function getWatchUrl(eventId, options = {}) {
                 }
 
                 // 3. IP Blocked: viewer_ip_blocked (Rotate THIS table's dedicated session and retry/failover)
-                if (data?.meta?.message === 'viewer_ip_blocked' || (res.status === 403 && JSON.stringify(data || '').includes('blocked'))) {
+                if (data?.meta?.message === 'viewer_ip_blocked' || res?.status === 422 || (res?.status === 403 && JSON.stringify(data || '').includes('blocked'))) {
                   tableSession = rotateTableSession(eventId, `IP blocked on ${provider.name}`);
                   providerManager.trackRequest(provKey, durationMs, false, 403, 'viewer_ip_blocked');
                   logAudit({
                     provider: provider.name,
                     tableId: eventId,
-                    statusCode: res.status,
+                    statusCode: res?.status || 422,
                     category: 'rate_limiting',
                     durationMs,
                     retries: attempt,
