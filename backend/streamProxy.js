@@ -423,8 +423,8 @@ async function runContinuousWarmerCycle() {
   }
 }
 
-// Initial warm cycle after boot
-setTimeout(runContinuousWarmerCycle, 2000);
+// Initial warm cycle immediately after boot
+setTimeout(runContinuousWarmerCycle, 200);
 // Recurring background keeper every 2.5 minutes (150 seconds)
 setInterval(runContinuousWarmerCycle, 150000);
 
@@ -868,7 +868,7 @@ router.get("/player/:eventId", async (req, res) => {
               });
 
               // Direct VPS fetch first for CDN ping handshake
-              let pingPromise = directFetch(targetUrl, {
+              let data = await directFetch(targetUrl, {
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",
@@ -882,11 +882,6 @@ router.get("/player/:eventId", async (req, res) => {
               })
                 .then(async (r) => (r.ok ? r.json() : null))
                 .catch(() => null);
-
-              let data = await Promise.race([
-                pingPromise,
-                new Promise((r) => setTimeout(r, 1000)),
-              ]);
 
               if (!data) {
                 // Fallback to proxy only if direct fails
@@ -1372,14 +1367,25 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
   try {
     const { target, watchUrl, origin } = req.query;
     if (!target) {
-      const fallbackToken = tableTokenCache.get(eventId)?.token || "";
-      const cachedWs = (eventId && tableTokenCache.get(eventId)?.wsUrl) || fallbackWsUrl;
+      let cached = tableTokenCache.get(eventId);
+      if (!cached || !cached.token) {
+        try {
+          const redisData = await redisClient.get(`table_token:${eventId}`);
+          if (redisData && redisData.token) cached = redisData;
+        } catch (_) {}
+      }
+      if ((!cached || !cached.token) && eventId) {
+        await warmCasinoTable(eventId);
+        cached = tableTokenCache.get(eventId);
+      }
+      const token = cached?.token || "";
+      const ws = cached?.wsUrl || fallbackWsUrl;
       return res.status(200).json({
         ok: true,
         state: "live",
-        streamId: fallbackStreamId,
-        wsUrl: getProxiedWsUrl(cachedWs),
-        token: fallbackToken,
+        streamId: cached?.streamId || fallbackStreamId,
+        wsUrl: getProxiedWsUrl(ws),
+        token: token,
       });
     }
 

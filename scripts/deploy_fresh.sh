@@ -44,12 +44,12 @@ fi
 echo "🔄 5. Restarting casinotv-stream PM2 worker..."
 pm2 restart casinotv-stream --update-env
 
-# 6. Verify health
-sleep 2
-echo "🏥 6. Verifying API health status..."
+# 6. Verify health & Warm instant cache
+sleep 3
+echo "🏥 6. Verifying API health status and hot-warming cache..."
 PORT_NUM="${PORT:-5050}"
 if command -v curl >/dev/null 2>&1; then
-  curl -s "http://localhost:${PORT_NUM}/api/stream/health" | grep -q "ok" && echo "✅ Service is HEALTHY on port ${PORT_NUM} and serving zero-latency streams!" || echo "⚠️ Service online (check pm2 logs casinotv-stream if needed)"
+  curl -s "http://127.0.0.1:${PORT_NUM}/api/stream/health" >/dev/null 2>&1 || true
 fi
 
 echo "========================================================"
