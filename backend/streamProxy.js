@@ -124,8 +124,8 @@ const inFlightPings = new Map();
 const pingCache = new Map();
 const tableTokenCache = new Map(); // eventId -> { token, wsUrl, streamId, expiresAt }
 
-// Calculate accurate token expiry from JWT payload to prevent serving expired tokens
-function resolveTokenExpiry(token, fallbackMs = 60000) {
+// Calculate accurate token expiry from JWT payload to prevent premature expiry
+function resolveTokenExpiry(token, fallbackMs = 600000) {
   try {
     if (token && typeof token === "string" && token.includes(".")) {
       const parts = token.split(".");
@@ -135,15 +135,15 @@ function resolveTokenExpiry(token, fallbackMs = 60000) {
         );
         if (payload && payload.exp) {
           const expMs = payload.exp * 1000;
-          const remainingMs = expMs - Date.now() - 25000; // 25s safety margin before actual JWT expiry
-          if (remainingMs > 5000) {
-            return Date.now() + Math.min(remainingMs, 120000); // Cap at 2 minutes max
+          const remainingMs = expMs - Date.now() - 30000;
+          if (remainingMs > 10000) {
+            return Date.now() + Math.min(remainingMs, 900000); // Up to 15 minutes
           }
         }
       }
     }
   } catch (_) {}
-  return Date.now() + fallbackMs; // Default safe 60 seconds
+  return Date.now() + fallbackMs; // Default 10 minutes
 }
 
 // Helper: Return proxied WebSocket URL so browsers never get blocked by upstream Origin 403 checks
@@ -1196,10 +1196,10 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
   }
 
   // 2. FOR INITIAL CONNECT / RECONNECT (isInit or isConnecting):
-  // Check if we have a fresh, unexpired token in RAM:
+  // Check if we have a valid token in RAM:
   if (eventId && tableTokenCache.has(eventId)) {
     const cached = tableTokenCache.get(eventId);
-    if (cached && Date.now() < cached.expiresAt && cached.token) {
+    if (cached && cached.token) {
       return res.status(200).json({
         ok: true,
         state: "live",
@@ -1216,7 +1216,7 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
   if (eventId) {
     try {
       const redisToken = await redisClient.get(`table_token:${eventId}`);
-      if (redisToken && redisToken.token && Date.now() < (redisToken.expiresAt || 0)) {
+      if (redisToken && redisToken.token) {
         tableTokenCache.set(eventId, redisToken);
         return res.status(200).json({
           ok: true,

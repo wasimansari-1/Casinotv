@@ -143,20 +143,33 @@ function handleWebSocketProxy(clientReq, clientSocket, clientHead) {
       spoofedOrigin = 'https://live.livecdnplatin.com';
     }
 
+    const wsHeaders = {
+      'Connection': 'Upgrade',
+      'Upgrade': 'websocket',
+      'Sec-WebSocket-Version': clientReq.headers['sec-websocket-version'] || '13',
+      'Sec-WebSocket-Key': clientReq.headers['sec-websocket-key'],
+      'Origin': spoofedOrigin,
+      'User-Agent': clientReq.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+    };
+    if (clientReq.headers['sec-websocket-protocol']) {
+      wsHeaders['Sec-WebSocket-Protocol'] = clientReq.headers['sec-websocket-protocol'];
+    }
+
     const upstreamReq = client.request({
       hostname: parsedTarget.hostname,
       port: port,
       path: parsedTarget.pathname + parsedTarget.search,
       method: 'GET',
-      headers: {
-        'Connection': 'Upgrade',
-        'Upgrade': 'websocket',
-        'Sec-WebSocket-Version': clientReq.headers['sec-websocket-version'] || '13',
-        'Sec-WebSocket-Key': clientReq.headers['sec-websocket-key'],
-        'Origin': spoofedOrigin,
-        'User-Agent': clientReq.headers['user-agent'] || 'Mozilla/5.0'
-      },
-      timeout: 12000
+      headers: wsHeaders,
+      timeout: 15000,
+      rejectUnauthorized: false,
+      servername: parsedTarget.hostname
+    });
+
+    upstreamReq.on('response', (res) => {
+      console.warn(`[WS Tunnel Upstream Rejection]: Status ${res.statusCode} ${res.statusMessage} from ${parsedTarget.hostname}`);
+      clientSocket.write(`HTTP/1.1 ${res.statusCode} ${res.statusMessage}\r\nConnection: close\r\n\r\n`);
+      clientSocket.destroy();
     });
 
     upstreamReq.on('upgrade', (upstreamRes, upstreamSocket, upstreamHead) => {
@@ -193,7 +206,9 @@ function handleWebSocketProxy(clientReq, clientSocket, clientHead) {
     });
 
     upstreamReq.on('error', (err) => {
-      console.warn('[WS Tunnel Notice]:', err.message);
+      if (err.message && !err.message.includes('ECONNRESET')) {
+        console.warn('[WS Tunnel Notice]:', err.message);
+      }
       clientSocket.destroy();
     });
 

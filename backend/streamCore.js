@@ -651,11 +651,17 @@ class ProviderManager {
   recordFailure(provKey, statusCode, errorMsg = '') {
     const prov = this.providers[provKey];
     if (!prov) return;
+    
+    // Ignore client-side invalid requests (400, 404, 422, unknown_event) so invalid table IDs never trip the circuit breaker!
+    if (statusCode >= 400 && statusCode < 500 && statusCode !== 429) {
+      return;
+    }
+
     prov.consecutiveFailures++;
     if (prov.state === 'HALF_OPEN') {
       this.tripCooldown(provKey, CONFIG.cooldownMs, `Probe failed: ${errorMsg}`);
-    } else if (prov.consecutiveFailures >= 3) {
-      this.tripCooldown(provKey, CONFIG.cooldownMs, `3 consecutive failures: ${errorMsg}`);
+    } else if (prov.consecutiveFailures >= 5) {
+      this.tripCooldown(provKey, CONFIG.cooldownMs, `5 consecutive server failures: ${errorMsg}`);
     }
   }
 
