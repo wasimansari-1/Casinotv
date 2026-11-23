@@ -1117,7 +1117,7 @@ router.get("/hls/chunk.ts", async (req, res) => {
           if (sportsChunkCache.size > 80) {
             const oldest = sportsChunkCache.keys().next().value;
             sportsChunkCache.delete(oldest);
-          },
+          }
           sportsChunkCache.set(cacheKey, {
             buffer: fullBuffer,
             contentType,
