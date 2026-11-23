@@ -393,13 +393,15 @@ export default function App() {
                           src={`/api/stream/player/${table.id}?t=${reloadKey}`}
                           title={table.name}
                           style={{
-                            display: isSelected ? 'block' : 'none',
                             position: 'absolute',
                             top: 0,
                             left: 0,
                             width: '100%',
                             height: '100%',
-                            border: 'none'
+                            border: 'none',
+                            opacity: isSelected ? 1 : 0,
+                            pointerEvents: isSelected ? 'auto' : 'none',
+                            zIndex: isSelected ? 10 : 0,
                           }}
                           allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
                           allowFullScreen

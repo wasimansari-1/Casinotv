@@ -249,6 +249,11 @@ function verifyWebSocketAccess(req) {
   let clientIp = req.headers?.['x-forwarded-for']?.split(',')[0].trim() || req.socket?.remoteAddress || '';
   if (clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
 
+  // Allow localhost / loopback internal diagnostics from VPS CLI
+  if (clientIp === '127.0.0.1' || clientIp === '::1' || clientIp === 'localhost') {
+    return true;
+  }
+
   // Allow self origin
   if (domain === 'cstv.chimneysolutions.info' || domain === 'chimneysolutions.info' || domain === 'localhost' || domain === '127.0.0.1') {
     return true;
@@ -306,6 +311,12 @@ async function verifyAccess(req, streamType = 'casino') {
   let clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket?.remoteAddress || req.ip || '';
   if (clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
   const streamId = req.params.eventId || req.query.streamId || '';
+
+  // Allow localhost / loopback internal diagnostics from VPS CLI (e.g. curl, pm2, monitoring scripts)
+  const isLocalhost = clientIp === '127.0.0.1' || clientIp === '::1' || clientIp === 'localhost' || req.hostname === 'localhost' || req.hostname === '127.0.0.1';
+  if (isLocalhost) {
+    return { allowed: true, domain: 'localhost' };
+  }
 
   // Block automated API tools (Postman, curl, insomnia, python-requests, etc.)
   const ua = req.headers['user-agent'] || '';
