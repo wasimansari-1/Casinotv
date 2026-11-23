@@ -83,8 +83,10 @@ function resetProxyAgent() {
 let _lastRotateTime = 0;
 function rotateStickySession(reason = '') {
   const now = Date.now();
-  // Cooldown: at least 10 seconds between rotations
-  if (now - _lastRotateTime < 10000) {
+  const isUrgent = reason.includes('502') || reason.includes('503') || reason.includes('status');
+  // Cooldown: 1 second for urgent 502/503 errors, 10 seconds for routine rotations
+  const minInterval = isUrgent ? 1000 : 10000;
+  if (now - _lastRotateTime < minInterval) {
     return _currentStickySession;
   }
   _lastRotateTime = now;
@@ -1334,12 +1336,22 @@ async function getLiveSportsEvents() {
 
         _sportsEventsCache = result;
         _sportsEventsCacheExpires = Date.now() + 30000;
+        await redisClient.set('sports:events', result, 600).catch(() => {});
         return result;
       }
     } catch (err) {
       console.warn(`[Sports] Failed to fetch events from ${provKey}:`, err.message);
     }
   }
+
+  // Resilient Redis Fallback: Return last known live matches if upstream is temporarily in cooldown
+  try {
+    const redisStored = await redisClient.get('sports:events');
+    if (Array.isArray(redisStored) && redisStored.length > 0) {
+      _sportsEventsCache = redisStored;
+      return redisStored;
+    }
+  } catch (_) {}
 
   return _sportsEventsCache || [];
 }
