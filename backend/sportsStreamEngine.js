@@ -82,6 +82,12 @@ function getPatchedSportsPlayerJs() {
     'if(!e||!Q.streamId){Tp(``);setTimeout(function(){window.location.reload();},1500);return;}'
   );
 
+  // 8. HLS failure recovery: If HLS ever errors out, revert cleanly to WebRTC instead of infinite HLS reload loop
+  js = js.replace(
+    /setTimeout\(\(\)=>\{Sp\|\|\(xp\.destroy\(\),zp\(\)\)\},3e3\)/g,
+    'setTimeout(()=>{if(!Sp){try{xp?.destroy();}catch(_){}xp=null;Mp=0;Fp();}},2500)'
+  );
+
   _cachedSportsPlayerJs = js;
   console.log(
     `[SportsEngine] Loaded & optimized sports_player.js (${(js.length / 1024).toFixed(1)} KB) into RAM`,
@@ -313,6 +319,24 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
         width: 0 !important;
       }
       #status {
+        position: absolute !important;
+        bottom: 24px !important;
+        left: 50% !important;
+        transform: translateX(-50%) !important;
+        background: rgba(15, 23, 42, 0.88) !important;
+        border: 1px solid rgba(56, 189, 248, 0.3) !important;
+        color: #38bdf8 !important;
+        padding: 6px 18px !important;
+        border-radius: 20px !important;
+        font-size: 12px !important;
+        font-weight: 600 !important;
+        z-index: 1000 !important;
+        pointer-events: none !important;
+        backdrop-filter: blur(8px) !important;
+        letter-spacing: 0.3px !important;
+        transition: opacity 0.3s ease !important;
+      }
+      #status:empty {
         display: none !important;
       }
       /* Broadcast-Grade Minimalist Sports Stream Loader */
@@ -362,6 +386,11 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
     try {
       const originalCfg = JSON.parse(cfgMatch[1]);
 
+      // Immediate detection for ended or offline sports matches
+      if (originalCfg && (originalCfg.state === 'finished' || originalCfg.state === 'offline' || originalCfg.state === 'ended')) {
+        return renderNoTvHtml(originalCfg.title || "Match has finished");
+      }
+
       const fullPingUrl = originalCfg.pingUrl.startsWith("http")
         ? originalCfg.pingUrl
         : new URL(originalCfg.pingUrl, watchUrl).href;
@@ -384,11 +413,11 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
         devtoolsRedirect: "",
         blockedUrl: "",
         home: "",
-        startMode: originalCfg.startMode || "webrtc", // Instant WebRTC with ultra-fast 3s HLS fallback
+        startMode: "webrtc", // Native zero-latency WebRTC broadcast
         forceHls: false,
-        webrtcTimeout: 3,   // 3s fast handshake (no 20s freeze or lag)
-        webrtcRetries: 1,   // 1 quick retry then instant HLS playback
-        freezeSeconds: 120, // Prevents false freeze reloads
+        webrtcTimeout: 12,   // 12s clean handshake (stops premature 3s aborts on mobile/broadband)
+        webrtcRetries: 5,    // 5 smooth retries to keep WebRTC stable without falling to broken HLS
+        freezeSeconds: 120,  // Prevents false freeze reloads
         offlineRetry: 3,
         frameAllow: {
           enforce: false,
@@ -961,6 +990,7 @@ router.post("/proxy-ping", async (req, res) => {
 
   const { target, watchUrl, origin, eventId } = req.query;
   const isInit = Boolean(req.body && req.body.init);
+  const isTokenRequest = Boolean(req.body && req.body.token);
 
   if (!target) {
     return res.status(400).json({ error: "Missing target parameter" });
@@ -976,30 +1006,16 @@ router.post("/proxy-ping", async (req, res) => {
     ? parseInt(req.query.session, 10)
     : getSessionForTable(eventId || targetUrl);
 
-  // Fast check if JWT token is still fresh (valid for at least 10 more seconds)
-  const isFreshToken = (token) => {
-    if (!token || typeof token !== 'string') return false;
-    try {
-      const parts = token.split('.');
-      if (parts.length < 2) return false;
-      const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
-      return payload.exp && (payload.exp * 1000 - Date.now() > 10000);
-    } catch (_) {
-      return false;
-    }
-  };
-
-  // Serve fast cached ping from RAM for routine heartbeats (0ms, 0 proxy quota!)
-  // For init calls, only serve if the cached token is still fresh!
-  if (sportsPingCache.has(targetUrl)) {
-    const cachedPing = sportsPingCache.get(targetUrl);
-    if (cachedPing && cachedPing.data) {
-      if (!isInit) {
-        return res.status(200).json(cachedPing.data);
-      } else if (isFreshToken(cachedPing.data.token)) {
-        return res.status(200).json(cachedPing.data);
-      }
-    }
+  // Throttling: If an identical ping was forwarded less than 2.5 seconds ago, return cached response
+  const lastCached = sportsPingCache.get(targetUrl);
+  if (
+    lastCached &&
+    lastCached.data &&
+    !isInit &&
+    !isTokenRequest &&
+    Date.now() - lastCached.timestamp < 2500
+  ) {
+    return res.status(200).json(lastCached.data);
   }
 
   try {
@@ -1051,16 +1067,24 @@ router.post("/proxy-ping", async (req, res) => {
       }
 
       if (!data.streamId) {
-        data.streamId = eventId || 'SPORTS';
+        data.streamId = eventId || lastCached?.data?.streamId || 'SPORTS';
       }
 
-      if (data.ok === false) {
-        sportsPingCache.delete(targetUrl);
-      } else if (data.token) {
-        sportsPingCache.set(targetUrl, { data, timestamp: Date.now() });
+      // Preserve latest valid token if upstream routine ping didn't send a new one
+      if (!data.token && lastCached?.data?.token) {
+        data.token = lastCached.data.token;
       }
+
+      // Save fresh data & timestamp in memory cache
+      sportsPingCache.set(targetUrl, { data, timestamp: Date.now() });
 
       return res.status(200).json(data);
+    }
+
+    // Resilient fallback: If upstream returns transient error during routine heartbeat,
+    // respond with last known good cached data so the player doesn't abort!
+    if (lastCached && lastCached.data) {
+      return res.status(200).json(lastCached.data);
     }
 
     return res
@@ -1068,6 +1092,9 @@ router.post("/proxy-ping", async (req, res) => {
       .json({ error: "Invalid response from sports ping upstream" });
   } catch (err) {
     console.error("[SportsEngine] Proxy ping error:", err.message);
+    if (lastCached && lastCached.data) {
+      return res.status(200).json(lastCached.data);
+    }
     res.status(500).json({ error: "Proxy ping failed", details: err.message });
   }
 });
