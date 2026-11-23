@@ -116,8 +116,8 @@ async function fetchFullTsSegment(targetUrl) {
   return task;
 }
 
-// Memory cache for modified player HTML (TTL 3 Minutes) to prevent serving stale tickets
-const CASINO_CACHE_TTL = 180 * 1000;
+// Memory cache for modified player HTML (TTL 1 Hour in RAM, 2 Hours in Redis) to ensure 100% instant responses
+const CASINO_CACHE_TTL = 3600 * 1000;
 const playerCache = new Map();
 const inFlightPlayers = new Map();
 const inFlightPings = new Map();
@@ -226,12 +226,13 @@ async function warmCasinoTable(eventId) {
       playerCache.set(`casino_${eventId}`, {
         html,
         expiresAt: Date.now() + CASINO_CACHE_TTL,
+        timestamp: Date.now(),
       });
       await redisClient
-        .set(`html:${eventId}`, html, Math.floor(CASINO_CACHE_TTL / 1000))
+        .set(`html:${eventId}`, html, 7200) // 2 Hours in Redis
         .catch(() => {});
       console.log(
-        `[Stream Warmer] Pre-warmed & cached table ${eventId} in memory/Redis (TTL: 10m)`,
+        `[Stream Warmer] Pre-warmed & cached table ${eventId} in memory/Redis (TTL: 2h)`,
       );
 
       // Invalidate the single-use ticket from watchlink cache since it is now redeemed into HTML
@@ -288,7 +289,7 @@ async function warmCasinoTable(eventId) {
               };
               tableTokenCache.set(eventId, tokenPayload);
               await redisClient
-                .set(`table_token:${eventId}`, tokenPayload, 1800)
+                .set(`table_token:${eventId}`, tokenPayload, 7200) // 2 Hours in Redis
                 .catch(() => {});
               pingCache.set(targetUrl, {
                 data: { ...pingData, wsUrl: proxiedWs },
@@ -754,13 +755,14 @@ router.get("/player/:eventId", async (req, res) => {
           session,
         );
 
-        // Cache player HTML for 10 minutes in RAM and distributed Redis
+        // Cache player HTML for 2 hours in RAM and distributed Redis
         playerCache.set(`casino_${eventId}`, {
           html,
           expiresAt: Date.now() + CASINO_CACHE_TTL,
+          timestamp: Date.now(),
         });
         redisClient
-          .set(`html:${eventId}`, html, Math.floor(CASINO_CACHE_TTL / 1000))
+          .set(`html:${eventId}`, html, 7200) // 2 Hours in Redis
           .catch(() => {});
 
         // Since this one-time ticket is now consumed into HTML, invalidate raw watchlink from cache
@@ -807,16 +809,21 @@ router.get("/player/:eventId", async (req, res) => {
                 .then((r) => r.json())
                 .then((data) => {
                   if (data && data.token && data.wsUrl) {
-                    tableTokenCache.set(eventId, {
+                    const proxiedWs = getProxiedWsUrl(data.wsUrl);
+                    const tokenPayload = {
                       token: data.token,
-                      wsUrl: data.wsUrl,
+                      wsUrl: proxiedWs,
                       streamId:
                         data.streamId ||
                         (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) ||
                         "GAME10",
                       expiresAt: resolveTokenExpiry(data.token),
-                    });
-                    pingCache.set(targetUrl, { data, timestamp: Date.now() });
+                    };
+                    tableTokenCache.set(eventId, tokenPayload);
+                    redisClient
+                      .set(`table_token:${eventId}`, tokenPayload, 7200)
+                      .catch(() => {});
+                    pingCache.set(targetUrl, { data: { ...data, wsUrl: proxiedWs }, timestamp: Date.now() });
                   }
                   return data;
                 })
