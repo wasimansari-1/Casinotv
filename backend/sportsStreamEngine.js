@@ -70,19 +70,25 @@ function getPatchedSportsPlayerJs() {
   }
 
   // High-performance stream optimizations
-  // 1. HLS Buffer & Worker Tuning: 30s lookahead buffer + multi-threaded worker decoding = 0 buffering
+  // 1. HLS Buffer & Gap Bridging: 30s lookahead, 0.5s hole auto-skip, 0.1s instant nudge, multi-threaded worker
   js = js.replace(
     /liveSyncDurationCount:4,liveMaxLatencyDurationCount:10,maxBufferLength:20,backBufferLength:10/g,
-    "liveSyncDurationCount:3,liveMaxLatencyDurationCount:8,maxBufferLength:30,maxMaxBufferLength:60,backBufferLength:15,enableWorker:!0,lowLatencyMode:!0"
+    "liveSyncDurationCount:3,liveMaxLatencyDurationCount:8,maxBufferLength:30,maxMaxBufferLength:60,backBufferLength:15,maxBufferHole:0.5,nudgeOffset:0.1,nudgeMaxRetry:5,highBufferWatchdogPeriod:1,enableWorker:!0,lowLatencyMode:!0"
   );
 
-  // 2. WebRTC Multi-Cloud STUN Redundancy: Google STUN 1 + 2 + Cloudflare STUN for instant 0ms ICE
+  // 2. Debounced Buffering Indicator & Instant 0.1s Auto-Unsticker (Eliminates flashing Buffering... text)
+  js = js.replace(
+    /\$\.addEventListener\(`waiting`,\(\)=>\{vp===`hls`&&Tp\(`Buffering…`\)\}\)/g,
+    "(()=>{var _b, _l=-1, _s=0; $.addEventListener(`waiting`,()=>{clearTimeout(_b);_b=setTimeout(()=>{if(vp===`hls`&&($.paused||$.readyState<3)){Tp(`Buffering…`)}},1200)}); $.addEventListener(`playing`,()=>{clearTimeout(_b);Tp(``)}); $.addEventListener(`timeupdate`,()=>{if($.currentTime>0&&!$.paused){clearTimeout(_b);if(gp&&gp.textContent===`Buffering…`)Tp(``)}}); setInterval(()=>{if(vp===`hls`&&!$.paused&&!$.ended&&$.readyState>=2){if($.currentTime===_l){_s++;if(_s>=2){try{$.currentTime+=0.08}catch(_){}_s=0}}else{_s=0;_l=$.currentTime}}},500)})()"
+  );
+
+  // 3. WebRTC Multi-Cloud STUN Redundancy: Google STUN 1 + 2 + Cloudflare STUN for instant 0ms ICE
   js = js.replace(
     /urls:`stun:stun1\.l\.google\.com:19302`/g,
     "urls:[`stun:stun1.l.google.com:19302`,`stun:stun2.l.google.com:19302`,`stun:stun.cloudflare.com:3478`]"
   );
 
-  // 3. WebRTC Jitter Resilience: Do not terminate peer connection on transient 'disconnected' state
+  // 4. WebRTC Jitter Resilience: Do not terminate peer connection on transient 'disconnected' state
   js = js.replace(
     /\[`failed`,`disconnected`,`closed`\]\.includes\(i\?\.state\)/g,
     "[`failed`,`closed`].includes(i?.state)"
