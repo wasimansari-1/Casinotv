@@ -77,17 +77,6 @@ function getPatchedSportsPlayerJs() {
     'websocket_url:(Q.wsUrl && Q.wsUrl.startsWith("/") ? (location.protocol === "https:" ? "wss://" : "ws://") + location.host + Q.wsUrl : Q.wsUrl)'
   );
 
-  // 7. Auto-retry reload on session init failure instead of freezing forever
-  js = js.replace(/if\(!e\|\|!Q\.streamId\)\{Tp\(`Could not start\. Reload the page\.\`\);return\}/g, 
-    'if(!e||!Q.streamId){Tp(``);setTimeout(function(){window.location.reload();},1500);return;}'
-  );
-
-  // 8. HLS failure recovery: If HLS ever errors out, revert cleanly to WebRTC instead of infinite HLS reload loop
-  js = js.replace(
-    /setTimeout\(\(\)=>\{Sp\|\|\(xp\.destroy\(\),zp\(\)\)\},3e3\)/g,
-    'setTimeout(()=>{if(!Sp){try{xp?.destroy();}catch(_){}xp=null;Mp=0;Fp();}},2500)'
-  );
-
   _cachedSportsPlayerJs = js;
   console.log(
     `[SportsEngine] Loaded & optimized sports_player.js (${(js.length / 1024).toFixed(1)} KB) into RAM`,
@@ -318,62 +307,6 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
         height: 0 !important;
         width: 0 !important;
       }
-      #status {
-        position: absolute !important;
-        bottom: 24px !important;
-        left: 50% !important;
-        transform: translateX(-50%) !important;
-        background: rgba(15, 23, 42, 0.88) !important;
-        border: 1px solid rgba(56, 189, 248, 0.3) !important;
-        color: #38bdf8 !important;
-        padding: 6px 18px !important;
-        border-radius: 20px !important;
-        font-size: 12px !important;
-        font-weight: 600 !important;
-        z-index: 1000 !important;
-        pointer-events: none !important;
-        backdrop-filter: blur(8px) !important;
-        letter-spacing: 0.3px !important;
-        transition: opacity 0.3s ease !important;
-      }
-      #status:empty {
-        display: none !important;
-      }
-      /* Broadcast-Grade Minimalist Sports Stream Loader */
-      .stream-loader {
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: transparent;
-        z-index: 9999;
-        pointer-events: none;
-        transition: opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1), visibility 0.3s;
-      }
-      .stream-spinner {
-        width: 44px;
-        height: 44px;
-        animation: stream-rotate 1.4s linear infinite;
-        will-change: transform;
-      }
-      .stream-path {
-        stroke: #38bdf8; /* Modern Broadcast Cyan / Azure */
-        stroke-linecap: round;
-        animation: stream-dash 1.4s ease-in-out infinite;
-        filter: drop-shadow(0 0 8px rgba(56, 189, 248, 0.45));
-      }
-      @keyframes stream-rotate {
-        100% { transform: rotate(360deg); }
-      }
-      @keyframes stream-dash {
-        0% { stroke-dasharray: 1, 150; stroke-dashoffset: 0; }
-        50% { stroke-dasharray: 90, 150; stroke-dashoffset: -35; }
-        100% { stroke-dasharray: 90, 150; stroke-dashoffset: -124; }
-      }
     </style>
   `;
   html = html.replace("</head>", `${sportsStyle}</head>`);
@@ -385,11 +318,6 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
   if (cfgMatch) {
     try {
       const originalCfg = JSON.parse(cfgMatch[1]);
-
-      // Immediate detection for ended or offline sports matches
-      if (originalCfg && (originalCfg.state === 'finished' || originalCfg.state === 'offline' || originalCfg.state === 'ended')) {
-        return renderNoTvHtml(originalCfg.title || "Match has finished");
-      }
 
       const fullPingUrl = originalCfg.pingUrl.startsWith("http")
         ? originalCfg.pingUrl
@@ -413,12 +341,6 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
         devtoolsRedirect: "",
         blockedUrl: "",
         home: "",
-        startMode: "webrtc", // Native zero-latency WebRTC broadcast
-        forceHls: false,
-        webrtcTimeout: 12,   // 12s clean handshake (stops premature 3s aborts on mobile/broadband)
-        webrtcRetries: 5,    // 5 smooth retries to keep WebRTC stable without falling to broken HLS
-        freezeSeconds: 120,  // Prevents false freeze reloads
-        offlineRetry: 3,
         frameAllow: {
           enforce: false,
           outer: { apps: false, hosts: [], sites: [] },
@@ -441,20 +363,6 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
     /src=["'](?:https?:\/\/[^/]+)?\/player\/player\.js[^"']*["']/g,
     `src="/api/stream/sports/player-assets/sports-player.js?v=${ts}"`,
   );
-
-  // Insert Broadcast-Grade Minimalist Spinner (Clean SVG ring on black screen, zero clunky text)
-  const spinnerDom = `
-    <div id="stream-loader" class="stream-loader">
-      <svg class="stream-spinner" viewBox="0 0 50 50">
-        <circle class="stream-path" cx="25" cy="25" r="20" fill="none" stroke-width="3.5" />
-      </svg>
-    </div>
-  `;
-  if (html.includes("<body")) {
-    html = html.replace(/<body[^>]*>/, `$&${spinnerDom}`);
-  } else {
-    html = `${spinnerDom}${html}`;
-  }
 
   // Client runtime patch with Master Guard Anti-Theft Protection
   const allowedOriginsJson = JSON.stringify(securityEngine.getAllowedDomainsList());
@@ -494,48 +402,6 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
             configurable: true
           });
         } catch(e) {}
-
-        // Stream Loader Controller (Silent, smooth fade-out on video start)
-        var loader = document.getElementById('stream-loader');
-
-        function hideLoader() {
-          if (loader && loader.style.display !== 'none') {
-            loader.style.opacity = '0';
-            loader.style.visibility = 'hidden';
-            setTimeout(function() { if (loader) loader.style.display = 'none'; }, 300);
-          }
-        }
-
-        function showLoader() {
-          if (loader) {
-            loader.style.display = 'flex';
-            loader.style.visibility = 'visible';
-            setTimeout(function() { if (loader) loader.style.opacity = '1'; }, 10);
-          }
-        }
-
-        // Periodically monitor video element (handles dynamically injected <video> tags)
-        var checkVideoPlaying = setInterval(function() {
-          var v = document.getElementById('video') || document.querySelector('video');
-          if (v) {
-            v.removeEventListener('playing', hideLoader);
-            v.addEventListener('playing', hideLoader);
-            v.removeEventListener('canplay', hideLoader);
-            v.addEventListener('canplay', hideLoader);
-            v.removeEventListener('waiting', showLoader);
-            v.addEventListener('waiting', showLoader);
-            if (v.currentTime > 0 || v.readyState >= 2 || (!v.paused && !v.ended)) {
-              hideLoader();
-              clearInterval(checkVideoPlaying);
-            }
-          }
-        }, 150);
-
-        // Safety fallback: auto-hide loader after 4.5 seconds so user never gets stuck with a spinning circle
-        setTimeout(function() {
-          hideLoader();
-          clearInterval(checkVideoPlaying);
-        }, 4500);
       })();
     </script>
   `;
@@ -544,7 +410,7 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
   return html;
 }
 
-// 5. Friendly Unavailable Screen for matches without active TV feeds
+// 5. Native Minimalist Unavailable Screen matching original provider
 function renderNoTvHtml(matchName = "") {
   return `
     <!DOCTYPE html>
@@ -552,84 +418,31 @@ function renderNoTvHtml(matchName = "") {
     <head>
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width, initial-scale=1">
-      <title>Live TV Feed Unavailable</title>
+      <title>Sports TV</title>
       <style>
-        body {
+        html, body {
           margin: 0;
-          background: #07090e;
-          color: #94a3b8;
+          padding: 0;
+          width: 100%;
+          height: 100%;
+          background: #000;
+          color: #64748b;
           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
           display: flex;
-          flex-direction: column;
           align-items: center;
           justify-content: center;
-          height: 100vh;
           text-align: center;
-          padding: 20px;
-          box-sizing: border-box;
-        }
-        .icon-box {
-          width: 56px;
-          height: 56px;
-          border-radius: 50%;
-          background: rgba(255, 255, 255, 0.05);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          font-size: 26px;
-          margin-bottom: 16px;
-          border: 1px solid rgba(255, 255, 255, 0.1);
-        }
-        h2 {
-          font-size: 16px;
-          font-weight: 600;
-          color: #f1f5f9;
-          margin: 0 0 8px;
-        }
-        p {
-          font-size: 13px;
-          color: #64748b;
-          margin: 0 0 16px;
-          max-width: 320px;
-          line-height: 1.4;
-        }
-        .match-badge {
-          display: inline-block;
-          font-size: 11px;
-          color: #38bdf8;
-          background: rgba(56, 189, 248, 0.1);
-          border: 1px solid rgba(56, 189, 248, 0.2);
-          padding: 4px 10px;
-          border-radius: 9999px;
-          margin-bottom: 12px;
-          max-width: 280px;
           overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
         }
-        .reload-btn {
-          background: #1e293b;
-          color: #e2e8f0;
-          border: 1px solid rgba(255, 255, 255, 0.15);
-          border-radius: 8px;
-          padding: 8px 18px;
-          font-size: 12px;
-          font-weight: 500;
-          cursor: pointer;
-          transition: all 0.2s;
-        }
-        .reload-btn:hover {
-          background: #334155;
-          color: #fff;
+        .msg {
+          font-size: 14px;
+          color: #64748b;
+          letter-spacing: 0.2px;
         }
       </style>
     </head>
     <body>
-      <div class="icon-box">📡</div>
-      ${matchName ? `<div class="match-badge">${matchName}</div>` : ""}
-      <h2>Live TV Feed Not Available</h2>
-      <p>This match does not have an active live satellite TV broadcast from the provider right now, or the match has concluded.</p>
-      <button class="reload-btn" onclick="window.location.reload()">Check Feed Again</button>
+      <div class="msg">This stream is not live right now. Waiting…</div>
     </body>
     </html>
   `;
@@ -1059,7 +872,8 @@ router.post("/proxy-ping", async (req, res) => {
         if (cleanWs.startsWith('//')) {
           cleanWs = `wss:${cleanWs}`;
         } else if (cleanWs.startsWith('/')) {
-          cleanWs = `wss://player.ltve.live${cleanWs}`;
+          const wsHost = targetOrigin.replace(/^https?:\/\//, '');
+          cleanWs = `wss://${wsHost}${cleanWs}`;
         } else if (!cleanWs.startsWith('ws://') && !cleanWs.startsWith('wss://')) {
           cleanWs = `wss://${cleanWs}`;
         }
@@ -1070,21 +884,16 @@ router.post("/proxy-ping", async (req, res) => {
         data.streamId = eventId || lastCached?.data?.streamId || 'SPORTS';
       }
 
-      // Preserve latest valid token if upstream routine ping didn't send a new one
-      if (!data.token && lastCached?.data?.token) {
-        data.token = lastCached.data.token;
-      }
-
       // Save fresh data & timestamp in memory cache
       sportsPingCache.set(targetUrl, { data, timestamp: Date.now() });
 
       return res.status(200).json(data);
     }
 
-    // Resilient fallback: If upstream returns transient error during routine heartbeat,
-    // respond with last known good cached data so the player doesn't abort!
-    if (lastCached && lastCached.data) {
-      return res.status(200).json(lastCached.data);
+    // Resilient fallback: For routine heartbeats, NEVER fail or return 403!
+    // Return { ok: true } so the playing video continues uninterrupted!
+    if (!isInit && !isTokenRequest) {
+      return res.status(200).json(lastCached?.data || { ok: true });
     }
 
     return res
@@ -1092,8 +901,8 @@ router.post("/proxy-ping", async (req, res) => {
       .json({ error: "Invalid response from sports ping upstream" });
   } catch (err) {
     console.error("[SportsEngine] Proxy ping error:", err.message);
-    if (lastCached && lastCached.data) {
-      return res.status(200).json(lastCached.data);
+    if (!isInit && !isTokenRequest) {
+      return res.status(200).json(lastCached?.data || { ok: true });
     }
     res.status(500).json({ error: "Proxy ping failed", details: err.message });
   }
