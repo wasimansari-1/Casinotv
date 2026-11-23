@@ -1081,6 +1081,18 @@ function getPatchedPlayerJs() {
     'tryPlay(){this.video.muted=!0;this.video.defaultMuted=!0;this.video.playsInline=!0;this.video.setAttribute("playsinline","");this.video.setAttribute("webkit-playsinline","");const e=this.video.play();',
   );
 
+  // 8. Instant 300ms Auto-Reconnect (Replaces 15s - 30s penalty backoff with instant 0.3s retry)
+  text = text.replace(
+    /this\.reconnectTimer\s*=\s*setTimeout\(\(\)\s*=>\s*this\.retryNow\(\),\s*r\)/g,
+    'this.reconnectTimer = setTimeout(() => this.retryNow(), 300)',
+  );
+
+  // 9. Preserve everPlayed flag across socket jitter (Prevents recurring loader screens)
+  text = text.replace(
+    /\(this\.everPlayed\s*=\s*!1\)/g,
+    '(void 0)',
+  );
+
   _cachedPatchedPlayerJs = text;
   return text;
 }

@@ -73,30 +73,25 @@ function getPatchedSportsPlayerJs() {
   // 1. HLS Buffer & Gap Bridging: 30s lookahead, 0.5s hole auto-skip, 0.1s instant nudge, multi-threaded worker
   js = js.replace(
     /liveSyncDurationCount:4,liveMaxLatencyDurationCount:10,maxBufferLength:20,backBufferLength:10/g,
-    "liveSyncDurationCount:3,liveMaxLatencyDurationCount:8,maxBufferLength:30,maxMaxBufferLength:60,backBufferLength:15,maxBufferHole:0.5,nudgeOffset:0.1,nudgeMaxRetry:5,highBufferWatchdogPeriod:1,enableWorker:!0,lowLatencyMode:!0,startFragPrefetch:!0"
+    "liveSyncDurationCount:3,liveMaxLatencyDurationCount:8,maxBufferLength:30,maxMaxBufferLength:60,backBufferLength:15,maxBufferHole:0.5,nudgeOffset:0.1,nudgeMaxRetry:5,highBufferWatchdogPeriod:1,enableWorker:!0,lowLatencyMode:!0"
   );
 
   // 2. Debounced Buffering Indicator & Instant 0.1s Auto-Unsticker (Eliminates flashing Buffering... text)
   js = js.replace(
-    /var Tp=e=>\{gp\.textContent=e\|\|``,gp\.hidden=!e\}/g,
-    "var _bufTimer;var Tp=e=>{clearTimeout(_bufTimer);if(!e){if(gp){gp.textContent='';gp.hidden=!0}return;}if($&&!$.paused&&$.currentTime>0&&$.readyState>=3){if(gp){gp.textContent='';gp.hidden=!0}return;}if(typeof e==='string'&&(e.includes('Buffering')||e.includes('Reconnecting')||e.includes('Connecting'))){_bufTimer=setTimeout(()=>{if($&&!$.paused&&$.currentTime>0&&$.readyState>=3){if(gp){gp.textContent='';gp.hidden=!0}return;}if(gp){gp.textContent=e;gp.hidden=!1}},1500);return;}if(gp){gp.textContent=e;gp.hidden=!1}}"
-  );
-
-  js = js.replace(
     /\$\.addEventListener\(`waiting`,\(\)=>\{vp===`hls`&&Tp\(`Buffering…`\)\}\)/g,
-    "(()=>{var _b, _l=-1, _s=0; $.addEventListener(`waiting`,()=>{clearTimeout(_b);_b=setTimeout(()=>{if(vp===`hls`&&($.paused||$.readyState<3)){Tp(`Buffering…`)}},1500)}); $.addEventListener(`playing`,()=>{clearTimeout(_b);Tp(``)}); $.addEventListener(`timeupdate`,()=>{if($.currentTime>0&&!$.paused){clearTimeout(_b);if(gp&&gp.textContent&&gp.textContent.includes('Buffering'))Tp(``)}}); setInterval(()=>{if(vp===`hls`&&!$.paused&&!$.ended&&$.readyState>=2){if($.currentTime===_l){_s++;if(_s>=2){try{$.currentTime+=0.08}catch(_){}_s=0}}else{_s=0;_l=$.currentTime}}},400)})()"
+    "(()=>{var _b, _l=-1, _s=0; $.addEventListener(`waiting`,()=>{clearTimeout(_b);_b=setTimeout(()=>{if(vp===`hls`&&($.paused||$.readyState<3)){Tp(`Buffering…`)}},1200)}); $.addEventListener(`playing`,()=>{clearTimeout(_b);Tp(``)}); $.addEventListener(`timeupdate`,()=>{if($.currentTime>0&&!$.paused){clearTimeout(_b);if(gp&&gp.textContent===`Buffering…`)Tp(``)}}); setInterval(()=>{if(vp===`hls`&&!$.paused&&!$.ended&&$.readyState>=2){if($.currentTime===_l){_s++;if(_s>=2){try{$.currentTime+=0.08}catch(_){}_s=0}}else{_s=0;_l=$.currentTime}}},500)})()"
   );
 
   // 3. WebRTC Multi-Cloud STUN Redundancy: Google STUN 1 + 2 + Cloudflare STUN for instant 0ms ICE
   js = js.replace(
     /urls:`stun:stun1\.l\.google\.com:19302`/g,
-    "urls:[`stun:stun1.l.google.com:19302`,`stun:stun2.l.google.com:19302`,`stun:stun.cloudflare.com:3478`]",
+    "urls:[`stun:stun1.l.google.com:19302`,`stun:stun2.l.google.com:19302`,`stun:stun.cloudflare.com:3478`]"
   );
 
   // 4. WebRTC Jitter Resilience: Do not terminate peer connection on transient 'disconnected' state
   js = js.replace(
     /\[`failed`,`disconnected`,`closed`\]\.includes\(i\?\.state\)/g,
-    "[`failed`,`closed`].includes(i?.state)",
+    "[`failed`,`closed`].includes(i?.state)"
   );
 
   // 4. Freeze detector: increase freeze threshold to 120s (stops false reload loops)
@@ -113,12 +108,11 @@ function getPatchedSportsPlayerJs() {
   );
 
   // 7. Fix TypeError: Invalid URL in HLS player when Q.hlsUrl is a relative path
-  js = js.replace(/new URL\(e,Q\.hlsUrl\)/g, "new URL(e,window.location.href)");
+  js = js.replace(/new URL\(e,Q\.hlsUrl\)/g, 'new URL(e,window.location.href)');
 
   // 8. Fix WebSocket relative URL resolution for proxied WebRTC tunnels
-  js = js.replace(
-    /websocket_url:Q\.wsUrl/g,
-    'websocket_url:(Q.wsUrl && Q.wsUrl.startsWith("/") ? (location.protocol === "https:" ? "wss://" : "ws://") + location.host + Q.wsUrl : Q.wsUrl)',
+  js = js.replace(/websocket_url:Q\.wsUrl/g, 
+    'websocket_url:(Q.wsUrl && Q.wsUrl.startsWith("/") ? (location.protocol === "https:" ? "wss://" : "ws://") + location.host + Q.wsUrl : Q.wsUrl)'
   );
 
   _cachedSportsPlayerJs = js;
@@ -351,15 +345,6 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
         height: 0 !important;
         width: 0 !important;
       }
-      #status, .status, #msg, .msg {
-        pointer-events: none !important;
-        user-select: none !important;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
-        font-weight: 600 !important;
-        letter-spacing: 0.5px !important;
-        text-shadow: 0 2px 4px rgba(0,0,0,0.9) !important;
-        transition: opacity 0.2s ease !important;
-      }
     </style>
   `;
   html = html.replace("</head>", `${sportsStyle}</head>`);
@@ -386,7 +371,7 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
       const modifiedCfg = {
         ...originalCfg,
         hlsUrl: hlsProxyUrl || originalCfg.hlsUrl,
-        streamId: originalCfg.streamId || eventId || "SPORTS",
+        streamId: originalCfg.streamId || eventId || 'SPORTS',
         pingUrl: proxiedPingUrl,
         flagUrl: "/api/stream/sports/dummy-flag",
         byeUrl: "/api/stream/sports/dummy-bye",
@@ -418,9 +403,7 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
   );
 
   // Client runtime patch with Master Guard Anti-Theft Protection
-  const allowedOriginsJson = JSON.stringify(
-    securityEngine.getAllowedDomainsList(),
-  );
+  const allowedOriginsJson = JSON.stringify(securityEngine.getAllowedDomainsList());
   const clientPatch = `
     <script>
       (function() {
@@ -705,10 +688,7 @@ router.get("/player/:eventId", async (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     res.setHeader("Permissions-Policy", "unload=*");
-    res.setHeader(
-      "Content-Security-Policy",
-      securityEngine.getFrameAncestorsCSP(),
-    );
+    res.setHeader("Content-Security-Policy", securityEngine.getFrameAncestorsCSP());
     return res.send(redisHtml);
   }
 
@@ -719,10 +699,7 @@ router.get("/player/:eventId", async (req, res) => {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       res.setHeader("Permissions-Policy", "unload=*");
-      res.setHeader(
-        "Content-Security-Policy",
-        securityEngine.getFrameAncestorsCSP(),
-      );
+      res.setHeader("Content-Security-Policy", securityEngine.getFrameAncestorsCSP());
       return res.send(html);
     } catch (_) {}
   }
@@ -844,10 +821,7 @@ router.get("/player/:eventId", async (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     res.setHeader("Permissions-Policy", "unload=*");
-    res.setHeader(
-      "Content-Security-Policy",
-      securityEngine.getFrameAncestorsCSP(),
-    );
+    res.setHeader("Content-Security-Policy", securityEngine.getFrameAncestorsCSP());
     return res.send(finalHtml);
   } finally {
     inFlightSportsPlayers.delete(eventId);
@@ -858,10 +832,7 @@ router.get("/player/:eventId", async (req, res) => {
 router.post("/proxy-ping", async (req, res) => {
   const access = await securityEngine.verifyAccess(req, "sports");
   if (!access.allowed) {
-    return res.status(403).json({
-      error: "Unauthorized: Domain or IP not whitelisted",
-      reason: access.reason,
-    });
+    return res.status(403).json({ error: "Unauthorized: Domain or IP not whitelisted", reason: access.reason });
   }
 
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -929,29 +900,26 @@ router.post("/proxy-ping", async (req, res) => {
       if (data.stop) data.stop = false;
 
       // Rewrite HLS URL if present to dedicated sports HLS proxy with clean relative URL (zero mixed content HTTP/HTTPS block)
-      if (data.hlsUrl && !data.hlsUrl.startsWith("/api/stream/sports/hls/")) {
+      if (data.hlsUrl && !data.hlsUrl.startsWith('/api/stream/sports/hls/')) {
         data.hlsUrl = `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(data.hlsUrl)}`;
       }
 
       // Rewrite wsUrl to WebSocket tunnel proxy to bypass Origin 403 blocks
-      if (data.wsUrl && !data.wsUrl.startsWith("/api/stream/ws")) {
+      if (data.wsUrl && !data.wsUrl.startsWith('/api/stream/ws')) {
         let cleanWs = String(data.wsUrl).trim();
-        if (cleanWs.startsWith("//")) {
+        if (cleanWs.startsWith('//')) {
           cleanWs = `wss:${cleanWs}`;
-        } else if (cleanWs.startsWith("/")) {
-          const wsHost = targetOrigin.replace(/^https?:\/\//, "");
+        } else if (cleanWs.startsWith('/')) {
+          const wsHost = targetOrigin.replace(/^https?:\/\//, '');
           cleanWs = `wss://${wsHost}${cleanWs}`;
-        } else if (
-          !cleanWs.startsWith("ws://") &&
-          !cleanWs.startsWith("wss://")
-        ) {
+        } else if (!cleanWs.startsWith('ws://') && !cleanWs.startsWith('wss://')) {
           cleanWs = `wss://${cleanWs}`;
         }
         data.wsUrl = `/api/stream/ws?target=${encodeURIComponent(cleanWs)}`;
       }
 
       if (!data.streamId) {
-        data.streamId = eventId || lastCached?.data?.streamId || "SPORTS";
+        data.streamId = eventId || lastCached?.data?.streamId || 'SPORTS';
       }
 
       // Save fresh data & timestamp in memory cache
@@ -989,8 +957,8 @@ router.get("/hls/live.m3u8", async (req, res) => {
     if (token) {
       try {
         const u = new URL(upstreamUrl);
-        if (!u.searchParams.has("token")) {
-          u.searchParams.set("token", token);
+        if (!u.searchParams.has('token')) {
+          u.searchParams.set('token', token);
           upstreamUrl = u.toString();
         }
       } catch (_) {}
@@ -1009,11 +977,7 @@ router.get("/hls/live.m3u8", async (req, res) => {
     } catch (_) {}
 
     // 2. Fallback to proxy only if direct fails or was blocked
-    if (
-      !text ||
-      text.includes("403 Forbidden") ||
-      text.includes("Access Denied")
-    ) {
+    if (!text || text.includes('403 Forbidden') || text.includes('Access Denied')) {
       const m3u8Res = await proxyFetch(upstreamUrl, {
         headers: { "User-Agent": UA, Referer: "https://tv.ltve.live/" },
         timeout: 8000,
@@ -1021,21 +985,18 @@ router.get("/hls/live.m3u8", async (req, res) => {
       text = await m3u8Res.text();
     }
 
-    const rewritten = text
-      .split("\n")
-      .map((line) => {
-        const trimmed = line.trim();
-        if (trimmed.endsWith(".m3u8") || trimmed.includes(".m3u8?")) {
-          const fullVariantUrl = new URL(trimmed, upstreamUrl).href;
-          return `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(fullVariantUrl)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
-        }
-        if (trimmed.endsWith(".ts") || trimmed.includes(".ts?")) {
-          const fullSegUrl = new URL(trimmed, upstreamUrl).href;
-          return `/api/stream/sports/hls/chunk.ts?url=${encodeURIComponent(fullSegUrl)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
-        }
-        return line;
-      })
-      .join("\n");
+    const rewritten = text.split('\n').map(line => {
+      const trimmed = line.trim();
+      if (trimmed.endsWith('.m3u8') || trimmed.includes('.m3u8?')) {
+        const fullVariantUrl = new URL(trimmed, upstreamUrl).href;
+        return `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(fullVariantUrl)}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
+      }
+      if (trimmed.endsWith('.ts') || trimmed.includes('.ts?')) {
+        const fullSegUrl = new URL(trimmed, upstreamUrl).href;
+        return `/api/stream/sports/hls/chunk.ts?url=${encodeURIComponent(fullSegUrl)}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
+      }
+      return line;
+    }).join('\n');
 
     res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -1057,94 +1018,100 @@ router.get("/hls/chunk.ts", async (req, res) => {
     if (token) {
       try {
         const u = new URL(targetUrl);
-        if (!u.searchParams.has("token")) {
-          u.searchParams.set("token", token);
+        if (!u.searchParams.has('token')) {
+          u.searchParams.set('token', token);
           targetUrl = u.toString();
         }
       } catch (_) {}
     }
 
-    // 1. Check RAM Chunk Cache (Ultra-fast 0ms playback directly from memory!)
+    // Check RAM Chunk Cache (Ultra-fast 0ms playback directly from memory!)
     const cacheKey = targetUrl;
     const cached = sportsChunkCache.get(cacheKey);
     if (cached && Date.now() < cached.expiresAt && cached.buffer) {
       res.setHeader("Content-Type", cached.contentType || "video/mp2t");
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Cache-Control", "public, max-age=86400, immutable");
-      res.setHeader("X-Accel-Buffering", "no");
       return res.send(cached.buffer);
     }
 
-    // 2. Fetch and Stream Progressively in Real-Time (Zero-Buffer progressive playback!)
-    const u = new URL(targetUrl);
-    const isHttps = u.protocol === "https:";
-    const client = isHttps ? https : http;
-    const agent = isHttps ? sportsHlsAgent : sportsHttpAgent;
-
-    const chunkReq = client.get(
-      targetUrl,
-      {
-        agent,
-        headers: { "User-Agent": UA, Referer: "https://tv.ltve.live/" },
-        timeout: 12000,
-        rejectUnauthorized: false,
-      },
-      (chunkRes) => {
-        if (
-          chunkRes.statusCode >= 300 &&
-          chunkRes.statusCode < 400 &&
-          chunkRes.headers.location
-        ) {
-          return res.redirect(chunkRes.headers.location);
+    // Deduplicate in-flight chunk requests across concurrent viewers
+    if (inFlightSportsChunks.has(cacheKey)) {
+      try {
+        const result = await inFlightSportsChunks.get(cacheKey);
+        if (result && result.buffer) {
+          res.setHeader("Content-Type", result.contentType || "video/mp2t");
+          res.setHeader("Access-Control-Allow-Origin", "*");
+          res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+          return res.send(result.buffer);
         }
+      } catch (_) {}
+    }
 
-        const contentType = chunkRes.headers["content-type"] || "video/mp2t";
-        res.setHeader("Content-Type", contentType);
-        res.setHeader("Access-Control-Allow-Origin", "*");
-        res.setHeader("Cache-Control", "public, max-age=86400, immutable");
-        res.setHeader("X-Accel-Buffering", "no");
+    const task = (async () => {
+      const u = new URL(targetUrl);
+      const isHttps = u.protocol === "https:";
+      const client = isHttps ? https : http;
+      const agent = isHttps ? sportsHlsAgent : sportsHttpAgent;
 
-        const chunks = [];
-        chunkRes.on("data", (c) => {
-          if (!res.writableEnded) res.write(c);
-          chunks.push(c);
-        });
+      return new Promise((resolve, reject) => {
+        const chunkReq = client.get(
+          targetUrl,
+          {
+            agent,
+            headers: { "User-Agent": UA, Referer: "https://tv.ltve.live/" },
+            timeout: 12000,
+            rejectUnauthorized: false,
+          },
+          (chunkRes) => {
+            if (
+              chunkRes.statusCode >= 300 &&
+              chunkRes.statusCode < 400 &&
+              chunkRes.headers.location
+            ) {
+              return resolve({ redirect: chunkRes.headers.location });
+            }
 
-        chunkRes.on("end", () => {
-          if (!res.writableEnded) res.end();
-          const fullBuffer = Buffer.concat(chunks);
-          // Cache segment for 60 seconds (video segments never change once created)
-          if (sportsChunkCache.size > 80) {
-            const oldest = sportsChunkCache.keys().next().value;
-            sportsChunkCache.delete(oldest);
+            const contentType = chunkRes.headers["content-type"] || "video/mp2t";
+            const chunks = [];
+            chunkRes.on("data", (c) => chunks.push(c));
+            chunkRes.on("end", () => {
+              const fullBuffer = Buffer.concat(chunks);
+              // Cache segment for 60 seconds (video segments never change once created)
+              if (sportsChunkCache.size > 60) {
+                const oldest = sportsChunkCache.keys().next().value;
+                sportsChunkCache.delete(oldest);
+              }
+              const entry = { buffer: fullBuffer, contentType, expiresAt: Date.now() + 60000 };
+              sportsChunkCache.set(cacheKey, entry);
+              resolve(entry);
+            });
+            chunkRes.on("error", reject);
           }
-          sportsChunkCache.set(cacheKey, {
-            buffer: fullBuffer,
-            contentType,
-            expiresAt: Date.now() + 60000,
-          });
+        );
+
+        chunkReq.on("error", reject);
+        chunkReq.on("timeout", () => {
+          chunkReq.destroy();
+          reject(new Error("Chunk request timed out"));
         });
+      });
+    })();
 
-        chunkRes.on("error", (err) => {
-          console.warn("[SportsEngine] Chunk stream error:", err.message);
-          if (!res.writableEnded) res.end();
-        });
-      }
-    );
+    inFlightSportsChunks.set(cacheKey, task);
 
-    chunkReq.on("error", (err) => {
-      console.warn("[SportsEngine] Chunk fetch error:", err.message);
-      if (!res.headersSent) {
-        res.status(502).send("Upstream chunk error");
+    try {
+      const result = await task;
+      if (result.redirect) {
+        return res.redirect(result.redirect);
       }
-    });
-
-    chunkReq.on("timeout", () => {
-      chunkReq.destroy();
-      if (!res.headersSent) {
-        res.status(504).send("Upstream chunk timeout");
-      }
-    });
+      res.setHeader("Content-Type", result.contentType || "video/mp2t");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+      return res.send(result.buffer);
+    } finally {
+      inFlightSportsChunks.delete(cacheKey);
+    }
   } catch (err) {
     console.error("[SportsEngine] HLS Chunk Error:", err.message);
     if (!res.headersSent) {

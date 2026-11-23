@@ -32,11 +32,12 @@ if [ -f "backend/whitelist_database.json.bak" ]; then
   cp -f backend/whitelist_database.json.bak backend/whitelist_database.json
 fi
 
-# 4. Flush Redis Cache
-echo "🧹 4. Purging stale Redis cache..."
+# 4. Preserve Active Tables in Redis
+echo "⚡ 4. Keeping warmed casino tables active in Redis..."
 if command -v redis-cli >/dev/null 2>&1; then
-  redis-cli flushall >/dev/null 2>&1 || true
-  echo "✅ Redis cache flushed cleanly."
+  # Only clear stale locks, do NOT wipe warmed tables!
+  redis-cli del cron:table_warmer_daemon >/dev/null 2>&1 || true
+  echo "✅ Active warmed tables preserved in Redis."
 fi
 
 # 5. Restart PM2 Process
