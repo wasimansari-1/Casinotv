@@ -32,10 +32,11 @@ if [ -f "backend/whitelist_database.json.bak" ]; then
   cp -f backend/whitelist_database.json.bak backend/whitelist_database.json
 fi
 
-# 4. Preserve Active Tables in Redis
+# 4. Preserve Active Tables in Redis & Clear Stale Daemon Locks
 echo "⚡ 4. Keeping warmed casino tables active in Redis..."
 if command -v redis-cli >/dev/null 2>&1; then
   # Only clear stale locks, do NOT wipe warmed tables!
+  redis-cli del casinotv:lock:cron:table_warmer_daemon >/dev/null 2>&1 || true
   redis-cli del cron:table_warmer_daemon >/dev/null 2>&1 || true
   echo "✅ Active warmed tables preserved in Redis."
 fi
@@ -44,13 +45,17 @@ fi
 echo "🔄 5. Restarting casinotv-stream PM2 worker..."
 pm2 restart casinotv-stream --update-env
 
-# 6. Verify health & Warm instant cache
-sleep 3
-echo "🏥 6. Verifying API health status and hot-warming cache..."
+# 6. Wait for initial table warming confirmation
+echo "🏥 6. Verifying API health and hot cache status..."
 PORT_NUM="${PORT:-5050}"
-if command -v curl >/dev/null 2>&1; then
-  curl -s "http://127.0.0.1:${PORT_NUM}/api/stream/health" >/dev/null 2>&1 || true
-fi
+for i in {1..15}; do
+  TTL_VAL=$(redis-cli ttl 'casinotv:html:99.0010' 2>/dev/null || echo -2)
+  if [ "$TTL_VAL" -gt 0 ]; then
+    echo "✅ Tables confirmed ACTIVE in Redis (TTL: ${TTL_VAL}s)!"
+    break
+  fi
+  sleep 1
+done
 
 echo "========================================================"
 echo "📋 Recent 25 lines of casinotv-stream logs:"
