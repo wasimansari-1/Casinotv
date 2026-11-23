@@ -894,26 +894,24 @@ async function getWatchUrl(eventId, options = {}) {
     }
   }
 
-  // 3. Single-flight deduplication across local asynchronous callers (only if not forceFresh)
-  if (!forceFresh && inFlightWatchLinks.has(eventId)) {
+  // 3. Single-flight deduplication across local asynchronous callers
+  if (inFlightWatchLinks.has(eventId)) {
     return inFlightWatchLinks.get(eventId);
   }
 
   const task = (async () => {
-    // 4. Distributed Mutex Lock (Avoid duplicate API calls across PM2 workers when caching)
-    let acquiredLock = false;
+    // 4. Distributed Mutex Lock (Avoid duplicate API calls across PM2 workers)
     const lockKey = `watchlink:${eventId}`;
-    if (!forceFresh) {
-      acquiredLock = await redisClient.acquireLock(lockKey, 15);
-      if (!acquiredLock) {
-        console.log(`[Distributed Lock] Another PM2 worker is currently fetching table ${eventId}. Waiting for result...`);
-        const unlocked = await redisClient.waitForLock(lockKey, 12000, 250);
-        if (unlocked) {
-          const resultFromOtherWorker = await redisClient.get(cacheKey);
-          if (resultFromOtherWorker && resultFromOtherWorker.url) {
-            providerManager.trackCacheHit(resultFromOtherWorker.provKey || 'startexch');
-            return resultFromOtherWorker;
-          }
+    const acquiredLock = await redisClient.acquireLock(lockKey, 15);
+
+    if (!acquiredLock) {
+      console.log(`[Distributed Lock] Another PM2 worker is currently fetching table ${eventId}. Waiting for result...`);
+      const unlocked = await redisClient.waitForLock(lockKey, 12000, 250);
+      if (unlocked) {
+        const resultFromOtherWorker = await redisClient.get(cacheKey);
+        if (resultFromOtherWorker && resultFromOtherWorker.url) {
+          providerManager.trackCacheHit(resultFromOtherWorker.provKey || 'startexch');
+          return resultFromOtherWorker;
         }
       }
     }
@@ -1001,11 +999,9 @@ async function getWatchUrl(eventId, options = {}) {
                     expiresAt: Date.now() + (ttlSec * 1000)
                   };
 
-                  // Cache in Redis (shared across PM2 workers) and RAM only if not forceFresh
-                  if (!forceFresh) {
-                    await redisClient.set(cacheKey, watchData, ttlSec);
-                    watchLinkCache.set(eventId, watchData);
-                  }
+                  // Cache in Redis (shared across PM2 workers) and RAM
+                  await redisClient.set(cacheKey, watchData, ttlSec);
+                  watchLinkCache.set(eventId, watchData);
 
                   logAudit({
                     provider: provider.name,
@@ -1169,21 +1165,15 @@ async function getWatchUrl(eventId, options = {}) {
 
       throw new Error(`Failed to obtain watch link for table ${eventId} from any provider: ${lastError ? lastError.message : 'All providers exhausted'}`);
     } finally {
-      if (acquiredLock) {
-        await redisClient.releaseLock(lockKey).catch(() => {});
-      }
+      await redisClient.releaseLock(lockKey).catch(() => {});
     }
   })();
 
-  if (!forceFresh) {
-    inFlightWatchLinks.set(eventId, task);
-  }
+  inFlightWatchLinks.set(eventId, task);
   try {
     return await task;
   } finally {
-    if (!forceFresh) {
-      inFlightWatchLinks.delete(eventId);
-    }
+    inFlightWatchLinks.delete(eventId);
   }
 }
 
