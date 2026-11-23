@@ -174,6 +174,78 @@ async function warmCasinoTable(eventId) {
   }
 
   try {
+    // 1. FAST PATH: Check if we already have valid HTML in Redis
+    let existingHtml = await redisClient.get(`html:${eventId}`);
+    if (existingHtml && typeof existingHtml === "string" && existingHtml.includes("cfg")) {
+      // Fast Token Renewal directly from Platin CDN via VPS IP (10ms, 0 MB proxy, zero provider calls!)
+      try {
+        const cfgMatch = existingHtml.match(
+          /<script type="application\/json" id="cfg">([^<]+)<\/script>/,
+        );
+        if (cfgMatch) {
+          const cfg = JSON.parse(cfgMatch[1]);
+          const targetUrl = cfg.pingUrl.includes("target=")
+            ? decodeURIComponent(
+                new URL(cfg.pingUrl, "http://localhost").searchParams.get(
+                  "target",
+                ),
+              )
+            : cfg.pingUrl;
+          if (targetUrl) {
+            const pingBody = JSON.stringify({
+              sid: cfg.sid,
+              mode: "connecting",
+              init: true,
+              page: "https://casino.nice444.com/",
+              tz: "Asia/Kolkata",
+              tzo: 330,
+            });
+
+            // Direct VPS fetch to Platin CDN (Ultra-fast 10ms, 0 MB proxy!)
+            let pingRes = await directFetch(targetUrl, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Origin: new URL(targetUrl).origin,
+                Referer: targetUrl,
+                "User-Agent": UA,
+                Accept: "*/*",
+              },
+              body: pingBody,
+              timeout: 4000,
+            }).catch(() => null);
+
+            if (pingRes && pingRes.ok) {
+              const pingData = await pingRes.json().catch(() => null);
+              if (pingData && pingData.token && !pingData.stop) {
+                const proxiedWs = getProxiedWsUrl(pingData.wsUrl);
+                const tokenPayload = {
+                  token: pingData.token,
+                  wsUrl: proxiedWs,
+                  streamId:
+                    pingData.streamId ||
+                    (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) ||
+                    "GAME10",
+                  expiresAt: resolveTokenExpiry(pingData.token),
+                };
+                tableTokenCache.set(eventId, tokenPayload);
+                await redisClient.set(`table_token:${eventId}`, tokenPayload, 300).catch(() => {});
+                playerCache.set(`casino_${eventId}`, {
+                  html: existingHtml,
+                  expiresAt: Date.now() + CASINO_CACHE_TTL,
+                  timestamp: Date.now(),
+                });
+                // Refresh 24h Redis TTL so cache NEVER expires
+                await redisClient.set(`html:${eventId}`, existingHtml, 86400).catch(() => {});
+                return true; // Refreshed directly in 10ms without touching providers!
+              }
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
+    // 2. FRESH TICKET FETCH: Only runs at boot or when upstream CDN ticket actually expires
     const watchData = await getWatchUrl(eventId, { forceFresh: true });
     const watchUrl = typeof watchData === "string" ? watchData : watchData.url;
     const providerOrigin = watchData.origin
@@ -223,7 +295,7 @@ async function warmCasinoTable(eventId) {
       });
     }
 
-    if (pageRes.ok) {
+    if (pageRes && pageRes.ok) {
       let html = await pageRes.text();
 
       // Strict validation: Don't cache blocked or invalid player HTML
@@ -253,15 +325,13 @@ async function warmCasinoTable(eventId) {
         expiresAt: Date.now() + CASINO_CACHE_TTL,
         timestamp: Date.now(),
       });
+      // 24 Hours in Redis - table NEVER sleeps or disappears from cache!
       await redisClient
-        .set(`html:${eventId}`, html, 600) // 10 Minutes in Redis
+        .set(`html:${eventId}`, html, 86400)
         .catch(() => {});
       console.log(
-        `[Stream Warmer] Pre-warmed & cached table ${eventId} in memory/Redis (TTL: 10m)`,
+        `[Stream Warmer] Pre-warmed & cached table ${eventId} in memory/Redis (TTL: 24h)`,
       );
-
-      // Invalidate the single-use ticket from watchlink cache since it is now redeemed into HTML
-      await invalidateWatchUrl(eventId);
 
       // Pre-warm ping handshake to acquire and cache the valid JWT token in tableTokenCache!
       const cfgMatch = html.match(
@@ -324,29 +394,31 @@ async function warmCasinoTable(eventId) {
                 body: pingBody,
               });
             }
-            const pingData = await pingRes.json();
-            if (pingData && pingData.token && pingData.wsUrl) {
-              const proxiedWs = getProxiedWsUrl(pingData.wsUrl);
-              const tokenPayload = {
-                token: pingData.token,
-                wsUrl: proxiedWs,
-                streamId:
-                  pingData.streamId ||
-                  (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) ||
-                  "GAME10",
-                expiresAt: resolveTokenExpiry(pingData.token),
-              };
-              tableTokenCache.set(eventId, tokenPayload);
-              await redisClient
-                .set(`table_token:${eventId}`, tokenPayload, 300) // 5 Minutes in Redis
-                .catch(() => {});
-              pingCache.set(targetUrl, {
-                data: { ...pingData, wsUrl: proxiedWs },
-                timestamp: Date.now(),
-              });
-              console.log(
-                `[Stream Warmer] Pre-warmed valid token & handshake for table ${eventId} (${tokenPayload.streamId}) in RAM & Redis`,
-              );
+            if (pingRes) {
+              const pingData = await pingRes.json().catch(() => null);
+              if (pingData && pingData.token && pingData.wsUrl) {
+                const proxiedWs = getProxiedWsUrl(pingData.wsUrl);
+                const tokenPayload = {
+                  token: pingData.token,
+                  wsUrl: proxiedWs,
+                  streamId:
+                    pingData.streamId ||
+                    (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) ||
+                    "GAME10",
+                  expiresAt: resolveTokenExpiry(pingData.token),
+                };
+                tableTokenCache.set(eventId, tokenPayload);
+                await redisClient
+                  .set(`table_token:${eventId}`, tokenPayload, 300) // 5 Minutes in Redis
+                  .catch(() => {});
+                pingCache.set(targetUrl, {
+                  data: { ...pingData, wsUrl: proxiedWs },
+                  timestamp: Date.now(),
+                });
+                console.log(
+                  `[Stream Warmer] Pre-warmed valid token & handshake for table ${eventId} (${tokenPayload.streamId}) in RAM & Redis`,
+                );
+              }
             }
           }
         } catch (_) {}
@@ -830,18 +902,15 @@ router.get("/player/:eventId", async (req, res) => {
           session,
         );
 
-        // Cache player HTML for 10 minutes in RAM and distributed Redis
+        // Cache player HTML for 24 hours in RAM and distributed Redis
         playerCache.set(`casino_${eventId}`, {
           html,
-          expiresAt: Date.now() + 600000,
+          expiresAt: Date.now() + CASINO_CACHE_TTL,
           timestamp: Date.now(),
         });
         redisClient
-          .set(`html:${eventId}`, html, 600) // 10 Minutes in Redis
+          .set(`html:${eventId}`, html, 86400) // 24 Hours in Redis - Never sleeps!
           .catch(() => {});
-
-        // Since this one-time ticket is now consumed into HTML, invalidate raw watchlink from cache
-        await invalidateWatchUrl(eventId);
 
         // Fast pre-warm initial ping handshake before returning HTML so client gets 0ms ping!
         const cfgMatch = html.match(
