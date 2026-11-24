@@ -174,77 +174,29 @@ async function warmCasinoTable(eventId, forceFresh = false) {
   }
 
   try {
-    // 1. FAST PATH: Check if we already have valid HTML in Redis (only when not force-refreshing)
+    // 1. FAST PATH: Check if we already have valid HTML & active token in Redis (0 proxy calls!)
     if (!forceFresh) {
       let existingHtml = await redisClient.get(`html:${eventId}`);
-      if (existingHtml && typeof existingHtml === "string" && existingHtml.includes("cfg")) {
-        try {
-          const cfgMatch = existingHtml.match(
-            /<script type="application\/json" id="cfg">([^<]+)<\/script>/,
-          );
-          if (cfgMatch) {
-            const cfg = JSON.parse(cfgMatch[1]);
-            const targetUrl = cfg.pingUrl.includes("target=")
-              ? decodeURIComponent(
-                  new URL(cfg.pingUrl, "http://localhost").searchParams.get(
-                    "target",
-                  ),
-                )
-              : cfg.pingUrl;
-            if (targetUrl) {
-              const pingBody = JSON.stringify({
-                sid: cfg.sid,
-                mode: "connecting",
-                init: true,
-                page: "https://nice444.com/",
-                tz: "Asia/Kolkata",
-                tzo: 330,
-              });
+      let existingToken =
+        tableTokenCache.get(eventId) ||
+        (await redisClient.get(`table_token:${eventId}`).catch(() => null));
 
-              // Direct VPS fetch to Platin CDN (Ultra-fast 10ms, 0 MB proxy!)
-              let pingRes = await directFetch(targetUrl, {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  Origin: new URL(targetUrl).origin,
-                  Referer: targetUrl,
-                  "User-Agent": UA,
-                  Accept: "*/*",
-                },
-                body: pingBody,
-                timeout: 3000,
-              }).catch(() => null);
-
-              if (pingRes && pingRes.ok) {
-                const pingData = await pingRes.json().catch(() => null);
-                if (pingData && pingData.token && !pingData.stop) {
-                  const proxiedWs = getProxiedWsUrl(pingData.wsUrl);
-                  const tokenPayload = {
-                    token: pingData.token,
-                    wsUrl: proxiedWs,
-                    streamId:
-                      pingData.streamId ||
-                      (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) ||
-                      "GAME10",
-                    expiresAt: resolveTokenExpiry(pingData.token),
-                  };
-                  tableTokenCache.set(eventId, tokenPayload);
-                  await redisClient.set(`table_token:${eventId}`, tokenPayload, 300).catch(() => {});
-                  playerCache.set(`casino_${eventId}`, {
-                    html: existingHtml,
-                    expiresAt: Date.now() + CASINO_CACHE_TTL,
-                    timestamp: Date.now(),
-                  });
-                  await redisClient.set(`html:${eventId}`, existingHtml, 900).catch(() => {});
-                  return true;
-                }
-              }
-              // If ping failed or returned stop, purge dead HTML immediately!
-              await redisClient.del(`html:${eventId}`).catch(() => {});
-              playerCache.delete(`casino_${eventId}`);
-            }
-          }
-        } catch (_) {}
+      if (
+        existingHtml &&
+        typeof existingHtml === "string" &&
+        existingHtml.includes("cfg") &&
+        !existingHtml.includes("Access blocked") &&
+        existingToken &&
+        existingToken.token &&
+        Date.now() < (existingToken.expiresAt || 0)
+      ) {
+        tableTokenCache.set(eventId, existingToken);
+        playerCache.set(`casino_${eventId}`, {
+          html: existingHtml,
+          expiresAt: Date.now() + CASINO_CACHE_TTL,
+          timestamp: Date.now(),
+        });
+        return true;
       }
     }
 
@@ -370,12 +322,29 @@ async function warmCasinoTable(eventId, forceFresh = false) {
                 };
                 tableTokenCache.set(eventId, tokenPayload);
                 await redisClient
-                  .set(`table_token:${eventId}`, tokenPayload, 300) // 5 Minutes in Redis
+                  .set(`table_token:${eventId}`, tokenPayload, 900) // 15 Minutes in Redis
                   .catch(() => {});
                 pingCache.set(targetUrl, {
                   data: { ...pingData, wsUrl: proxiedWs },
                   timestamp: Date.now(),
                 });
+
+                // Inject token & wsUrl into HTML so subsequent hits get immediate ready-to-play HTML!
+                cfg.token = pingData.token;
+                cfg.wsUrl = proxiedWs;
+                html = html.replace(
+                  /<script type="application\/json" id="cfg">[^<]+<\/script>/,
+                  `<script type="application/json" id="cfg">${JSON.stringify(cfg)}</script>`,
+                );
+                playerCache.set(`casino_${eventId}`, {
+                  html,
+                  expiresAt: Date.now() + CASINO_CACHE_TTL,
+                  timestamp: Date.now(),
+                });
+                await redisClient
+                  .set(`html:${eventId}`, html, 900)
+                  .catch(() => {});
+
                 console.log(
                   `[Stream Warmer] Pre-warmed valid token & handshake for table ${eventId} (${tokenPayload.streamId}) in RAM & Redis`,
                 );
@@ -456,10 +425,12 @@ async function runContinuousWarmerCycle() {
   }
 }
 
-// Initial warm cycle immediately after boot
-setTimeout(runContinuousWarmerCycle, 200);
-// Recurring background keeper every 2.5 minutes (150 seconds)
-setInterval(runContinuousWarmerCycle, 150000);
+// On boot: Pre-warm primary table once so the first user gets instant response.
+// All other tables are fetched ON-DEMAND when clicked by users.
+// Continuous background loops disabled: saves 99% proxy bandwidth & eliminates proxy drain!
+setTimeout(() => {
+  warmCasinoTable("99.0010").catch(() => {});
+}, 1000);
 
 // Health Check & Monitoring API (Real-Time Provider Observability)
 router.get("/health", async (req, res) => {
@@ -920,7 +891,7 @@ router.get("/player/:eventId", async (req, res) => {
                 };
                 tableTokenCache.set(eventId, tokenPayload);
                 redisClient
-                  .set(`table_token:${eventId}`, tokenPayload, 300) // 5 minutes in Redis
+                  .set(`table_token:${eventId}`, tokenPayload, 900) // 15 minutes in Redis
                   .catch(() => {});
                 pingCache.set(targetUrl, { data: { ...data, wsUrl: proxiedWs }, timestamp: Date.now() });
 
@@ -931,6 +902,16 @@ router.get("/player/:eventId", async (req, res) => {
                   /<script type="application\/json" id="cfg">[^<]+<\/script>/,
                   `<script type="application/json" id="cfg">${JSON.stringify(cfg)}</script>`,
                 );
+
+                // Update caches with token-injected HTML so subsequent hits get immediate ready-to-play stream
+                playerCache.set(`casino_${eventId}`, {
+                  html,
+                  expiresAt: Date.now() + CASINO_CACHE_TTL,
+                  timestamp: Date.now(),
+                });
+                redisClient
+                  .set(`html:${eventId}`, html, 900)
+                  .catch(() => {});
               }
             }
           } catch (_) {}
@@ -1300,28 +1281,62 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
   const fallbackStreamId =
     eventId && GAME_MAP[eventId] ? GAME_MAP[eventId].streamId : "GAME10";
   const isInit = Boolean(req.body?.init);
-  const isConnecting = req.body?.mode === "connecting";
-  const isRoutineHeartbeat =
-    !isInit && !isConnecting && req.body?.mode === "playing";
 
-  // 1. FAST RAM PATH FOR ROUTINE HEARTBEATS:
-  // If the player is already streaming (mode: 'playing'), reply from RAM in 0ms!
-  // This shields Webshare proxy from millions of routine pings!
-  if (isRoutineHeartbeat) {
-    const cachedToken = (eventId && tableTokenCache.get(eventId)?.token) || "";
-    const cachedWs = (eventId && tableTokenCache.get(eventId)?.wsUrl) || fallbackWsUrl;
+  // 1. FAST ZERO-PROXY PATH FOR ALL ROUTINE HEARTBEATS (!isInit):
+  // When a player is running, it pings every 3-5 seconds.
+  // Replying locally in 0ms saves 99% of proxy requests and stops proxy quota drain!
+  if (!isInit) {
+    let cachedObj = tableTokenCache.get(eventId);
+    if (!cachedObj || !cachedObj.token) {
+      try {
+        const redisData = await redisClient.get(`table_token:${eventId}`);
+        if (redisData && redisData.token) cachedObj = redisData;
+      } catch (_) {}
+    }
+    const token = cachedObj?.token || "";
+    const ws = cachedObj?.wsUrl || fallbackWsUrl;
+    const streamId =
+      cachedObj?.streamId ||
+      (eventId && GAME_MAP[eventId]?.streamId) ||
+      fallbackStreamId;
+
     return res.status(200).json({
       ok: true,
       state: "live",
-      streamId: (eventId && GAME_MAP[eventId]?.streamId) || fallbackStreamId,
-      token: cachedToken,
-      wsUrl: getProxiedWsUrl(cachedWs),
+      streamId: streamId,
+      token: token,
+      wsUrl: getProxiedWsUrl(ws),
       maintenance: null,
       stop: false,
     });
   }
 
-  // 2. FOR DIRECT/RAW HIT WITHOUT TARGET URL (e.g. manual curl test or fallback):
+  // 2. FAST ZERO-PROXY PATH FOR INIT PINGS WITH ACTIVE TOKEN:
+  if (isInit && eventId) {
+    let cachedObj = tableTokenCache.get(eventId);
+    if (!cachedObj || !cachedObj.token || Date.now() >= (cachedObj.expiresAt || 0)) {
+      try {
+        const redisData = await redisClient.get(`table_token:${eventId}`);
+        if (redisData && redisData.token && Date.now() < (redisData.expiresAt || 0)) {
+          cachedObj = redisData;
+          tableTokenCache.set(eventId, cachedObj);
+        }
+      } catch (_) {}
+    }
+    if (cachedObj && cachedObj.token && Date.now() < (cachedObj.expiresAt || 0)) {
+      return res.status(200).json({
+        ok: true,
+        state: "live",
+        streamId: cachedObj.streamId || fallbackStreamId,
+        wsUrl: getProxiedWsUrl(cachedObj.wsUrl || fallbackWsUrl),
+        token: cachedObj.token,
+        maintenance: null,
+        stop: false,
+      });
+    }
+  }
+
+  // 3. FOR DIRECT/RAW HIT WITHOUT TARGET URL (e.g. manual curl test or fallback):
   const rawTarget = req.query.target;
   if (!rawTarget) {
     let cached = tableTokenCache.get(eventId);
@@ -1463,7 +1478,7 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
             };
             tableTokenCache.set(eventId, tokenPayload);
             redisClient
-              .set(`table_token:${eventId}`, tokenPayload, 300) // 5 minutes in Redis
+              .set(`table_token:${eventId}`, tokenPayload, 900) // 15 minutes in Redis
               .catch(() => {});
             pingCache.set(targetUrl, {
               data: pingResData,
