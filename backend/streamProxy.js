@@ -1377,7 +1377,9 @@ router.post("/evict", express.json(), async (req, res) => {
     return res.status(400).json({ ok: false, error: "eventId is required" });
   }
 
-  console.warn(`[Stream Evict] ⚡ Table ${eventId} evicted by canary watchdog (Reason: ${reason})`);
+  console.warn(
+    `[Stream Evict] ⚡ Table ${eventId} evicted by canary watchdog (Reason: ${reason})`,
+  );
 
   try {
     // 1. Evict from local RAM cache
@@ -1396,14 +1398,17 @@ router.post("/evict", express.json(), async (req, res) => {
 
     // 4. Pre-fetch fresh stream link asynchronously from failover pool so subsequent requests are 0ms
     getWatchUrl(eventId, { forceFresh: true }).catch((err) => {
-      console.warn(`[Stream Evict] Background re-harvest for ${eventId}:`, err.message);
+      console.warn(
+        `[Stream Evict] Background re-harvest for ${eventId}:`,
+        err.message,
+      );
     });
 
     return res.status(200).json({
       ok: true,
       eventId,
       reason,
-      evictedAt: new Date().toISOString()
+      evictedAt: new Date().toISOString(),
     });
   } catch (err) {
     console.error(`[Stream Evict] Error evicting table ${eventId}:`, err);
