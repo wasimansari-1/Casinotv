@@ -147,18 +147,22 @@ function resolveTokenExpiry(token, fallbackMs = 600000) {
 }
 
 // Helper: Return proxied WebSocket URL so browsers never get blocked by upstream Origin 403 checks
-const fallbackWsUrl = `/api/stream/ws?target=${encodeURIComponent('wss://livecdnplatin.com/UNIVERSE-GE/websocket')}`;
-function getProxiedWsUrl(originalWsUrl, defaultHost = 'livecdnplatin.com') {
+const fallbackWsUrl = `/api/stream/ws?target=${encodeURIComponent("wss://livecdnplatin.com/UNIVERSE-GE/websocket")}`;
+function getProxiedWsUrl(originalWsUrl, defaultHost = "livecdnplatin.com") {
   if (!originalWsUrl) return fallbackWsUrl;
   let clean = String(originalWsUrl).trim();
-  if (clean.startsWith('/api/stream/ws')) return clean;
-  if (clean === 'edge' || clean.startsWith('edge/') || clean.startsWith('/edge/')) {
+  if (clean.startsWith("/api/stream/ws")) return clean;
+  if (
+    clean === "edge" ||
+    clean.startsWith("edge/") ||
+    clean.startsWith("/edge/")
+  ) {
     clean = `wss://${defaultHost}/UNIVERSE-GE/websocket`;
-  } else if (clean.startsWith('//')) {
+  } else if (clean.startsWith("//")) {
     clean = `wss:${clean}`;
-  } else if (clean.startsWith('/')) {
+  } else if (clean.startsWith("/")) {
     clean = `wss://${defaultHost}${clean}`;
-  } else if (!clean.startsWith('ws://') && !clean.startsWith('wss://')) {
+  } else if (!clean.startsWith("ws://") && !clean.startsWith("wss://")) {
     clean = `wss://${defaultHost}/${clean}`;
   }
   return `/api/stream/ws?target=${encodeURIComponent(clean)}`;
@@ -258,9 +262,7 @@ async function warmCasinoTable(eventId, forceFresh = false) {
         timestamp: Date.now(),
       });
       // 15 Minutes in Redis - Fresh session active and ready
-      await redisClient
-        .set(`html:${eventId}`, html, 900)
-        .catch(() => {});
+      await redisClient.set(`html:${eventId}`, html, 900).catch(() => {});
       console.log(
         `[Stream Warmer] Pre-warmed & cached table ${eventId} in memory/Redis (TTL: 15m)`,
       );
@@ -407,7 +409,9 @@ async function runContinuousWarmerCycle() {
 
   try {
     const tableIds = Object.keys(GAME_MAP);
-    console.log(`[Stream Warmer Daemon] Starting autonomous background refresh for all ${tableIds.length} tables...`);
+    console.log(
+      `[Stream Warmer Daemon] Starting autonomous background refresh for all ${tableIds.length} tables...`,
+    );
     const batchSize = 3;
     for (let i = 0; i < tableIds.length; i += batchSize) {
       const batch = tableIds.slice(i, i + batchSize);
@@ -416,7 +420,9 @@ async function runContinuousWarmerCycle() {
         await new Promise((r) => setTimeout(r, 350));
       }
     }
-    console.log(`[Stream Warmer Daemon] Cycle completed: all ${tableIds.length} tables active in Redis & RAM.`);
+    console.log(
+      `[Stream Warmer Daemon] Cycle completed: all ${tableIds.length} tables active in Redis & RAM.`,
+    );
   } catch (err) {
     console.warn("[Stream Warmer Daemon] Warning during cycle:", err.message);
   } finally {
@@ -522,7 +528,9 @@ function transformPlayerHtml(
   `;
 
   // Client-Side Anti-Theft Ancestor & Embedding Lock (Prevents reseller nested-iframes and cross-site wrapping)
-  const allowedOriginsJson = JSON.stringify(securityEngine.getAllowedDomainsList());
+  const allowedOriginsJson = JSON.stringify(
+    securityEngine.getAllowedDomainsList(),
+  );
   const antiTheftGuardScript = `
     <script>
       (function(){
@@ -548,7 +556,10 @@ function transformPlayerHtml(
       })();
     </script>
   `;
-  html = html.replace("</head>", `${cleanWatermarkStyle}\n${antiTheftGuardScript}\n</head>`);
+  html = html.replace(
+    "</head>",
+    `${cleanWatermarkStyle}\n${antiTheftGuardScript}\n</head>`,
+  );
 
   // 2. Extract and modify the embedded JSON config
   const cfgMatch = html.match(
@@ -704,13 +715,18 @@ router.get("/player/:eventId", async (req, res) => {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       res.setHeader("Permissions-Policy", "unload=*");
-      res.setHeader("Content-Security-Policy", securityEngine.getFrameAncestorsCSP());
+      res.setHeader(
+        "Content-Security-Policy",
+        securityEngine.getFrameAncestorsCSP(),
+      );
       return res.send(cached.html);
     }
 
     // 2. Check distributed Redis cache (shared across PM2 workers) - verify active token!
     const redisHtml = await redisClient.get(`html:${eventId}`);
-    const redisToken = await redisClient.get(`table_token:${eventId}`).catch(() => null);
+    const redisToken = await redisClient
+      .get(`table_token:${eventId}`)
+      .catch(() => null);
     if (
       redisHtml &&
       typeof redisHtml === "string" &&
@@ -728,7 +744,10 @@ router.get("/player/:eventId", async (req, res) => {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       res.setHeader("Permissions-Policy", "unload=*");
-      res.setHeader("Content-Security-Policy", securityEngine.getFrameAncestorsCSP());
+      res.setHeader(
+        "Content-Security-Policy",
+        securityEngine.getFrameAncestorsCSP(),
+      );
       return res.send(redisHtml);
     }
   }
@@ -740,7 +759,10 @@ router.get("/player/:eventId", async (req, res) => {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       res.setHeader("Permissions-Policy", "unload=*");
-      res.setHeader("Content-Security-Policy", securityEngine.getFrameAncestorsCSP());
+      res.setHeader(
+        "Content-Security-Policy",
+        securityEngine.getFrameAncestorsCSP(),
+      );
       return res.send(html);
     } catch (_) {}
   }
@@ -893,7 +915,10 @@ router.get("/player/:eventId", async (req, res) => {
                 redisClient
                   .set(`table_token:${eventId}`, tokenPayload, 900) // 15 minutes in Redis
                   .catch(() => {});
-                pingCache.set(targetUrl, { data: { ...data, wsUrl: proxiedWs }, timestamp: Date.now() });
+                pingCache.set(targetUrl, {
+                  data: { ...data, wsUrl: proxiedWs },
+                  timestamp: Date.now(),
+                });
 
                 // Also inject active token and wsUrl directly into cfg so browser plays immediately!
                 cfg.token = data.token;
@@ -909,9 +934,7 @@ router.get("/player/:eventId", async (req, res) => {
                   expiresAt: Date.now() + CASINO_CACHE_TTL,
                   timestamp: Date.now(),
                 });
-                redisClient
-                  .set(`html:${eventId}`, html, 900)
-                  .catch(() => {});
+                redisClient.set(`html:${eventId}`, html, 900).catch(() => {});
               }
             }
           } catch (_) {}
@@ -935,7 +958,10 @@ router.get("/player/:eventId", async (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     res.setHeader("Permissions-Policy", "unload=*");
-    res.setHeader("Content-Security-Policy", securityEngine.getFrameAncestorsCSP());
+    res.setHeader(
+      "Content-Security-Policy",
+      securityEngine.getFrameAncestorsCSP(),
+    );
     return res.send(html);
   } catch (err) {
     // Resilient fallback: If upstream failed, serve previously cached HTML if available
@@ -948,7 +974,10 @@ router.get("/player/:eventId", async (req, res) => {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       res.setHeader("Permissions-Policy", "unload=*");
-      res.setHeader("Content-Security-Policy", securityEngine.getFrameAncestorsCSP());
+      res.setHeader(
+        "Content-Security-Policy",
+        securityEngine.getFrameAncestorsCSP(),
+      );
       return res.send(stale.html);
     }
 
@@ -989,7 +1018,10 @@ router.get("/sports/player/:eventId", async (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     res.setHeader("Permissions-Policy", "unload=*");
-    res.setHeader("Content-Security-Policy", securityEngine.getFrameAncestorsCSP());
+    res.setHeader(
+      "Content-Security-Policy",
+      securityEngine.getFrameAncestorsCSP(),
+    );
     return res.send(cached.html);
   }
 
@@ -1034,7 +1066,10 @@ router.get("/sports/player/:eventId", async (req, res) => {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       res.setHeader("Permissions-Policy", "unload=*");
-      res.setHeader("Content-Security-Policy", securityEngine.getFrameAncestorsCSP());
+      res.setHeader(
+        "Content-Security-Policy",
+        securityEngine.getFrameAncestorsCSP(),
+      );
 
       return res.send(html);
     } catch (err) {
@@ -1161,14 +1196,11 @@ function getPatchedPlayerJs() {
   // 8. Instant 300ms Auto-Reconnect (Replaces 15s - 30s penalty backoff with instant 0.3s retry)
   text = text.replace(
     /this\.reconnectTimer\s*=\s*setTimeout\(\(\)\s*=>\s*this\.retryNow\(\),\s*r\)/g,
-    'this.reconnectTimer = setTimeout(() => this.retryNow(), 300)',
+    "this.reconnectTimer = setTimeout(() => this.retryNow(), 300)",
   );
 
   // 9. Preserve everPlayed flag across socket jitter (Prevents recurring loader screens)
-  text = text.replace(
-    /\(this\.everPlayed\s*=\s*!1\)/g,
-    '(void 0)',
-  );
+  text = text.replace(/\(this\.everPlayed\s*=\s*!1\)/g, "(void 0)");
 
   _cachedPatchedPlayerJs = text;
   return text;
@@ -1266,11 +1298,64 @@ router.get("/player-assets/:asset", async (req, res) => {
   }
 });
 
+// ============================================================================
+// 80-Year Systems Architecture: Dynamic Stream Eviction & Autonomous Re-Harvesting
+// ============================================================================
+// Called by Client Canary Watchdog or Admin when a stream stalls or a token expires.
+// 1. Instantly flushes stale token & HTML cache from Redis and local RAM.
+// 2. Triggers the 0.1s Failover Brain to acquire a fresh stream link from the backup pool.
+// 3. Viewers NEVER need a User ID - everything is multiplexed through our single-flight engine.
+// 4. Zero-Proxy Direct Mobile Emulation ensures upstream accepts connection without third-party proxies.
+router.post("/evict", express.json(), async (req, res) => {
+  const eventId = String(req.body?.eventId || req.query?.eventId || "").trim();
+  const reason = String(req.body?.reason || "client_canary_stalled").trim();
+
+  if (!eventId) {
+    return res.status(400).json({ ok: false, error: "eventId is required" });
+  }
+
+  console.warn(`[Stream Evict] ⚡ Table ${eventId} evicted by canary watchdog (Reason: ${reason})`);
+
+  try {
+    // 1. Evict from local RAM cache
+    playerCache.delete(`casino_${eventId}`);
+    tableTokenCache.delete(eventId);
+    inFlightPlayers.delete(eventId);
+
+    // 2. Evict from distributed Redis cache
+    await redisClient.del(`html:${eventId}`).catch(() => {});
+    await redisClient.del(`table_token:${eventId}`).catch(() => {});
+    await redisClient.del(`watchlink:${eventId}`).catch(() => {});
+
+    // 3. Invalidate watch URL in streamCore and trip rotation
+    await invalidateWatchUrl(eventId).catch(() => {});
+    rotateTableSession(eventId, `Canary eviction: ${reason}`);
+
+    // 4. Pre-fetch fresh stream link asynchronously from failover pool so subsequent requests are 0ms
+    getWatchUrl(eventId, { forceFresh: true }).catch((err) => {
+      console.warn(`[Stream Evict] Background re-harvest for ${eventId}:`, err.message);
+    });
+
+    return res.status(200).json({
+      ok: true,
+      eventId,
+      reason,
+      evictedAt: new Date().toISOString()
+    });
+  } catch (err) {
+    console.error(`[Stream Evict] Error evicting table ${eventId}:`, err);
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // 9. Upstream Ping Proxy (/api/stream/proxy-ping)
 router.post("/proxy-ping", express.json(), async (req, res) => {
   const access = await securityEngine.verifyAccess(req, "casino");
   if (!access.allowed) {
-    return res.status(403).json({ error: "Unauthorized: Domain or IP not whitelisted", reason: access.reason });
+    return res.status(403).json({
+      error: "Unauthorized: Domain or IP not whitelisted",
+      reason: access.reason,
+    });
   }
 
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -1314,16 +1399,28 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
   // 2. FAST ZERO-PROXY PATH FOR INIT PINGS WITH ACTIVE TOKEN:
   if (isInit && eventId) {
     let cachedObj = tableTokenCache.get(eventId);
-    if (!cachedObj || !cachedObj.token || Date.now() >= (cachedObj.expiresAt || 0)) {
+    if (
+      !cachedObj ||
+      !cachedObj.token ||
+      Date.now() >= (cachedObj.expiresAt || 0)
+    ) {
       try {
         const redisData = await redisClient.get(`table_token:${eventId}`);
-        if (redisData && redisData.token && Date.now() < (redisData.expiresAt || 0)) {
+        if (
+          redisData &&
+          redisData.token &&
+          Date.now() < (redisData.expiresAt || 0)
+        ) {
           cachedObj = redisData;
           tableTokenCache.set(eventId, cachedObj);
         }
       } catch (_) {}
     }
-    if (cachedObj && cachedObj.token && Date.now() < (cachedObj.expiresAt || 0)) {
+    if (
+      cachedObj &&
+      cachedObj.token &&
+      Date.now() < (cachedObj.expiresAt || 0)
+    ) {
       return res.status(200).json({
         ok: true,
         state: "live",
@@ -1384,7 +1481,7 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
       ) {
         return res.status(200).json({
           ...cachedPing.data,
-          wsUrl: getProxiedWsUrl(cachedPing.data.wsUrl)
+          wsUrl: getProxiedWsUrl(cachedPing.data.wsUrl),
         });
       }
     }
@@ -1510,7 +1607,11 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
       );
       await warmCasinoTable(eventId, true);
       const freshToken = tableTokenCache.get(eventId);
-      if (freshToken && freshToken.token && Date.now() < (freshToken.expiresAt || 0)) {
+      if (
+        freshToken &&
+        freshToken.token &&
+        Date.now() < (freshToken.expiresAt || 0)
+      ) {
         return res.status(200).json({
           ok: true,
           state: "live",
@@ -1525,7 +1626,8 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
 
     // Fallback if warmCasinoTable couldn't get token - check validity
     const cachedObj = eventId ? tableTokenCache.get(eventId) : null;
-    const isTokenValid = cachedObj && cachedObj.token && Date.now() < (cachedObj.expiresAt || 0);
+    const isTokenValid =
+      cachedObj && cachedObj.token && Date.now() < (cachedObj.expiresAt || 0);
     const cachedToken = isTokenValid ? cachedObj.token : "";
     const cachedWs = (cachedObj && cachedObj.wsUrl) || fallbackWsUrl;
     return res.status(200).json({
@@ -1539,7 +1641,8 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
     });
   } catch (err) {
     const cachedObj = eventId ? tableTokenCache.get(eventId) : null;
-    const isTokenValid = cachedObj && cachedObj.token && Date.now() < (cachedObj.expiresAt || 0);
+    const isTokenValid =
+      cachedObj && cachedObj.token && Date.now() < (cachedObj.expiresAt || 0);
     const cachedToken = isTokenValid ? cachedObj.token : "";
     const cachedWs = (cachedObj && cachedObj.wsUrl) || fallbackWsUrl;
     return res.status(200).json({

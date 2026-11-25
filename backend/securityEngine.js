@@ -636,9 +636,10 @@ function renderUnauthorizedScreen(domain, streamType, reason, customHeading) {
 // AUTH TOKEN HELPER FOR /master ROUTE
 // -------------------------------------------------------------
 function generateToken(user) {
-  const payload = `${user}:${Date.now()}:${JWT_SECRET}`;
+  const ts = Date.now();
+  const payload = `${user}:${ts}:${JWT_SECRET}`;
   const hmac = crypto.createHmac('sha256', JWT_SECRET).update(payload).digest('hex');
-  return Buffer.from(`${user}:${Date.now()}:${hmac}`).toString('base64');
+  return Buffer.from(`${user}:${ts}:${hmac}`).toString('base64');
 }
 
 function verifyToken(token) {

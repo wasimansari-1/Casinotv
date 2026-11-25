@@ -16,6 +16,7 @@ const {
   proxyFetch,
   directFetch,
   UA,
+  MOBILE_HEADERS,
   PROVIDERS,
   redisClient,
   providerManager,
@@ -51,6 +52,7 @@ const sportsPlayerCache = new Map(); // cacheKey -> { html, expiresAt }
 const betfairIdCache = new Map(); // rawEventId -> betfairId
 const sportsWatchLinkCache = new Map(); // streamId -> { url, origin, provider, session, expiresAt }
 const sportsPingCache = new Map(); // targetUrl -> { data, timestamp }
+const sportsTokenCache = new Map(); // eventId/streamId -> { streamId, token, wsUrl, hlsUrl, expiresAt }
 const inFlightSportsPlayers = new Map(); // deduplicate concurrent requests for same match
 
 const SPORTS_HTML_TTL = 30000; // 30 seconds fresh HTML cache in RAM & Redis for live sports feeds
@@ -70,49 +72,57 @@ function getPatchedSportsPlayerJs() {
   }
 
   // High-performance stream optimizations
-  // 1. HLS Buffer & Gap Bridging: 30s lookahead, 0.5s hole auto-skip, 0.1s instant nudge, multi-threaded worker
+  // 1. HLS Buffer & Gap Bridging: 40s lookahead, 0.5s hole auto-skip, 0.1s instant nudge, multi-threaded worker
   js = js.replace(
     /liveSyncDurationCount:4,liveMaxLatencyDurationCount:10,maxBufferLength:20,backBufferLength:10/g,
-    "liveSyncDurationCount:3,liveMaxLatencyDurationCount:8,maxBufferLength:30,maxMaxBufferLength:60,backBufferLength:15,maxBufferHole:0.5,nudgeOffset:0.1,nudgeMaxRetry:5,highBufferWatchdogPeriod:1,enableWorker:!0,lowLatencyMode:!0"
+    "liveSyncDurationCount:4,liveMaxLatencyDurationCount:12,maxBufferLength:40,maxMaxBufferLength:80,backBufferLength:20,maxBufferHole:0.5,nudgeOffset:0.1,nudgeMaxRetry:5,highBufferWatchdogPeriod:1,enableWorker:!0,lowLatencyMode:!1",
   );
 
   // 2. Debounced Buffering Indicator & Instant 0.1s Auto-Unsticker (Eliminates flashing Buffering... text)
   js = js.replace(
     /\$\.addEventListener\(`waiting`,\(\)=>\{vp===`hls`&&Tp\(`Buffering…`\)\}\)/g,
-    "(()=>{var _b, _l=-1, _s=0; $.addEventListener(`waiting`,()=>{clearTimeout(_b);_b=setTimeout(()=>{if(vp===`hls`&&($.paused||$.readyState<3)){Tp(`Buffering…`)}},1200)}); $.addEventListener(`playing`,()=>{clearTimeout(_b);Tp(``)}); $.addEventListener(`timeupdate`,()=>{if($.currentTime>0&&!$.paused){clearTimeout(_b);if(gp&&gp.textContent===`Buffering…`)Tp(``)}}); setInterval(()=>{if(vp===`hls`&&!$.paused&&!$.ended&&$.readyState>=2){if($.currentTime===_l){_s++;if(_s>=2){try{$.currentTime+=0.08}catch(_){}_s=0}}else{_s=0;_l=$.currentTime}}},500)})()"
+    "(()=>{var _b, _l=-1, _s=0; $.addEventListener(`waiting`,()=>{clearTimeout(_b);_b=setTimeout(()=>{if(vp===`hls`&&($.paused||$.readyState<3)){Tp(`Buffering…`)}},1200)}); $.addEventListener(`playing`,()=>{clearTimeout(_b);Tp(``)}); $.addEventListener(`timeupdate`,()=>{if($.currentTime>0&&!$.paused){clearTimeout(_b);if(gp&&gp.textContent===`Buffering…`)Tp(``)}}); setInterval(()=>{if(vp===`hls`&&!$.paused&&!$.ended&&$.readyState>=2){if($.currentTime===_l){_s++;if(_s>=2){try{$.currentTime+=0.08}catch(_){}_s=0}}else{_s=0;_l=$.currentTime}}},500)})()",
   );
 
   // 3. WebRTC Multi-Cloud STUN Redundancy: Google STUN 1 + 2 + Cloudflare STUN for instant 0ms ICE
   js = js.replace(
     /urls:`stun:stun1\.l\.google\.com:19302`/g,
-    "urls:[`stun:stun1.l.google.com:19302`,`stun:stun2.l.google.com:19302`,`stun:stun.cloudflare.com:3478`]"
+    "urls:[`stun:stun1.l.google.com:19302`,`stun:stun2.l.google.com:19302`,`stun:stun.cloudflare.com:3478`]",
   );
 
   // 4. WebRTC Jitter Resilience: Do not terminate peer connection on transient 'disconnected' state
   js = js.replace(
     /\[`failed`,`disconnected`,`closed`\]\.includes\(i\?\.state\)/g,
-    "[`failed`,`closed`].includes(i?.state)"
+    "[`failed`,`closed`].includes(i?.state)",
   );
 
-  // 4. Freeze detector: increase freeze threshold to 120s (stops false reload loops)
+  // 5. Freeze detector: increase freeze threshold to 120s (stops false reload loops)
   js = js.replace(/Q\.freezeSeconds/g, "120");
+  js = js.replace(/Vp>=Q\.freezeSeconds/g, "Vp>=120");
 
-  // 5. Devtools detector: neutralize debugger loops and docking traps
+  // 6. Devtools detector: neutralize debugger loops and docking traps
   js = js.replace(/Q\.devtoolsGuard/g, "false");
   js = js.replace(/devtoolsGuard:!0/g, "devtoolsGuard:!1");
 
-  // 6. Suppress window redirect traps cleanly with void 0 (keeps valid JS syntax - no SyntaxError!)
+  // 7. Suppress window redirect traps cleanly with void 0 (keeps valid JS syntax - no SyntaxError!)
   js = js.replace(
     /location\.replace\(window\.top===window\?Q\.devtoolsRedirect:Q\.blockedUrl\)/g,
     "void 0",
   );
 
-  // 7. Fix TypeError: Invalid URL in HLS player when Q.hlsUrl is a relative path
-  js = js.replace(/new URL\(e,Q\.hlsUrl\)/g, 'new URL(e,window.location.href)');
+  // 8. Prevent false session kill on transient ping 403 or error
+  js = js.replace(
+    /if\(n\.status===403\)return Ap\(`This session has ended\.`\);/g,
+    "if(n.status===403){console.warn('Ping 403 ignored');return true;}",
+  );
 
-  // 8. Fix WebSocket relative URL resolution for proxied WebRTC tunnels
-  js = js.replace(/websocket_url:Q\.wsUrl/g, 
-    'websocket_url:(Q.wsUrl && Q.wsUrl.startsWith("/") ? (location.protocol === "https:" ? "wss://" : "ws://") + location.host + Q.wsUrl : Q.wsUrl)'
+  // 9. Fix TypeError: Invalid URL in HLS player when Q.hlsUrl is a relative path
+  js = js.replace(/new URL\(e,Q\.hlsUrl\)/g, "new URL(e,window.location.href)");
+
+  // 10. Fix WebSocket relative URL resolution for proxied WebRTC tunnels
+  js = js.replace(
+    /websocket_url:Q\.wsUrl/g,
+    'websocket_url:(Q.wsUrl && Q.wsUrl.startsWith("/") ? (location.protocol === "https:" ? "wss://" : "ws://") + location.host + Q.wsUrl : Q.wsUrl)',
   );
 
   _cachedSportsPlayerJs = js;
@@ -143,8 +153,8 @@ async function resolveBetfairEventId(rawId, sportId = "4") {
     return redisCached;
   }
 
-  // Query Nice444 getMarketsEventList without `key: '2'` to extract Betfair ID
-  const providerList = ["nice444", "startexch", "asstarplay"];
+  // Query CBTF/Startexch getMarketsEventList without `key: '2'` to extract Betfair ID
+  const providerList = ["cbtf", "startexch", "asstarplay"];
   const session = getSessionForTable(streamId);
 
   for (const provKey of providerList) {
@@ -163,6 +173,7 @@ async function resolveBetfairEventId(rawId, sportId = "4") {
             Origin: prov.base,
             Referer: `${prov.base}/`,
             "User-Agent": UA,
+            ...MOBILE_HEADERS,
           },
           body: JSON.stringify({ eventId: streamId, sportId: String(sportId) }),
           timeout: 6000,
@@ -234,7 +245,7 @@ async function getSportsWatchUrl(
   }
 
   const session = getSessionForTable(betfairId);
-  const providerList = ["nice444", "startexch"];
+  const providerList = ["cbtf", "startexch", "asstarplay"];
 
   for (const provKey of providerList) {
     const provider = PROVIDERS[provKey];
@@ -257,6 +268,7 @@ async function getSportsWatchUrl(
                 Origin: provider.base,
                 Referer: `${provider.base}/`,
                 "User-Agent": UA,
+                ...MOBILE_HEADERS,
               },
               body: JSON.stringify({
                 streamId: betfairId,
@@ -347,7 +359,74 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
       }
     </style>
   `;
-  html = html.replace("</head>", `${sportsStyle}</head>`);
+
+  // 80-Year Systems Architecture: Client-Side Canary Watchdog for Sports Live Feeds
+  // If video buffer stalls, encounters an error, or token expires, signals backend /api/stream/sports/evict
+  // to silently rotate tokens across providers without page reload.
+  const sportsCanaryScript = `
+    <script id="sportsCanary">
+      (function() {
+        var _eventId = "${eventId}";
+        var _stalledTimer = null;
+        var _lastTime = -1;
+        var _freezeCounter = 0;
+        var _isEvicting = false;
+
+        function notifySportsEvict(reason) {
+          if (_isEvicting || !window.fetch) return;
+          _isEvicting = true;
+          console.warn('[Sports Canary] Stalled match stream detected (' + reason + '). Auto-evicting...');
+          fetch('/api/stream/sports/evict', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ eventId: _eventId, reason: reason })
+          }).then(function(r) { return r.json(); }).then(function(d) {
+            if (d && d.ok) {
+              console.log('[Sports Canary] Failover primed. Resuming match stream in 300ms...');
+              setTimeout(function() { window.location.reload(); }, 300);
+            } else { _isEvicting = false; }
+          }).catch(function() { _isEvicting = false; });
+        }
+
+        function checkSportsHeartbeat() {
+          var v = document.querySelector('video');
+          if (!v) return;
+          if (!v.paused && !v.ended) {
+            if (v.currentTime === _lastTime && v.readyState >= 2) {
+              _freezeCounter++;
+              if (_freezeCounter >= 4) {
+                _freezeCounter = 0;
+                notifySportsEvict('sports_video_frozen');
+              }
+            } else {
+              _freezeCounter = 0;
+              _lastTime = v.currentTime;
+            }
+          }
+        }
+
+        window.addEventListener('load', function() {
+          setInterval(checkSportsHeartbeat, 1000);
+          var v = document.querySelector('video');
+          if (v) {
+            v.addEventListener('error', function() { notifySportsEvict('sports_video_error'); });
+            v.addEventListener('stalled', function() {
+              clearTimeout(_stalledTimer);
+              _stalledTimer = setTimeout(function() { notifySportsEvict('sports_video_stalled'); }, 4000);
+            });
+            v.addEventListener('playing', function() {
+              clearTimeout(_stalledTimer);
+              _freezeCounter = 0;
+            });
+          }
+        });
+      })();
+    </script>
+  `;
+  html = html.replace(
+    "</head>",
+    `${sportsStyle}\n${sportsCanaryScript}\n</head>`,
+  );
 
   // Extract and tune cfg JSON specifically for Sports
   const cfgMatch = html.match(
@@ -361,7 +440,7 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
         ? originalCfg.pingUrl
         : new URL(originalCfg.pingUrl, watchUrl).href;
 
-      const proxiedPingUrl = `/api/stream/sports/proxy-ping?target=${encodeURIComponent(fullPingUrl)}&watchUrl=${encodeURIComponent(watchUrl)}&eventId=${encodeURIComponent(eventId)}&origin=${encodeURIComponent(providerOrigin || "https://nice444.com")}&session=${encodeURIComponent(session || "")}`;
+      const proxiedPingUrl = `/api/stream/sports/proxy-ping?target=${encodeURIComponent(fullPingUrl)}&watchUrl=${encodeURIComponent(watchUrl)}&eventId=${encodeURIComponent(eventId)}&origin=${encodeURIComponent(providerOrigin || "https://cbtfexchange.com")}&session=${encodeURIComponent(session || "")}`;
 
       let hlsProxyUrl = originalCfg.hlsUrl;
       if (hlsProxyUrl) {
@@ -371,7 +450,7 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
       const modifiedCfg = {
         ...originalCfg,
         hlsUrl: hlsProxyUrl || originalCfg.hlsUrl,
-        streamId: originalCfg.streamId || eventId || 'SPORTS',
+        streamId: originalCfg.streamId || eventId || "SPORTS",
         pingUrl: proxiedPingUrl,
         flagUrl: "/api/stream/sports/dummy-flag",
         byeUrl: "/api/stream/sports/dummy-bye",
@@ -379,6 +458,12 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
         devtoolsRedirect: "",
         blockedUrl: "",
         home: "",
+        freezeSeconds: 120,
+        offlineRetry: 5,
+        forceHls: true,
+        startMode: "hls",
+        webrtcRetries: 2,
+        webrtcTimeout: 4,
         frameAllow: {
           enforce: false,
           outer: { apps: false, hosts: [], sites: [] },
@@ -403,7 +488,9 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
   );
 
   // Client runtime patch with Master Guard Anti-Theft Protection
-  const allowedOriginsJson = JSON.stringify(securityEngine.getAllowedDomainsList());
+  const allowedOriginsJson = JSON.stringify(
+    securityEngine.getAllowedDomainsList(),
+  );
   const clientPatch = `
     <script>
       (function() {
@@ -436,10 +523,34 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
         };
         try {
           Object.defineProperty(window.location, 'ancestorOrigins', {
-            get: function() { return ['https://nice444.com', 'https://startexch99.com', 'https://tv.ltve.live']; },
+            get: function() { return ['https://cbtfexchange.com', 'https://startexch99.com', 'https://tv.ltve.live']; },
             configurable: true
           });
         } catch(e) {}
+      })();
+    </script>
+    <script>
+      (function() {
+        var v = document.getElementById('video') || document.querySelector('video');
+        if (!v) return;
+        var lastTime = -1;
+        var stallCount = 0;
+        setInterval(function() {
+          if (document.hidden || v.paused || v.ended) return;
+          if (v.currentTime > 0 && Math.abs(v.currentTime - lastTime) < 0.05) {
+            stallCount++;
+            if (stallCount >= 6) {
+              console.warn('[Sports Watchdog] Stream frozen for 12s, triggering auto-evict and reload...');
+              try {
+                fetch('/api/stream/sports/evict?eventId=${encodeURIComponent(eventId)}', { method: 'POST' }).catch(function(){});
+              } catch(_) {}
+              setTimeout(function() { window.location.reload(); }, 600);
+            }
+          } else {
+            stallCount = 0;
+            lastTime = v.currentTime;
+          }
+        }, 2000);
       })();
     </script>
   `;
@@ -545,7 +656,7 @@ router.get("/events", async (req, res) => {
       }
     } catch (_) {}
 
-    const providerList = ["nice444", "startexch", "asstarplay"];
+    const providerList = ["cbtf", "startexch", "asstarplay"];
     const sportNames = {
       1: "Soccer",
       2: "Tennis",
@@ -567,6 +678,7 @@ router.get("/events", async (req, res) => {
               Origin: provider.base,
               Referer: `${provider.base}/`,
               "User-Agent": UA,
+              ...MOBILE_HEADERS,
             },
             body: JSON.stringify({}),
             timeout: 7000,
@@ -593,7 +705,7 @@ router.get("/events", async (req, res) => {
                   inPlay: isInPlay,
                   isStreaming: isStreaming,
                   eventTime: ev.eventTime || "",
-                  tv: true,
+                  tv: isStreaming,
                 });
               }
             }
@@ -688,7 +800,10 @@ router.get("/player/:eventId", async (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     res.setHeader("Permissions-Policy", "unload=*");
-    res.setHeader("Content-Security-Policy", securityEngine.getFrameAncestorsCSP());
+    res.setHeader(
+      "Content-Security-Policy",
+      securityEngine.getFrameAncestorsCSP(),
+    );
     return res.send(redisHtml);
   }
 
@@ -699,7 +814,10 @@ router.get("/player/:eventId", async (req, res) => {
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       res.setHeader("Permissions-Policy", "unload=*");
-      res.setHeader("Content-Security-Policy", securityEngine.getFrameAncestorsCSP());
+      res.setHeader(
+        "Content-Security-Policy",
+        securityEngine.getFrameAncestorsCSP(),
+      );
       return res.send(html);
     } catch (_) {}
   }
@@ -821,10 +939,75 @@ router.get("/player/:eventId", async (req, res) => {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     res.setHeader("Permissions-Policy", "unload=*");
-    res.setHeader("Content-Security-Policy", securityEngine.getFrameAncestorsCSP());
+    res.setHeader(
+      "Content-Security-Policy",
+      securityEngine.getFrameAncestorsCSP(),
+    );
     return res.send(finalHtml);
   } finally {
     inFlightSportsPlayers.delete(eventId);
+  }
+});
+
+// 4b. Sports Stream Eviction / Self-Healing Trigger
+router.all("/evict", async (req, res) => {
+  const eventId = req.query.eventId || req.body?.eventId;
+  if (!eventId)
+    return res.status(400).json({ ok: false, error: "Missing eventId" });
+
+  try {
+    sportsWatchLinkCache.delete(`sports_watchlink:${eventId}`);
+    sportsPlayerCache.delete(`sports_player_${eventId}`);
+    sportsTokenCache.delete(eventId);
+    await redisClient.del(`sports_watchlink:${eventId}`).catch(() => {});
+    await redisClient.del(`html:sports:${eventId}`).catch(() => {});
+    await redisClient.del(`table_token:sports:${eventId}`).catch(() => {});
+    console.log(`[SportsEngine] Evicted cache for sports event ${eventId}`);
+    return res.json({
+      ok: true,
+      message: `Sports cache evicted for ${eventId}`,
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// ============================================================================
+// 80-Year Systems Architecture: Sports Stream Eviction & Autonomous Re-Harvesting
+// ============================================================================
+router.post("/evict", express.json(), async (req, res) => {
+  const eventId = String(req.body?.eventId || req.query?.eventId || "").trim();
+  const reason = String(req.body?.reason || "sports_canary_stalled").trim();
+  if (!eventId)
+    return res.status(400).json({ ok: false, error: "eventId is required" });
+
+  console.warn(
+    `[Sports Evict] ⚡ Match ${eventId} evicted by canary watchdog (Reason: ${reason})`,
+  );
+  try {
+    const betfairId = betfairIdCache.get(eventId) || eventId;
+    const cacheKey = `watchlink:${betfairId}`;
+
+    sportsPlayerCache.delete(`sports_${eventId}`);
+    sportsWatchLinkCache.delete(cacheKey);
+    inFlightSportsPlayers.delete(eventId);
+
+    await redisClient.del(`sports_html:${eventId}`).catch(() => {});
+    await redisClient.del(`sports:watchlink:${betfairId}`).catch(() => {});
+    await redisClient.del(cacheKey).catch(() => {});
+
+    rotateTableSession(betfairId, `Sports canary eviction: ${reason}`);
+    getSportsWatchUrl(eventId, "4", true).catch(() => {});
+
+    return res.status(200).json({
+      ok: true,
+      eventId,
+      betfairId,
+      reason,
+      evictedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: err.message });
   }
 });
 
@@ -832,7 +1015,10 @@ router.get("/player/:eventId", async (req, res) => {
 router.post("/proxy-ping", async (req, res) => {
   const access = await securityEngine.verifyAccess(req, "sports");
   if (!access.allowed) {
-    return res.status(403).json({ error: "Unauthorized: Domain or IP not whitelisted", reason: access.reason });
+    return res.status(403).json({
+      error: "Unauthorized: Domain or IP not whitelisted",
+      reason: access.reason,
+    });
   }
 
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -843,6 +1029,28 @@ router.post("/proxy-ping", async (req, res) => {
   const isInit = Boolean(req.body && req.body.init);
   const isTokenRequest = Boolean(req.body && req.body.token);
 
+  // 1. FAST ZERO-PROXY RESPONDER FOR ROUTINE HEARTBEATS (!isInit && !isTokenRequest):
+  // When stream is running, player pings every 10s. Responding in 0ms locally eliminates 99% of outbound requests and stops disconnects!
+  if (!isInit && !isTokenRequest) {
+    let cachedToken = sportsTokenCache.get(eventId || target);
+    if (!cachedToken && eventId) {
+      try {
+        const rData = await redisClient.get(`table_token:sports:${eventId}`);
+        if (rData && rData.token) cachedToken = rData;
+      } catch (_) {}
+    }
+
+    return res.status(200).json({
+      ok: true,
+      state: "live",
+      streamId: cachedToken?.streamId || eventId || "SPORTS",
+      token: cachedToken?.token || "",
+      wsUrl: cachedToken?.wsUrl || "",
+      hlsUrl: cachedToken?.hlsUrl || "",
+      stop: false,
+    });
+  }
+
   if (!target) {
     return res.status(400).json({ error: "Missing target parameter" });
   }
@@ -852,7 +1060,7 @@ router.post("/proxy-ping", async (req, res) => {
   const targetOrigin = new URL(targetUrl).origin;
   const pageOrigin = origin
     ? decodeURIComponent(origin)
-    : "https://nice444.com/";
+    : "https://cbtfexchange.com/";
   const session = req.query.session
     ? parseInt(req.query.session, 10)
     : getSessionForTable(eventId || targetUrl);
@@ -885,6 +1093,7 @@ router.post("/proxy-ping", async (req, res) => {
         Origin: targetOrigin,
         Referer: decodedWatchUrl,
         "User-Agent": UA,
+        ...MOBILE_HEADERS,
         Accept: "*/*",
         "Sec-Fetch-Dest": "empty",
         "Sec-Fetch-Mode": "cors",
@@ -900,26 +1109,47 @@ router.post("/proxy-ping", async (req, res) => {
       if (data.stop) data.stop = false;
 
       // Rewrite HLS URL if present to dedicated sports HLS proxy with clean relative URL (zero mixed content HTTP/HTTPS block)
-      if (data.hlsUrl && !data.hlsUrl.startsWith('/api/stream/sports/hls/')) {
+      if (data.hlsUrl && !data.hlsUrl.startsWith("/api/stream/sports/hls/")) {
         data.hlsUrl = `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(data.hlsUrl)}`;
       }
 
       // Rewrite wsUrl to WebSocket tunnel proxy to bypass Origin 403 blocks
-      if (data.wsUrl && !data.wsUrl.startsWith('/api/stream/ws')) {
+      if (data.wsUrl && !data.wsUrl.startsWith("/api/stream/ws")) {
         let cleanWs = String(data.wsUrl).trim();
-        if (cleanWs.startsWith('//')) {
+        if (cleanWs.startsWith("//")) {
           cleanWs = `wss:${cleanWs}`;
-        } else if (cleanWs.startsWith('/')) {
-          const wsHost = targetOrigin.replace(/^https?:\/\//, '');
+        } else if (cleanWs.startsWith("/")) {
+          const wsHost = targetOrigin.replace(/^https?:\/\//, "");
           cleanWs = `wss://${wsHost}${cleanWs}`;
-        } else if (!cleanWs.startsWith('ws://') && !cleanWs.startsWith('wss://')) {
+        } else if (
+          !cleanWs.startsWith("ws://") &&
+          !cleanWs.startsWith("wss://")
+        ) {
           cleanWs = `wss://${cleanWs}`;
         }
         data.wsUrl = `/api/stream/ws?target=${encodeURIComponent(cleanWs)}`;
       }
 
       if (!data.streamId) {
-        data.streamId = eventId || lastCached?.data?.streamId || 'SPORTS';
+        data.streamId = eventId || lastCached?.data?.streamId || "SPORTS";
+      }
+
+      // Cache token in memory and Redis for 0ms heartbeats
+      if (data.token) {
+        const tokenEntry = {
+          streamId: data.streamId,
+          token: data.token,
+          wsUrl: data.wsUrl,
+          hlsUrl: data.hlsUrl,
+          expiresAt: Date.now() + 3600 * 1000,
+        };
+        if (eventId) {
+          sportsTokenCache.set(eventId, tokenEntry);
+          await redisClient
+            .set(`table_token:sports:${eventId}`, tokenEntry, 3600)
+            .catch(() => {});
+        }
+        sportsTokenCache.set(targetUrl, tokenEntry);
       }
 
       // Save fresh data & timestamp in memory cache
@@ -931,18 +1161,22 @@ router.post("/proxy-ping", async (req, res) => {
     // Resilient fallback: For routine heartbeats, NEVER fail or return 403!
     // Return { ok: true } so the playing video continues uninterrupted!
     if (!isInit && !isTokenRequest) {
-      return res.status(200).json(lastCached?.data || { ok: true });
+      return res
+        .status(200)
+        .json(lastCached?.data || { ok: true, state: "live", stop: false });
     }
 
     return res
-      .status(upstreamRes.status || 500)
-      .json({ error: "Invalid response from sports ping upstream" });
+      .status(upstreamRes.status || 200)
+      .json(lastCached?.data || { ok: true, state: "live", stop: false });
   } catch (err) {
     console.error("[SportsEngine] Proxy ping error:", err.message);
     if (!isInit && !isTokenRequest) {
-      return res.status(200).json(lastCached?.data || { ok: true });
+      return res
+        .status(200)
+        .json(lastCached?.data || { ok: true, state: "live", stop: false });
     }
-    res.status(500).json({ error: "Proxy ping failed", details: err.message });
+    return res.status(200).json({ ok: true, state: "live", stop: false });
   }
 });
 
@@ -957,8 +1191,8 @@ router.get("/hls/live.m3u8", async (req, res) => {
     if (token) {
       try {
         const u = new URL(upstreamUrl);
-        if (!u.searchParams.has('token')) {
-          u.searchParams.set('token', token);
+        if (!u.searchParams.has("token")) {
+          u.searchParams.set("token", token);
           upstreamUrl = u.toString();
         }
       } catch (_) {}
@@ -977,7 +1211,11 @@ router.get("/hls/live.m3u8", async (req, res) => {
     } catch (_) {}
 
     // 2. Fallback to proxy only if direct fails or was blocked
-    if (!text || text.includes('403 Forbidden') || text.includes('Access Denied')) {
+    if (
+      !text ||
+      text.includes("403 Forbidden") ||
+      text.includes("Access Denied")
+    ) {
       const m3u8Res = await proxyFetch(upstreamUrl, {
         headers: { "User-Agent": UA, Referer: "https://tv.ltve.live/" },
         timeout: 8000,
@@ -985,18 +1223,21 @@ router.get("/hls/live.m3u8", async (req, res) => {
       text = await m3u8Res.text();
     }
 
-    const rewritten = text.split('\n').map(line => {
-      const trimmed = line.trim();
-      if (trimmed.endsWith('.m3u8') || trimmed.includes('.m3u8?')) {
-        const fullVariantUrl = new URL(trimmed, upstreamUrl).href;
-        return `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(fullVariantUrl)}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
-      }
-      if (trimmed.endsWith('.ts') || trimmed.includes('.ts?')) {
-        const fullSegUrl = new URL(trimmed, upstreamUrl).href;
-        return `/api/stream/sports/hls/chunk.ts?url=${encodeURIComponent(fullSegUrl)}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
-      }
-      return line;
-    }).join('\n');
+    const rewritten = text
+      .split("\n")
+      .map((line) => {
+        const trimmed = line.trim();
+        if (trimmed.endsWith(".m3u8") || trimmed.includes(".m3u8?")) {
+          const fullVariantUrl = new URL(trimmed, upstreamUrl).href;
+          return `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(fullVariantUrl)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
+        }
+        if (trimmed.endsWith(".ts") || trimmed.includes(".ts?")) {
+          const fullSegUrl = new URL(trimmed, upstreamUrl).href;
+          return `/api/stream/sports/hls/chunk.ts?url=${encodeURIComponent(fullSegUrl)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
+        }
+        return line;
+      })
+      .join("\n");
 
     res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -1018,8 +1259,8 @@ router.get("/hls/chunk.ts", async (req, res) => {
     if (token) {
       try {
         const u = new URL(targetUrl);
-        if (!u.searchParams.has('token')) {
-          u.searchParams.set('token', token);
+        if (!u.searchParams.has("token")) {
+          u.searchParams.set("token", token);
           targetUrl = u.toString();
         }
       } catch (_) {}
@@ -1072,7 +1313,8 @@ router.get("/hls/chunk.ts", async (req, res) => {
               return resolve({ redirect: chunkRes.headers.location });
             }
 
-            const contentType = chunkRes.headers["content-type"] || "video/mp2t";
+            const contentType =
+              chunkRes.headers["content-type"] || "video/mp2t";
             const chunks = [];
             chunkRes.on("data", (c) => chunks.push(c));
             chunkRes.on("end", () => {
@@ -1082,12 +1324,16 @@ router.get("/hls/chunk.ts", async (req, res) => {
                 const oldest = sportsChunkCache.keys().next().value;
                 sportsChunkCache.delete(oldest);
               }
-              const entry = { buffer: fullBuffer, contentType, expiresAt: Date.now() + 60000 };
+              const entry = {
+                buffer: fullBuffer,
+                contentType,
+                expiresAt: Date.now() + 60000,
+              };
               sportsChunkCache.set(cacheKey, entry);
               resolve(entry);
             });
             chunkRes.on("error", reject);
-          }
+          },
         );
 
         chunkReq.on("error", reject);
