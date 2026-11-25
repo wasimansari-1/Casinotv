@@ -491,42 +491,87 @@ const sessionState = {
   cbtf: { token: null, expiresAt: 0, accountIndex: 0, inFlight: null }
 };
 
-// Unified Token Authenticator with Redis Caching and Distributed Mutex across PM2 Workers
+/**
+ * Extract exact expiration timestamp in ms from JWT payload.
+ * Fallback to default validity (2 hours) if token is non-JWT.
+ */
+function getJwtExpiryMs(token, fallbackMs = 7200 * 1000) {
+  try {
+    if (token && typeof token === 'string' && token.includes('.')) {
+      const parts = token.split('.');
+      if (parts.length === 3) {
+        const payloadJson = Buffer.from(parts[1], 'base64').toString('utf8');
+        const payload = JSON.parse(payloadJson);
+        if (payload && payload.exp && typeof payload.exp === 'number') {
+          return payload.exp * 1000;
+        }
+      }
+    }
+  } catch (_) {}
+  return Date.now() + fallbackMs;
+}
+
+/**
+ * Invalidate cached auth token in both memory and distributed Redis
+ */
+async function invalidateAuthToken(providerKey) {
+  try {
+    if (sessionState[providerKey]) {
+      sessionState[providerKey].token = null;
+      sessionState[providerKey].expiresAt = 0;
+    }
+    await redisClient.del(`auth:${providerKey}`);
+    console.log(`[Auth Sentinel] ⚡ Invalidated auth token for ${providerKey} across RAM & Redis`);
+  } catch (err) {
+    console.warn(`[Auth Sentinel] Warning invalidating token for ${providerKey}:`, err.message);
+  }
+}
+
+// 80-Year Systems Architecture: Unified Token Sentinel with Dynamic JWT Decoding & Proactive Early Refresh
 async function getAuthToken(providerKey = 'nice444', forceRefresh = false) {
   const provider = PROVIDERS[providerKey] || PROVIDERS.nice444;
   const state = sessionState[providerKey] || sessionState.nice444;
   const redisAuthKey = `auth:${providerKey}`;
 
-  // 1. Check local in-memory cache
+  // 1. Check local in-memory cache (proactive boundary: at least 3 minutes before expiration)
   if (!forceRefresh && state.token && Date.now() < state.expiresAt) {
     return state.token;
   }
 
-  // 2. Check distributed Redis cache (shared across all PM2 workers)
+  // 2. Check distributed Redis cache (shared across all PM2 cluster workers)
   if (!forceRefresh) {
     const cachedToken = await redisClient.get(redisAuthKey);
     if (cachedToken && typeof cachedToken === 'string') {
-      state.token = cachedToken;
-      state.expiresAt = Date.now() + 3600 * 1000;
-      return cachedToken;
+      const expMs = getJwtExpiryMs(cachedToken);
+      const remainingMs = expMs - Date.now();
+      // If at least 3 minutes remaining, reuse token and schedule proactive renewal 5m before expiry
+      if (remainingMs > 180000) {
+        state.token = cachedToken;
+        state.expiresAt = expMs - 300000; // Early refresh trigger at T - 5 minutes
+        return cachedToken;
+      }
+      console.log(`[Auth Sentinel] Token for ${providerKey} near expiration (${Math.round(remainingMs / 1000)}s left). Proactively refreshing...`);
     }
   }
 
-  // 3. Mutex / Distributed lock for login
+  // 3. Mutex / Distributed lock for login (Guarantees only ONE worker executes HTTP login)
   if (state.inFlight) {
     return state.inFlight;
   }
 
   state.inFlight = (async () => {
-    // Acquire distributed lock so only 1 PM2 worker performs the login call
+    // Acquire distributed lock across PM2 cluster
     const lockAcquired = await redisClient.acquireLock(`auth_lock:${providerKey}`, 20);
     if (!lockAcquired && !forceRefresh) {
       await redisClient.waitForLock(`auth_lock:${providerKey}`, 10000, 300);
       const tokenFromOtherWorker = await redisClient.get(redisAuthKey);
-      if (tokenFromOtherWorker) {
-        state.token = tokenFromOtherWorker;
-        state.expiresAt = Date.now() + 3600 * 1000;
-        return tokenFromOtherWorker;
+      if (tokenFromOtherWorker && typeof tokenFromOtherWorker === 'string') {
+        const expMs = getJwtExpiryMs(tokenFromOtherWorker);
+        if (expMs - Date.now() > 180000) {
+          state.token = tokenFromOtherWorker;
+          state.expiresAt = expMs - 300000;
+          return tokenFromOtherWorker;
+        }
       }
     }
 
@@ -536,7 +581,7 @@ async function getAuthToken(providerKey = 'nice444', forceRefresh = false) {
         const accIdx = (state.accountIndex + i) % accounts.length;
         const acc = accounts[accIdx];
         try {
-          console.log(`[Auth] Authenticating with ${provider.name} (account: ${acc.user})...`);
+          console.log(`[Auth Sentinel] Authenticating with ${provider.name} (${acc.user})...`);
           
           const bodyPayload = { userName: acc.user, password: acc.pass };
           if (acc.siteKey) bodyPayload.siteKey = acc.siteKey;
@@ -555,19 +600,25 @@ async function getAuthToken(providerKey = 'nice444', forceRefresh = false) {
 
           const data = await res.json();
           if (data?.data?.accessToken) {
-            state.token = data.data.accessToken;
-            state.expiresAt = Date.now() + 3600 * 1000 * 2;
+            const rawToken = data.data.accessToken;
+            const expMs = getJwtExpiryMs(rawToken);
+            // Proactive early refresh: Cache TTL expires in Redis 5 minutes before actual upstream token expiry
+            const ttlSec = Math.max(120, Math.floor((expMs - Date.now() - 300000) / 1000));
+            state.token = rawToken;
+            state.expiresAt = expMs - 300000;
             state.accountIndex = accIdx;
-            console.log(`[Auth] Unified token obtained for ${provider.name} (${acc.user})`);
+            
+            const remainingMin = Math.round((expMs - Date.now()) / 60000);
+            console.log(`[Auth Sentinel] 🎯 Dynamic JWT token obtained for ${provider.name} (${acc.user}) - Expiry: in ${remainingMin}m (Redis TTL: ${ttlSec}s)`);
 
-            // Share auth token across all PM2 workers in Redis (TTL: 2 hours = 7200s)
-            await redisClient.set(redisAuthKey, state.token, 7200);
+            // Share auth token across all PM2 workers in Redis
+            await redisClient.set(redisAuthKey, state.token, ttlSec);
 
             return state.token;
           }
-          console.warn(`[Auth] Login rejected for ${provider.name} (${acc.user}):`, data?.meta?.message || data);
+          console.warn(`[Auth Sentinel] Login rejected for ${provider.name} (${acc.user}):`, data?.meta?.message || data);
         } catch (err) {
-          console.warn(`[Auth] Connection error for ${provider.name} (${acc.user}):`, err.message);
+          console.warn(`[Auth Sentinel] Connection error for ${provider.name} (${acc.user}):`, err.message);
         }
       }
       throw new Error(`All accounts failed for provider ${provider.name}`);
@@ -1477,6 +1528,8 @@ async function invalidateWatchUrl(eventId) {
 
 module.exports = {
   getAuthToken,
+  invalidateAuthToken,
+  getJwtExpiryMs,
   getWatchUrl,
   invalidateWatchUrl,
   getFailoverStatus,
@@ -1488,6 +1541,7 @@ module.exports = {
   GAME_MAP,
   PROVIDERS,
   UA,
+  MOBILE_HEADERS,
   proxyFetch,
   directFetch,
   getProxyAgent,

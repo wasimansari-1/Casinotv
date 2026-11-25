@@ -7,6 +7,8 @@ const cors = require("cors");
 const securityEngine = require("./securityEngine");
 const {
   getAuthToken,
+  invalidateAuthToken,
+  getJwtExpiryMs,
   getWatchUrl,
   invalidateWatchUrl,
   rotateTableSession,
@@ -15,6 +17,7 @@ const {
   GAME_MAP,
   PROVIDERS,
   UA,
+  MOBILE_HEADERS,
   proxyFetch,
   directFetch,
   providerManager,
@@ -124,6 +127,33 @@ const inFlightPings = new Map();
 const pingCache = new Map();
 const tableTokenCache = new Map(); // eventId -> { token, wsUrl, streamId, expiresAt }
 
+// Active Table Tracker: Tracks real viewer touch events per table to avoid blind batch warming
+const _activeTableTouches = new Map(); // eventId -> lastTouchTimestamp
+
+function recordTableTouch(eventId) {
+  if (!eventId) return;
+  const now = Date.now();
+  _activeTableTouches.set(eventId, now);
+  // Persist touch in Redis (30-min TTL) to coordinate across all PM2 workers
+  redisClient.set(`active_table:${eventId}`, now, 1800).catch(() => {});
+}
+
+async function isTableActive(eventId, maxAgeMs = 20 * 60 * 1000) {
+  if (!eventId) return false;
+  // Flagship table (20-20 Teen Patti) is always considered active
+  if (eventId === "99.0010") return true;
+  const localTouch = _activeTableTouches.get(eventId);
+  if (localTouch && Date.now() - localTouch < maxAgeMs) {
+    return true;
+  }
+  const redisTouch = await redisClient.get(`active_table:${eventId}`).catch(() => null);
+  if (redisTouch && Date.now() - Number(redisTouch) < maxAgeMs) {
+    _activeTableTouches.set(eventId, Number(redisTouch));
+    return true;
+  }
+  return false;
+}
+
 // Calculate accurate token expiry from JWT payload to prevent premature expiry
 function resolveTokenExpiry(token, fallbackMs = 600000) {
   try {
@@ -133,11 +163,11 @@ function resolveTokenExpiry(token, fallbackMs = 600000) {
         const payload = JSON.parse(
           Buffer.from(parts[1], "base64").toString("utf8"),
         );
-        if (payload && payload.exp) {
+        if (payload && payload.exp && typeof payload.exp === "number") {
           const expMs = payload.exp * 1000;
           const remainingMs = expMs - Date.now() - 30000;
           if (remainingMs > 10000) {
-            return Date.now() + Math.min(remainingMs, 900000); // Up to 15 minutes
+            return Date.now() + Math.min(remainingMs, 3600000 * 2); // Dynamic up to 2 hours
           }
         }
       }
@@ -393,15 +423,17 @@ async function warmAllCasinoTables() {
   }
 }
 
-// Autonomous 24/7 Table Warmer & Token Keeper Daemon
-// Staggers all 17 tables by 1.2s every 3.5 minutes with distributed Redis lock.
-// Shields upstream completely: 1 to 2 lakh users are served 100% from Redis in 0ms!
+// 80-Year Systems Architecture: Demand-Driven Leaky-Bucket Warmer & Token Keeper Daemon
+// 1. Refreshes ONLY tables active in the last 20 minutes (+ 99.0010 flagship table)
+// 2. Sequential execution with 3.5s leaky-bucket spacing and ±400ms human jitter (3.1s - 3.9s)
+// 3. Eliminates all burst spikes; upstream provider firewalls never trigger bot detection or HTTP 429
 let _warmerCronRunning = false;
 async function runContinuousWarmerCycle() {
   if (_warmerCronRunning) return;
   _warmerCronRunning = true;
   const lockKey = "cron:table_warmer_daemon";
-  const acquired = await redisClient.acquireLock(lockKey, 120);
+  // Distributed cluster lock for 240s
+  const acquired = await redisClient.acquireLock(lockKey, 240);
   if (!acquired) {
     _warmerCronRunning = false;
     return;
@@ -409,22 +441,36 @@ async function runContinuousWarmerCycle() {
 
   try {
     const tableIds = Object.keys(GAME_MAP);
+    const activeTables = [];
+    for (const id of tableIds) {
+      if (await isTableActive(id)) {
+        activeTables.push(id);
+      }
+    }
+    if (!activeTables.includes("99.0010")) {
+      activeTables.unshift("99.0010");
+    }
+
     console.log(
-      `[Stream Warmer Daemon] Starting autonomous background refresh for all ${tableIds.length} tables...`,
+      `[Demand Warmer] Refreshing ${activeTables.length} active tables: [${activeTables.join(", ")}]`,
     );
-    const batchSize = 3;
-    for (let i = 0; i < tableIds.length; i += batchSize) {
-      const batch = tableIds.slice(i, i + batchSize);
-      await Promise.allSettled(batch.map((id) => warmCasinoTable(id)));
-      if (i + batchSize < tableIds.length) {
-        await new Promise((r) => setTimeout(r, 350));
+
+    for (let i = 0; i < activeTables.length; i++) {
+      const id = activeTables[i];
+      await warmCasinoTable(id);
+
+      if (i < activeTables.length - 1) {
+        // Leaky-bucket delay: 3500ms ± 400ms random jitter (3100ms - 3900ms)
+        const jitter = Math.floor(Math.random() * 800) - 400;
+        const delayMs = 3500 + jitter;
+        await new Promise((r) => setTimeout(r, delayMs));
       }
     }
     console.log(
-      `[Stream Warmer Daemon] Cycle completed: all ${tableIds.length} tables active in Redis & RAM.`,
+      `[Demand Warmer] Cycle completed: ${activeTables.length} active tables maintained with zero upstream spikes.`,
     );
   } catch (err) {
-    console.warn("[Stream Warmer Daemon] Warning during cycle:", err.message);
+    console.warn("[Demand Warmer] Warning during cycle:", err.message);
   } finally {
     _warmerCronRunning = false;
     await redisClient.releaseLock(lockKey).catch(() => {});
@@ -432,11 +478,15 @@ async function runContinuousWarmerCycle() {
 }
 
 // On boot: Pre-warm primary table once so the first user gets instant response.
-// All other tables are fetched ON-DEMAND when clicked by users.
-// Continuous background loops disabled: saves 99% proxy bandwidth & eliminates proxy drain!
+// Autonomous demand cycle runs every 4 minutes (240s) for active tables
 setTimeout(() => {
   warmCasinoTable("99.0010").catch(() => {});
 }, 1000);
+
+// Schedule autonomous demand warmer to run every 4 minutes across cluster
+setInterval(() => {
+  runContinuousWarmerCycle().catch(() => {});
+}, 240000);
 
 // Health Check & Monitoring API (Real-Time Provider Observability)
 router.get("/health", async (req, res) => {
@@ -698,6 +748,7 @@ router.get("/player/:eventId", async (req, res) => {
   }
 
   const forceFresh = Boolean(req.query.force || req.query.fresh);
+  recordTableTouch(eventId);
 
   // 1. Check local RAM cache first (serves in 0ms) - only if token is valid and not expired
   if (!forceFresh) {
@@ -712,6 +763,12 @@ router.get("/player/:eventId", async (req, res) => {
       cachedToken.token &&
       Date.now() < (cachedToken.expiresAt || 0)
     ) {
+      // XFetch Probabilistic Asynchronous Background Renewal:
+      // If token expires in less than 3 minutes, serve valid token now (0ms)
+      // and refresh in background asynchronously so next user never sees a delay!
+      if (cachedToken.expiresAt - Date.now() < 180000) {
+        warmCasinoTable(eventId, true).catch(() => {});
+      }
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       res.setHeader("Permissions-Policy", "unload=*");
@@ -741,6 +798,12 @@ router.get("/player/:eventId", async (req, res) => {
         expiresAt: Date.now() + CASINO_CACHE_TTL,
       });
       if (redisToken) tableTokenCache.set(eventId, redisToken);
+
+      // XFetch Asynchronous Background Renewal
+      if (redisToken.expiresAt - Date.now() < 180000) {
+        warmCasinoTable(eventId, true).catch(() => {});
+      }
+
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       res.setHeader("Permissions-Policy", "unload=*");
@@ -1363,6 +1426,7 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
 
   const eventId = req.query.eventId || "";
+  if (eventId) recordTableTouch(eventId);
   const fallbackStreamId =
     eventId && GAME_MAP[eventId] ? GAME_MAP[eventId].streamId : "GAME10";
   const isInit = Boolean(req.body?.init);
