@@ -9,7 +9,7 @@ const router = express.Router();
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { redisClient } = require('./streamCore');
+const { redisClient, getFailoverStatus } = require('./streamCore');
 
 // Admin Credentials
 const ADMIN_ID = 'Igwasim';
@@ -704,7 +704,16 @@ router.get('/api/master/status', requireMasterAuth, (req, res) => {
       blockedAttempts,
       enforceWhitelist,
       allowDirectAccess
-    }
+    },
+    failover: typeof getFailoverStatus === 'function' ? getFailoverStatus() : null
+  });
+});
+
+// 2b. Standalone Failover Status Endpoint
+router.get('/api/master/failover-status', requireMasterAuth, (req, res) => {
+  res.json({
+    success: true,
+    failover: typeof getFailoverStatus === 'function' ? getFailoverStatus() : null
   });
 });
 
@@ -910,6 +919,35 @@ router.get('/master', (req, res) => {
             <svg class="w-4 h-4 text-rose-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/></svg>
           </div>
           <div id="statBlockedHits" class="text-2xl font-bold text-rose-400 font-mono">0</div>
+        </div>
+      </div>
+
+      <!-- Live Stream Brain & Multi-Provider Failover Card -->
+      <div class="glass-card p-5 rounded-xl border border-slate-800">
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-4 border-b border-slate-800 gap-3">
+          <div class="flex items-center gap-3">
+            <span class="relative flex h-3 w-3">
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span class="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
+            </span>
+            <div>
+              <h2 class="text-sm font-bold text-white tracking-wide uppercase">Multi-Provider Live Stream Brain</h2>
+              <p class="text-xs text-slate-400">Sticky Zero-Latency Routing & Autonomous 0.1s Failover Protection</p>
+            </div>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-xs text-slate-400">Active Primary:</span>
+            <span id="activeProviderBadge" class="px-3 py-1 text-xs font-bold rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">CBTFexchange (8292463648)</span>
+          </div>
+        </div>
+
+        <div id="providerPoolGrid" class="grid grid-cols-1 sm:grid-cols-4 gap-3 mt-4">
+          <!-- Dynamic Provider Cards rendered by JS -->
+        </div>
+
+        <div id="failoverAlertBanner" class="hidden mt-4 p-3 bg-rose-500/10 border border-rose-500/30 rounded-lg text-rose-300 text-xs flex items-center gap-2">
+          <svg class="w-4 h-4 text-rose-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+          <span id="failoverAlertText"></span>
         </div>
       </div>
 
@@ -1158,6 +1196,44 @@ router.get('/master', (req, res) => {
           toggleDirectBtn.className = s.allowDirectAccess 
             ? 'text-xs font-semibold px-2 py-0.5 rounded transition bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
             : 'text-xs font-semibold px-2 py-0.5 rounded transition bg-rose-500/20 text-rose-400 border border-rose-500/30';
+
+          if (statusData.failover) {
+            const fo = statusData.failover;
+            const badge = document.getElementById('activeProviderBadge');
+            if (badge) {
+              const activeAccount = fo.providers?.find(p => p.key === fo.activeProvider)?.accounts?.[0];
+              badge.textContent = fo.activeProviderName + (activeAccount ? ' (' + activeAccount + ')' : '');
+            }
+            const grid = document.getElementById('providerPoolGrid');
+            if (grid && Array.isArray(fo.providers)) {
+              grid.innerHTML = fo.providers.map(p => {
+                const isActive = p.isActive;
+                const isError = p.status === 'ERROR' || p.failureCount > 0;
+                const statusColor = isActive ? 'border-emerald-500/50 bg-emerald-950/20 text-emerald-400' : (isError ? 'border-rose-500/40 bg-rose-950/20 text-rose-400' : 'border-slate-800 bg-slate-900/50 text-slate-300');
+                const badgeColor = isActive ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' : (isError ? 'bg-rose-500/20 text-rose-300 border-rose-500/40' : 'bg-slate-800 text-slate-400 border-slate-700');
+                return '<div class="p-3 rounded-xl border ' + statusColor + ' flex flex-col justify-between space-y-2">' +
+                  '<div class="flex items-center justify-between">' +
+                    '<span class="font-bold text-xs text-white">' + p.name + '</span>' +
+                    '<span class="text-[10px] font-semibold px-2 py-0.5 rounded border ' + badgeColor + '">' + p.status + '</span>' +
+                  '</div>' +
+                  '<div class="text-[11px] text-slate-400 space-y-0.5">' +
+                    '<div>Accounts: ' + (p.accounts.join(', ') || 'N/A') + '</div>' +
+                    (p.lastError ? '<div class="text-rose-400 text-[10px] truncate" title="' + p.lastError + '">Err: ' + p.lastError + '</div>' : '') +
+                  '</div>' +
+                '</div>';
+              }).join('');
+            }
+            const alertBanner = document.getElementById('failoverAlertBanner');
+            const alertText = document.getElementById('failoverAlertText');
+            if (alertBanner && alertText) {
+              if (fo.lastFailover) {
+                alertBanner.classList.remove('hidden');
+                alertText.textContent = 'Auto-Failover Event: Switched ' + fo.lastFailover.from + ' -> ' + fo.lastFailover.to + ' (' + fo.lastFailover.reason + ') at ' + new Date(fo.lastFailover.at).toLocaleTimeString();
+              } else {
+                alertBanner.classList.add('hidden');
+              }
+            }
+          }
         }
 
         // Domains

@@ -378,7 +378,14 @@ function directFetch(urlStr, options = {}, redirectCount = 0) {
   });
 }
 
-const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+const UA = 'Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36';
+
+const MOBILE_HEADERS = {
+  'Sec-CH-UA': '"Chromium";v="130", "Android WebView";v="130", "Not?A_Brand";v="99"',
+  'Sec-CH-UA-Mobile': '?1',
+  'Sec-CH-UA-Platform': '"Android"',
+  'X-Requested-With': 'XMLHttpRequest'
+};
 
 const CLEAN_INDIAN_IPS = [
   '103.21.124.1',
@@ -394,15 +401,14 @@ function getCleanIndianIp(key = '') {
   return CLEAN_INDIAN_IPS[hash % CLEAN_INDIAN_IPS.length];
 }
 
-// 4-Provider Multi-Account Redundancy Pool (from Internatniol)
+// 4-Provider Multi-Account Redundancy Pool (Prioritized)
 const PROVIDERS = {
-  nice444: {
-    name: 'Nice444',
-    base: 'https://nice444.com',
-    casinoBase: 'https://casino.nice444.com',
+  cbtf: {
+    name: 'CBTFexchange',
+    base: 'https://cbtfexchange.com',
+    casinoBase: 'https://casino.cbtfexchange.com',
     accounts: [
-      { user: 'demo52', pass: 'Asdf1234' },
-      { user: 'rio001', pass: 'Asdf1234' }
+      { user: '8292463648', pass: 'Asdf1234', siteKey: '2' }
     ]
   },
   startexch: {
@@ -423,15 +429,45 @@ const PROVIDERS = {
       { user: 'zak1984', pass: 'Asdf123' }
     ]
   },
-  cbtf: {
-    name: 'CBTFexchange',
-    base: 'https://cbtfexchange.com',
-    casinoBase: 'https://casino.cbtfexchange.com',
+  nice444: {
+    name: 'Nice444',
+    base: 'https://nice444.com',
+    casinoBase: 'https://casino.nice444.com',
     accounts: [
-      { user: '8292463648', pass: 'Asdf1234', siteKey: '2' }
+      { user: 'demo52', pass: 'Asdf1234' },
+      { user: 'rio001', pass: 'Asdf1234' }
     ]
   }
 };
+
+// Failover State Machine & Master Observability
+let _activePrimaryProvider = 'cbtf';
+let _lastFailoverEvent = null;
+
+const providerHealth = {
+  cbtf: { status: 'ACTIVE', lastSuccess: null, lastError: null, failureCount: 0 },
+  startexch: { status: 'STANDBY', lastSuccess: null, lastError: null, failureCount: 0 },
+  asstarplay: { status: 'STANDBY', lastSuccess: null, lastError: null, failureCount: 0 },
+  nice444: { status: 'DISABLED', lastSuccess: null, lastError: 'domain_not_whitelisted (upline locked)', failureCount: 1 }
+};
+
+function getFailoverStatus() {
+  return {
+    activeProvider: _activePrimaryProvider,
+    activeProviderName: PROVIDERS[_activePrimaryProvider]?.name || _activePrimaryProvider,
+    lastFailover: _lastFailoverEvent,
+    providers: Object.keys(PROVIDERS).map(k => ({
+      key: k,
+      name: PROVIDERS[k].name,
+      isActive: k === _activePrimaryProvider,
+      status: k === _activePrimaryProvider ? 'ACTIVE' : providerHealth[k]?.status || 'STANDBY',
+      accounts: PROVIDERS[k].accounts.map(a => a.user),
+      lastSuccess: providerHealth[k]?.lastSuccess,
+      lastError: providerHealth[k]?.lastError,
+      failureCount: providerHealth[k]?.failureCount || 0
+    }))
+  };
+}
 
 // Sessions memory state
 const sessionState = {
@@ -497,7 +533,8 @@ async function getAuthToken(providerKey = 'nice444', forceRefresh = false) {
               'Content-Type': 'application/json',
               'Origin': provider.base,
               'Referer': `${provider.base}/`,
-              'User-Agent': UA
+              'User-Agent': UA,
+              ...MOBILE_HEADERS
             },
             body: JSON.stringify(bodyPayload)
           });
@@ -939,15 +976,11 @@ async function getWatchUrl(eventId, options = {}) {
     }
 
     try {
-      // Primary Casino Exchange Providers: Startexch99 (3 accounts) & Nice444 (2 accounts)
-      // Both are high-speed, verified Diamond/Universe exchange endpoints (0ms fallback, no 8s timeouts)
-      const allKeys = ['startexch', 'nice444'];
-      const hash = eventId.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
-      const startIdx = hash % allKeys.length;
-      const providerList = [
-        ...allKeys.slice(startIdx),
-        ...allKeys.slice(0, startIdx)
-      ];
+      // Sticky Provider Priority: Always prioritize active primary provider (CBTF first)
+      // When primary fails, instant 0.1s autonomous failover to next working provider
+      const activeKey = _activePrimaryProvider;
+      const fallbackKeys = ['cbtf', 'startexch', 'asstarplay'].filter(k => k !== activeKey);
+      const providerList = [activeKey, ...fallbackKeys];
       const maxRetries = CONFIG.maxRetries;
       const backoffDelays = CONFIG.backoffMs;
       let lastError = null;
@@ -989,7 +1022,8 @@ async function getWatchUrl(eventId, options = {}) {
                   'Authorization': `Bearer ${token}`,
                   'Origin': provider.base,
                   'Referer': `${provider.base}/`,
-                  'User-Agent': UA
+                  'User-Agent': UA,
+                  ...MOBILE_HEADERS
                 };
                 const watchBody = JSON.stringify({
                   streamId: eventId,
@@ -1013,6 +1047,15 @@ async function getWatchUrl(eventId, options = {}) {
                 if (res.ok && data?.data?.url) {
                   providerManager.trackRequest(provKey, durationMs, true, res.status);
                   
+                  // Success on candidate provider: make it the sticky active primary if it wasn't already
+                  if (_activePrimaryProvider !== provKey) {
+                    _activePrimaryProvider = provKey;
+                    console.log(`[Failover Brain] 🎯 New sticky active primary locked: ${provKey}`);
+                  }
+                  providerHealth[provKey].status = 'ACTIVE';
+                  providerHealth[provKey].lastSuccess = new Date().toISOString();
+                  providerHealth[provKey].failureCount = 0;
+
                   // Calculate exact TTL until actual token expiry
                   const ttlSec = resolveWatchLinkTtl(data.data.url, CONFIG.watchlinkTtlSec);
 
@@ -1064,25 +1107,29 @@ async function getWatchUrl(eventId, options = {}) {
                   throw new Error(`Provider ${provider.name} rate-limited (HTTP 429)`);
                 }
 
-                // 3. IP Blocked: viewer_ip_blocked (Rotate THIS table's dedicated session and retry/failover)
+                // 3. IP Blocked: viewer_ip_blocked (Immediate <0.1s fast failover)
                 if (data?.meta?.message === 'viewer_ip_blocked' || res?.status === 422 || (res?.status === 403 && JSON.stringify(data || '').includes('blocked'))) {
-                  tableSession = rotateTableSession(eventId, `IP blocked on ${provider.name}`);
-                  providerManager.trackRequest(provKey, durationMs, false, 403, 'viewer_ip_blocked');
-                  logAudit({
-                    provider: provider.name,
-                    tableId: eventId,
-                    statusCode: res?.status || 422,
-                    category: 'rate_limiting',
-                    durationMs,
-                    retries: attempt,
-                    circuitState: providerManager.getState(provKey),
-                    message: `viewer_ip_blocked on session #${tableSession}. Rotated session for table ${eventId}`
-                  });
-                  if (attempt < maxRetries) {
-                    console.log(`[StreamCore] Retrying table ${eventId} on ${provider.name} with fresh session #${tableSession}...`);
-                    continue;
+                  const errMsg = data?.meta?.message || `HTTP ${res?.status || 422} (viewer_ip_blocked)`;
+                  providerHealth[provKey].status = 'ERROR';
+                  providerHealth[provKey].lastError = errMsg;
+                  providerHealth[provKey].failureCount = (providerHealth[provKey].failureCount || 0) + 1;
+                  providerManager.tripCooldown(provKey, 30000, errMsg);
+
+                  if (provKey === _activePrimaryProvider) {
+                    const nextProv = fallbackKeys.find(k => providerManager.isAvailable(k)) || fallbackKeys[0];
+                    if (nextProv) {
+                      _lastFailoverEvent = {
+                        from: provKey,
+                        to: nextProv,
+                        at: new Date().toISOString(),
+                        reason: errMsg,
+                        tableId: eventId
+                      };
+                      _activePrimaryProvider = nextProv;
+                      console.warn(`[Failover Brain] ⚡ Switched active primary: ${provKey} -> ${nextProv} (Reason: ${errMsg})`);
+                    }
                   }
-                  throw new Error(`Provider ${provider.name} blocked residential IP`);
+                  throw new Error(`Provider ${provider.name} blocked viewer IP: ${errMsg}`);
                 }
 
                 // 4. HTTP 401: Authentication expired
@@ -1185,7 +1232,26 @@ async function getWatchUrl(eventId, options = {}) {
           }
         } catch (provErr) {
           lastError = provErr;
-          console.warn(`[Failover] Provider ${provider.name} unavailable for ${eventId}: ${provErr.message}. Failing over to next provider...`);
+          const errMsg = provErr.message || 'Unknown provider error';
+          providerHealth[provKey].status = 'ERROR';
+          providerHealth[provKey].lastError = errMsg;
+          providerHealth[provKey].failureCount = (providerHealth[provKey].failureCount || 0) + 1;
+
+          if (provKey === _activePrimaryProvider) {
+            const nextProv = fallbackKeys.find(k => providerManager.isAvailable(k)) || fallbackKeys[0];
+            if (nextProv && nextProv !== provKey) {
+              _lastFailoverEvent = {
+                from: provKey,
+                to: nextProv,
+                at: new Date().toISOString(),
+                reason: errMsg,
+                tableId: eventId
+              };
+              _activePrimaryProvider = nextProv;
+              console.warn(`[Failover Brain] ⚡ Switched active primary: ${provKey} -> ${nextProv} (Reason: ${errMsg})`);
+            }
+          }
+          console.warn(`[Failover] Provider ${provider.name} unavailable for ${eventId}: ${errMsg}. Failing over instantly to next provider...`);
         }
       }
 
@@ -1390,6 +1456,8 @@ module.exports = {
   getAuthToken,
   getWatchUrl,
   invalidateWatchUrl,
+  getFailoverStatus,
+  providerHealth,
   getSessionForTable,
   rotateTableSession,
   getSportsWatchUrl,
