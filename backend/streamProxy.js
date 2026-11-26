@@ -318,10 +318,10 @@ async function warmCasinoTable(eventId, forceFresh = false) {
         expiresAt: Date.now() + CASINO_CACHE_TTL,
         timestamp: Date.now(),
       });
-      // 15 Minutes in Redis - Fresh session active and ready
-      await redisClient.set(`html:${eventId}`, html, 900).catch(() => {});
+      // 1 Hour in Redis - Long-lived 1-hour sticky cache (saves 99% bandwidth)
+      await redisClient.set(`html:${eventId}`, html, 3600).catch(() => {});
       console.log(
-        `[Stream Warmer] Pre-warmed & cached table ${eventId} in memory/Redis (TTL: 15m)`,
+        `[Stream Warmer] Pre-warmed & cached table ${eventId} in memory/Redis (TTL: 1h)`,
       );
 
       // Pre-warm ping handshake to acquire and cache the valid JWT token in tableTokenCache!
@@ -403,7 +403,7 @@ async function warmCasinoTable(eventId, forceFresh = false) {
                   timestamp: Date.now(),
                 });
                 await redisClient
-                  .set(`html:${eventId}`, html, 1800)
+                  .set(`html:${eventId}`, html, 3600)
                   .catch(() => {});
 
                 console.log(
@@ -994,14 +994,14 @@ router.get("/player/:eventId", async (req, res) => {
           session,
         );
 
-        // Cache player HTML for 15 minutes in RAM and distributed Redis
+        // Cache player HTML for 1 Hour in RAM and distributed Redis (Saves 99% bandwidth)
         playerCache.set(`casino_${eventId}`, {
           html,
           expiresAt: Date.now() + CASINO_CACHE_TTL,
           timestamp: Date.now(),
         });
         redisClient
-          .set(`html:${eventId}`, html, 900) // 15 Minutes in Redis - Always fresh
+          .set(`html:${eventId}`, html, 3600) // 1 Hour in Redis
           .catch(() => {});
 
         // Fast pre-warm initial ping handshake before returning HTML so client gets 0ms ping!
@@ -1084,7 +1084,7 @@ router.get("/player/:eventId", async (req, res) => {
                   expiresAt: Date.now() + CASINO_CACHE_TTL,
                   timestamp: Date.now(),
                 });
-                redisClient.set(`html:${eventId}`, html, 1800).catch(() => {});
+                redisClient.set(`html:${eventId}`, html, 3600).catch(() => {});
               }
             }
           } catch (_) {}
@@ -1354,6 +1354,12 @@ function getPatchedPlayerJs() {
   text = text.replace(
     /p\.ping\(\)\.then\(\(\)\s*=>\s*\{/g,
     "p.ping(!0,!0).then(()=>{",
+  );
+
+  // 8c. Client Anomaly Signal: If player fails 2 consecutive times, trigger silent server eviction & IP rotation
+  text = text.replace(
+    /\(this\.failedTries\s*=\s*i\s*\?\s*0\s*:\s*this\.failedTries\s*\+\s*1\)/g,
+    "(this.failedTries=i?0:this.failedTries+1,this.failedTries===2&&fetch('/api/stream/evict',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({eventId:(t&&t.streamId)||'',reason:'client_retry_canary'})}).catch(()=>{})",
   );
 
   // 9. Preserve everPlayed flag across socket jitter (Prevents recurring loader screens)
@@ -1785,11 +1791,16 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
       return res.status(200).json(data);
     }
 
-    // Upstream returned non-JSON, 403, or missing token: Auto-heal on the fly with fresh fetch!
+    // Upstream returned non-JSON, 403, or missing token: Autonomous Anomaly Detector triggers instant IP rotation!
     if (eventId) {
-      console.log(
-        `[Proxy-Ping] Stale session or missing token for table ${eventId}. Force-refreshing fresh token on the fly...`,
+      console.warn(
+        `[Canary Watchdog] 🚨 Stale session or missing token for table ${eventId}. Auto-rotating IP session & re-harvesting...`,
       );
+      rotateTableSession(eventId, "Canary watchdog: ping ticket anomaly");
+      await invalidateWatchUrl(eventId);
+      await redisClient.del(`html:${eventId}`).catch(() => {});
+      await redisClient.del(`table_token:${eventId}`).catch(() => {});
+      tableTokenCache.delete(eventId);
       await warmCasinoTable(eventId, true);
       const freshToken = tableTokenCache.get(eventId);
       if (isTokenValid(freshToken)) {
