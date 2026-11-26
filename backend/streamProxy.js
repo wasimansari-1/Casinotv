@@ -155,7 +155,7 @@ async function isTableActive(eventId, maxAgeMs = 20 * 60 * 1000) {
 }
 
 // Calculate accurate token expiry from JWT payload to prevent premature expiry
-function resolveTokenExpiry(token, fallbackMs = 600000) {
+function resolveTokenExpiry(token, fallbackMs = 60000) {
   try {
     if (token && typeof token === "string" && token.includes(".")) {
       const parts = token.split(".");
@@ -164,17 +164,19 @@ function resolveTokenExpiry(token, fallbackMs = 600000) {
           Buffer.from(parts[1], "base64").toString("utf8"),
         );
         if (payload && payload.exp && typeof payload.exp === "number") {
-          const expMs = payload.exp * 1000;
-          const remainingMs = expMs - Date.now();
-          // If token has long validity window (e.g. CBTF auth 5 hrs), use actual expiry
-          if (remainingMs > 600000) {
-            return Date.now() + remainingMs - 60000;
-          }
+          return payload.exp * 1000;
         }
       }
     }
   } catch (_) {}
-  return Date.now() + fallbackMs; // Default 10 minutes
+  return Date.now() + fallbackMs;
+}
+
+// Strict validity check: Token must be non-empty and have at least 15s remaining
+function isTokenValid(tokenObj) {
+  if (!tokenObj || !tokenObj.token) return false;
+  const expiresAt = Number(tokenObj.expiresAt) || 0;
+  return Date.now() < (expiresAt - 15000);
 }
 
 // Helper: Return proxied WebSocket URL so browsers never get blocked by upstream Origin 403 checks
@@ -199,6 +201,31 @@ function getProxiedWsUrl(originalWsUrl, defaultHost = "livecdnplatin.com") {
   return `/api/stream/ws?target=${encodeURIComponent(clean)}`;
 }
 
+// Dynamically inject live valid token and proxied wsUrl into player HTML
+function injectLiveTokenIntoHtml(html, eventId) {
+  let tokenObj = tableTokenCache.get(eventId);
+  const valid = isTokenValid(tokenObj);
+  const token = valid ? tokenObj.token : "";
+  const ws = valid ? getProxiedWsUrl(tokenObj.wsUrl) : fallbackWsUrl;
+
+  if (token) {
+    return html.replace(
+      /<script type="application\/json" id="cfg">([^<]+)<\/script>/,
+      (match, p1) => {
+        try {
+          const cfg = JSON.parse(p1);
+          cfg.token = token;
+          cfg.wsUrl = ws;
+          return `<script type="application/json" id="cfg">${JSON.stringify(cfg)}</script>`;
+        } catch (_) {
+          return match;
+        }
+      },
+    );
+  }
+  return html;
+}
+
 // Helper: Pre-warm or force-fetch a single casino table in memory/Redis with distributed lock
 async function warmCasinoTable(eventId, forceFresh = false) {
   // Coordinate across PM2 cluster: only 1 worker warms this table at a time
@@ -209,8 +236,8 @@ async function warmCasinoTable(eventId, forceFresh = false) {
   }
 
   try {
-    // 1. FAST PATH: Check if we already have valid HTML in Redis (0 proxy calls!)
-    // Once ANY domain or warmer loads a table, it remains 100% active in Redis
+    // 1. FAST PATH: Check if we already have valid HTML and an ACTIVE VALID token (0 proxy calls!)
+    // Once ANY domain or warmer loads a table, it remains 100% active in Redis as long as the token is valid
     if (!forceFresh) {
       let existingHtml = await redisClient.get(`html:${eventId}`);
       if (
@@ -222,15 +249,15 @@ async function warmCasinoTable(eventId, forceFresh = false) {
         let existingToken =
           tableTokenCache.get(eventId) ||
           (await redisClient.get(`table_token:${eventId}`).catch(() => null));
-        if (existingToken && existingToken.token) {
+        if (isTokenValid(existingToken)) {
           tableTokenCache.set(eventId, existingToken);
+          playerCache.set(`casino_${eventId}`, {
+            html: existingHtml,
+            expiresAt: Date.now() + CASINO_CACHE_TTL,
+            timestamp: Date.now(),
+          });
+          return true;
         }
-        playerCache.set(`casino_${eventId}`, {
-          html: existingHtml,
-          expiresAt: Date.now() + CASINO_CACHE_TTL,
-          timestamp: Date.now(),
-        });
-        return true;
       }
     }
 
@@ -343,6 +370,7 @@ async function warmCasinoTable(eventId, forceFresh = false) {
               const pingData = await pingRes.json().catch(() => null);
               if (pingData && pingData.token && pingData.wsUrl) {
                 const proxiedWs = getProxiedWsUrl(pingData.wsUrl);
+                const expMs = resolveTokenExpiry(pingData.token);
                 const tokenPayload = {
                   token: pingData.token,
                   wsUrl: proxiedWs,
@@ -350,18 +378,19 @@ async function warmCasinoTable(eventId, forceFresh = false) {
                     pingData.streamId ||
                     (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) ||
                     "GAME10",
-                  expiresAt: resolveTokenExpiry(pingData.token),
+                  expiresAt: expMs,
                 };
                 tableTokenCache.set(eventId, tokenPayload);
+                const tokenTtlSec = Math.max(30, Math.floor((expMs - Date.now()) / 1000));
                 await redisClient
-                  .set(`table_token:${eventId}`, tokenPayload, 900) // 15 Minutes in Redis
+                  .set(`table_token:${eventId}`, tokenPayload, tokenTtlSec)
                   .catch(() => {});
                 pingCache.set(targetUrl, {
                   data: { ...pingData, wsUrl: proxiedWs },
                   timestamp: Date.now(),
                 });
 
-                // Inject token & wsUrl into HTML so subsequent hits get immediate ready-to-play HTML!
+                // Update caches with modified HTML
                 cfg.token = pingData.token;
                 cfg.wsUrl = proxiedWs;
                 html = html.replace(
@@ -374,11 +403,11 @@ async function warmCasinoTable(eventId, forceFresh = false) {
                   timestamp: Date.now(),
                 });
                 await redisClient
-                  .set(`html:${eventId}`, html, 900)
+                  .set(`html:${eventId}`, html, 1800)
                   .catch(() => {});
 
                 console.log(
-                  `[Stream Warmer] Pre-warmed valid token & handshake for table ${eventId} (${tokenPayload.streamId}) in RAM & Redis`,
+                  `[Stream Warmer] Pre-warmed valid token & handshake for table ${eventId} (${tokenPayload.streamId}) in RAM & Redis (Valid for ${tokenTtlSec}s)`,
                 );
               }
             }
@@ -423,10 +452,10 @@ async function warmAllCasinoTables() {
   }
 }
 
-// 80-Year Systems Architecture: Demand-Driven Leaky-Bucket Warmer & Token Keeper Daemon
-// 1. Refreshes ONLY tables active in the last 20 minutes (+ 99.0010 flagship table)
-// 2. Sequential execution with 3.5s leaky-bucket spacing and ±400ms human jitter (3.1s - 3.9s)
-// 3. Eliminates all burst spikes; upstream provider firewalls never trigger bot detection or HTTP 429
+// 80-Year Systems Architecture: Proactive Token Sentinel & Demand-Driven Warmer Daemon
+// 1. Proactive Token Sentinel (Every 20s): Checks active tables and auto-renews tokens BEFORE they expire
+// 2. Continuous Warmer Cycle (Every 4 min): Keeps active table HTML & stream links primed in Redis
+// 3. Sequential leaky-bucket spacing (3.5s ± 400ms jitter) prevents provider rate-limits
 let _warmerCronRunning = false;
 async function runContinuousWarmerCycle() {
   if (_warmerCronRunning) return;
@@ -477,10 +506,47 @@ async function runContinuousWarmerCycle() {
   }
 }
 
-// On boot: Pre-warm primary table once so the first user gets instant response.
-// Autonomous demand cycle runs every 4 minutes (240s) for active tables
-setTimeout(() => {
-  warmCasinoTable("99.0010").catch(() => {});
+// Proactive Token Sentinel: Runs every 20s across active tables.
+// If any active table's token has <40s remaining, it auto-renews in the background so viewers NEVER see a drop!
+setInterval(async () => {
+  try {
+    const tableIds = Object.keys(GAME_MAP);
+    for (const id of tableIds) {
+      if (await isTableActive(id)) {
+        let tokenObj = tableTokenCache.get(id);
+        if (!isTokenValid(tokenObj)) {
+          const redisToken = await redisClient.get(`table_token:${id}`).catch(() => null);
+          if (isTokenValid(redisToken)) {
+            tokenObj = redisToken;
+            tableTokenCache.set(id, tokenObj);
+          }
+        }
+
+        const expiresAt = Number(tokenObj?.expiresAt) || 0;
+        const remainingMs = expiresAt - Date.now();
+        if (remainingMs < 40000) {
+          console.log(
+            `[Token Sentinel] ⚡ Proactively auto-renewing token for active table ${id} (${Math.round(remainingMs / 1000)}s remaining)...`,
+          );
+          await warmCasinoTable(id, true).catch(() => {});
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("[Token Sentinel] Warning:", err.message);
+  }
+}, 20000);
+
+// On boot: Pre-warm top flagship tables sequentially so first hits are instantaneous (<1s)
+setTimeout(async () => {
+  const topTables = ["99.0010", "99.0013", "99.0018", "99.0030"];
+  console.log(`[Stream Warmer] Pre-warming top flagship tables: [${topTables.join(", ")}]...`);
+  for (const id of topTables) {
+    recordTableTouch(id);
+    await warmCasinoTable(id).catch(() => {});
+    await new Promise((r) => setTimeout(r, 1200));
+  }
+  console.log("[Stream Warmer] Flagship tables pre-warmed & ready in Redis.");
 }, 1000);
 
 // Schedule autonomous demand warmer to run every 4 minutes across cluster
@@ -731,6 +797,21 @@ router.get("/player/:eventId", async (req, res) => {
       !cached.html.includes("Access blocked") &&
       cached.html.includes("cfg")
     ) {
+      let tokenObj = tableTokenCache.get(eventId);
+      if (!isTokenValid(tokenObj)) {
+        const redisToken = await redisClient
+          .get(`table_token:${eventId}`)
+          .catch(() => null);
+        if (isTokenValid(redisToken)) {
+          tokenObj = redisToken;
+          tableTokenCache.set(eventId, tokenObj);
+        }
+      }
+      if (!isTokenValid(tokenObj)) {
+        await warmCasinoTable(eventId, true).catch(() => {});
+      }
+      const finalHtml = injectLiveTokenIntoHtml(cached.html, eventId);
+
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       res.setHeader("Permissions-Policy", "unload=*");
@@ -738,7 +819,7 @@ router.get("/player/:eventId", async (req, res) => {
         "Content-Security-Policy",
         securityEngine.getFrameAncestorsCSP(),
       );
-      return res.send(cached.html);
+      return res.send(finalHtml);
     }
 
     // 2. UNIVERSAL REDIS CACHE: Shared across all PM2 workers & ALL domains (serves in 5-15ms)
@@ -756,12 +837,23 @@ router.get("/player/:eventId", async (req, res) => {
       });
 
       // Synchronize in-memory table token if present in Redis
-      const redisToken = await redisClient
-        .get(`table_token:${eventId}`)
-        .catch(() => null);
-      if (redisToken && redisToken.token) {
-        tableTokenCache.set(eventId, redisToken);
+      let tokenObj = tableTokenCache.get(eventId);
+      if (!isTokenValid(tokenObj)) {
+        const redisToken = await redisClient
+          .get(`table_token:${eventId}`)
+          .catch(() => null);
+        if (isTokenValid(redisToken)) {
+          tokenObj = redisToken;
+          tableTokenCache.set(eventId, tokenObj);
+        }
       }
+
+      // If token is missing or expired, auto-renew on the fly before sending HTML!
+      if (!isTokenValid(tokenObj)) {
+        await warmCasinoTable(eventId, true).catch(() => {});
+      }
+
+      const finalHtml = injectLiveTokenIntoHtml(redisHtml, eventId);
 
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
@@ -770,7 +862,7 @@ router.get("/player/:eventId", async (req, res) => {
         "Content-Security-Policy",
         securityEngine.getFrameAncestorsCSP(),
       );
-      return res.send(redisHtml);
+      return res.send(finalHtml);
     }
   }
 
@@ -803,7 +895,7 @@ router.get("/player/:eventId", async (req, res) => {
           "Content-Security-Policy",
           securityEngine.getFrameAncestorsCSP(),
         );
-        return res.send(redisHtmlAfterWait);
+        return res.send(injectLiveTokenIntoHtml(redisHtmlAfterWait, eventId));
       }
     }
   }
@@ -819,7 +911,7 @@ router.get("/player/:eventId", async (req, res) => {
         "Content-Security-Policy",
         securityEngine.getFrameAncestorsCSP(),
       );
-      return res.send(html);
+      return res.send(injectLiveTokenIntoHtml(html, eventId));
     } catch (_) {}
   }
 
@@ -958,6 +1050,7 @@ router.get("/player/:eventId", async (req, res) => {
 
               if (data && data.token && data.wsUrl) {
                 const proxiedWs = getProxiedWsUrl(data.wsUrl);
+                const expMs = resolveTokenExpiry(data.token);
                 const tokenPayload = {
                   token: data.token,
                   wsUrl: proxiedWs,
@@ -965,11 +1058,12 @@ router.get("/player/:eventId", async (req, res) => {
                     data.streamId ||
                     (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) ||
                     "GAME10",
-                  expiresAt: resolveTokenExpiry(data.token),
+                  expiresAt: expMs,
                 };
                 tableTokenCache.set(eventId, tokenPayload);
+                const tokenTtlSec = Math.max(30, Math.floor((expMs - Date.now()) / 1000));
                 redisClient
-                  .set(`table_token:${eventId}`, tokenPayload, 600) // 10 minutes in Redis
+                  .set(`table_token:${eventId}`, tokenPayload, tokenTtlSec)
                   .catch(() => {});
                 pingCache.set(targetUrl, {
                   data: { ...data, wsUrl: proxiedWs },
@@ -1018,7 +1112,7 @@ router.get("/player/:eventId", async (req, res) => {
       "Content-Security-Policy",
       securityEngine.getFrameAncestorsCSP(),
     );
-    return res.send(html);
+    return res.send(injectLiveTokenIntoHtml(html, eventId));
   } catch (err) {
     // Resilient fallback: If upstream failed, serve previously cached HTML if available
     const stale = playerCache.get(`casino_${eventId}`);
@@ -1034,7 +1128,7 @@ router.get("/player/:eventId", async (req, res) => {
         "Content-Security-Policy",
         securityEngine.getFrameAncestorsCSP(),
       );
-      return res.send(stale.html);
+      return res.send(injectLiveTokenIntoHtml(stale.html, eventId));
     }
 
     // Clean player fallback: Auto-retrying black screen with centered loader GIF (no synthetic error card)
@@ -1256,6 +1350,12 @@ function getPatchedPlayerJs() {
     "this.reconnectTimer = setTimeout(() => this.retryNow(), 300)",
   );
 
+  // 8b. Ensure retryNow explicitly requests a fresh token and handshake (init: true, token: true)
+  text = text.replace(
+    /p\.ping\(\)\.then\(\(\)\s*=>\s*\{/g,
+    "p.ping(!0,!0).then(()=>{",
+  );
+
   // 9. Preserve everPlayed flag across socket jitter (Prevents recurring loader screens)
   text = text.replace(/\(this\.everPlayed\s*=\s*!1\)/g, "(void 0)");
 
@@ -1435,12 +1535,26 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
   // Replying locally in 0ms saves 99% of proxy requests and stops proxy quota drain!
   if (!isInit) {
     let cachedObj = tableTokenCache.get(eventId);
-    if (!cachedObj || !cachedObj.token) {
+    if (!isTokenValid(cachedObj)) {
       try {
         const redisData = await redisClient.get(`table_token:${eventId}`);
-        if (redisData && redisData.token) cachedObj = redisData;
+        if (isTokenValid(redisData)) cachedObj = redisData;
       } catch (_) {}
     }
+
+    // If token is expiring or missing, auto-renew right now so stream never drops!
+    if (!isTokenValid(cachedObj) && eventId) {
+      console.log(`[Proxy-Ping] Heartbeat noticed expiring/missing token for table ${eventId}. Auto-refreshing...`);
+      await warmCasinoTable(eventId, true).catch(() => {});
+      cachedObj = tableTokenCache.get(eventId);
+      if (!isTokenValid(cachedObj)) {
+        try {
+          const redisData = await redisClient.get(`table_token:${eventId}`);
+          if (redisData && redisData.token) cachedObj = redisData;
+        } catch (_) {}
+      }
+    }
+
     const token = cachedObj?.token || "";
     const ws = cachedObj?.wsUrl || fallbackWsUrl;
     const streamId =
@@ -1462,20 +1576,38 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
   // 2. FAST ZERO-PROXY PATH FOR INIT PINGS WITH ACTIVE TOKEN:
   if (isInit && eventId) {
     let cachedObj = tableTokenCache.get(eventId);
-    if (!cachedObj || !cachedObj.token) {
+    if (!isTokenValid(cachedObj)) {
       try {
         const redisData = await redisClient.get(`table_token:${eventId}`);
-        if (redisData && redisData.token) {
+        if (isTokenValid(redisData)) {
           cachedObj = redisData;
           tableTokenCache.set(eventId, cachedObj);
         }
       } catch (_) {}
     }
-    if (
-      cachedObj &&
-      cachedObj.token &&
-      Date.now() < (cachedObj.expiresAt || 0)
-    ) {
+    if (isTokenValid(cachedObj)) {
+      return res.status(200).json({
+        ok: true,
+        state: "live",
+        streamId: cachedObj.streamId || fallbackStreamId,
+        wsUrl: getProxiedWsUrl(cachedObj.wsUrl || fallbackWsUrl),
+        token: cachedObj.token,
+        maintenance: null,
+        stop: false,
+      });
+    }
+
+    // Auto-renew on the fly if token is expired or missing on init!
+    console.log(`[Proxy-Ping] Init ping: token for ${eventId} expired/missing. Auto-renewing on the fly...`);
+    await warmCasinoTable(eventId, true).catch(() => {});
+    cachedObj = tableTokenCache.get(eventId);
+    if (!isTokenValid(cachedObj)) {
+      try {
+        const redisData = await redisClient.get(`table_token:${eventId}`);
+        if (isTokenValid(redisData)) cachedObj = redisData;
+      } catch (_) {}
+    }
+    if (isTokenValid(cachedObj)) {
       return res.status(200).json({
         ok: true,
         state: "live",
@@ -1563,11 +1695,7 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
         const cachedObj =
           tableTokenCache.get(eventId) ||
           (await redisClient.get(`table_token:${eventId}`).catch(() => null));
-        if (
-          cachedObj &&
-          cachedObj.token &&
-          Date.now() < (cachedObj.expiresAt || 0)
-        ) {
+        if (isTokenValid(cachedObj)) {
           return {
             ok: true,
             state: "live",
@@ -1622,15 +1750,17 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
             pingResData.streamId = fallbackStreamId;
           pingResData.wsUrl = getProxiedWsUrl(pingResData.wsUrl);
           if (pingResData.token) {
+            const expMs = resolveTokenExpiry(pingResData.token);
             const tokenPayload = {
               token: pingResData.token,
               wsUrl: pingResData.wsUrl,
               streamId: pingResData.streamId,
-              expiresAt: resolveTokenExpiry(pingResData.token),
+              expiresAt: expMs,
             };
             tableTokenCache.set(eventId, tokenPayload);
+            const tokenTtlSec = Math.max(30, Math.floor((expMs - Date.now()) / 1000));
             redisClient
-              .set(`table_token:${eventId}`, tokenPayload, 900) // 15 minutes in Redis
+              .set(`table_token:${eventId}`, tokenPayload, tokenTtlSec)
               .catch(() => {});
             pingCache.set(targetUrl, {
               data: pingResData,
@@ -1662,11 +1792,7 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
       );
       await warmCasinoTable(eventId, true);
       const freshToken = tableTokenCache.get(eventId);
-      if (
-        freshToken &&
-        freshToken.token &&
-        Date.now() < (freshToken.expiresAt || 0)
-      ) {
+      if (isTokenValid(freshToken)) {
         return res.status(200).json({
           ok: true,
           state: "live",
@@ -1681,9 +1807,8 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
 
     // Fallback if warmCasinoTable couldn't get token - check validity
     const cachedObj = eventId ? tableTokenCache.get(eventId) : null;
-    const isTokenValid =
-      cachedObj && cachedObj.token && Date.now() < (cachedObj.expiresAt || 0);
-    const cachedToken = isTokenValid ? cachedObj.token : "";
+    const tokenValid = isTokenValid(cachedObj);
+    const cachedToken = tokenValid ? cachedObj.token : "";
     const cachedWs = (cachedObj && cachedObj.wsUrl) || fallbackWsUrl;
     return res.status(200).json({
       ok: true,
@@ -1696,9 +1821,8 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
     });
   } catch (err) {
     const cachedObj = eventId ? tableTokenCache.get(eventId) : null;
-    const isTokenValid =
-      cachedObj && cachedObj.token && Date.now() < (cachedObj.expiresAt || 0);
-    const cachedToken = isTokenValid ? cachedObj.token : "";
+    const tokenValid = isTokenValid(cachedObj);
+    const cachedToken = tokenValid ? cachedObj.token : "";
     const cachedWs = (cachedObj && cachedObj.wsUrl) || fallbackWsUrl;
     return res.status(200).json({
       ok: true,
