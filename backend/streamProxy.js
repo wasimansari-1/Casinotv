@@ -165,9 +165,10 @@ function resolveTokenExpiry(token, fallbackMs = 600000) {
         );
         if (payload && payload.exp && typeof payload.exp === "number") {
           const expMs = payload.exp * 1000;
-          const remainingMs = expMs - Date.now() - 30000;
-          if (remainingMs > 10000) {
-            return Date.now() + Math.min(remainingMs, 3600000 * 2); // Dynamic up to 2 hours
+          const remainingMs = expMs - Date.now();
+          // If token has long validity window (e.g. CBTF auth 5 hrs), use actual expiry
+          if (remainingMs > 600000) {
+            return Date.now() + remainingMs - 60000;
           }
         }
       }
@@ -208,23 +209,22 @@ async function warmCasinoTable(eventId, forceFresh = false) {
   }
 
   try {
-    // 1. FAST PATH: Check if we already have valid HTML & active token in Redis (0 proxy calls!)
+    // 1. FAST PATH: Check if we already have valid HTML in Redis (0 proxy calls!)
+    // Once ANY domain or warmer loads a table, it remains 100% active in Redis
     if (!forceFresh) {
       let existingHtml = await redisClient.get(`html:${eventId}`);
-      let existingToken =
-        tableTokenCache.get(eventId) ||
-        (await redisClient.get(`table_token:${eventId}`).catch(() => null));
-
       if (
         existingHtml &&
         typeof existingHtml === "string" &&
         existingHtml.includes("cfg") &&
-        !existingHtml.includes("Access blocked") &&
-        existingToken &&
-        existingToken.token &&
-        Date.now() < (existingToken.expiresAt || 0)
+        !existingHtml.includes("Access blocked")
       ) {
-        tableTokenCache.set(eventId, existingToken);
+        let existingToken =
+          tableTokenCache.get(eventId) ||
+          (await redisClient.get(`table_token:${eventId}`).catch(() => null));
+        if (existingToken && existingToken.token) {
+          tableTokenCache.set(eventId, existingToken);
+        }
         playerCache.set(`casino_${eventId}`, {
           html: existingHtml,
           expiresAt: Date.now() + CASINO_CACHE_TTL,
@@ -577,38 +577,9 @@ function transformPlayerHtml(
     </style>
   `;
 
-  // Client-Side Anti-Theft Ancestor & Embedding Lock (Prevents reseller nested-iframes and cross-site wrapping)
-  const allowedOriginsJson = JSON.stringify(
-    securityEngine.getAllowedDomainsList(),
-  );
-  const antiTheftGuardScript = `
-    <script>
-      (function(){
-        try {
-          var allowed = ${allowedOriginsJson};
-          if (window.location.ancestorOrigins && window.location.ancestorOrigins.length > 0) {
-            for (var i = 0; i < window.location.ancestorOrigins.length; i++) {
-              var aOrigin = window.location.ancestorOrigins[i];
-              var aHost = new URL(aOrigin).hostname.toLowerCase();
-              var ok = false;
-              for (var j = 0; j < allowed.length; j++) {
-                var d = allowed[j].toLowerCase();
-                if (aHost === d || aHost.endsWith('.' + d)) { ok = true; break; }
-              }
-              if (!ok) {
-                document.documentElement.innerHTML = '<div style="background:#090d16;color:#ef4444;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:sans-serif;font-weight:700;font-size:16px;text-align:center;padding:20px;"><div>UNAUTHORIZED EMBED DETECTED</div><div style="font-size:12px;color:#94a3b8;margin-top:8px;">Domain ' + aHost + ' is not authorized by stream administrator.</div></div>';
-                if (window.stop) window.stop();
-                throw new Error('Framing blocked by anti-theft guard: ' + aHost);
-              }
-            }
-          }
-        } catch(e) {}
-      })();
-    </script>
-  `;
   html = html.replace(
     "</head>",
-    `${cleanWatermarkStyle}\n${antiTheftGuardScript}\n</head>`,
+    `${cleanWatermarkStyle}\n</head>`,
   );
 
   // 2. Extract and modify the embedded JSON config
@@ -750,25 +721,16 @@ router.get("/player/:eventId", async (req, res) => {
   const forceFresh = Boolean(req.query.force || req.query.fresh);
   recordTableTouch(eventId);
 
-  // 1. Check local RAM cache first (serves in 0ms) - only if token is valid and not expired
+  // 1. FAST PATH: Check RAM cache first (serves in 0ms)
   if (!forceFresh) {
-    const cachedToken = tableTokenCache.get(eventId);
     const cached = playerCache.get(`casino_${eventId}`);
     if (
       cached &&
       Date.now() < cached.expiresAt &&
       cached.html &&
       !cached.html.includes("Access blocked") &&
-      cachedToken &&
-      cachedToken.token &&
-      Date.now() < (cachedToken.expiresAt || 0)
+      cached.html.includes("cfg")
     ) {
-      // XFetch Probabilistic Asynchronous Background Renewal:
-      // If token expires in less than 3 minutes, serve valid token now (0ms)
-      // and refresh in background asynchronously so next user never sees a delay!
-      if (cachedToken.expiresAt - Date.now() < 180000) {
-        warmCasinoTable(eventId, true).catch(() => {});
-      }
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
       res.setHeader("Permissions-Policy", "unload=*");
@@ -779,29 +741,26 @@ router.get("/player/:eventId", async (req, res) => {
       return res.send(cached.html);
     }
 
-    // 2. Check distributed Redis cache (shared across PM2 workers) - verify active token!
+    // 2. UNIVERSAL REDIS CACHE: Shared across all PM2 workers & ALL domains (serves in 5-15ms)
+    // Once ANY table is loaded once by ANY domain or warmer, it serves from Redis instantly!
     const redisHtml = await redisClient.get(`html:${eventId}`);
-    const redisToken = await redisClient
-      .get(`table_token:${eventId}`)
-      .catch(() => null);
     if (
       redisHtml &&
       typeof redisHtml === "string" &&
       redisHtml.includes("cfg") &&
-      !redisHtml.includes("Access blocked") &&
-      redisToken &&
-      redisToken.token &&
-      Date.now() < (redisToken.expiresAt || 0)
+      !redisHtml.includes("Access blocked")
     ) {
       playerCache.set(`casino_${eventId}`, {
         html: redisHtml,
         expiresAt: Date.now() + CASINO_CACHE_TTL,
       });
-      if (redisToken) tableTokenCache.set(eventId, redisToken);
 
-      // XFetch Asynchronous Background Renewal
-      if (redisToken.expiresAt - Date.now() < 180000) {
-        warmCasinoTable(eventId, true).catch(() => {});
+      // Synchronize in-memory table token if present in Redis
+      const redisToken = await redisClient
+        .get(`table_token:${eventId}`)
+        .catch(() => null);
+      if (redisToken && redisToken.token) {
+        tableTokenCache.set(eventId, redisToken);
       }
 
       res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -815,7 +774,41 @@ router.get("/player/:eventId", async (req, res) => {
     }
   }
 
-  // Deduplicate in-flight requests for the same table
+  // 3. CLUSTER-WIDE SINGLE-FLIGHT MUTEX ON COLD START:
+  // If Table X is not in Redis, ensure only 1 PM2 worker across the entire server fetches it!
+  // All other concurrent requests across all 1,000 domains wait on the distributed lock
+  // and then receive the freshly cached HTML directly from Redis in 0ms!
+  const clusterLockKey = `lock:fetch_table:${eventId}`;
+  const acquiredLock = await redisClient.acquireLock(clusterLockKey, 20);
+
+  if (!acquiredLock && !forceFresh) {
+    console.log(`[Distributed Harvester] Another worker is currently pre-warming table ${eventId}. Waiting...`);
+    const unlocked = await redisClient.waitForLock(clusterLockKey, 12000, 200);
+    if (unlocked) {
+      const redisHtmlAfterWait = await redisClient.get(`html:${eventId}`);
+      if (
+        redisHtmlAfterWait &&
+        typeof redisHtmlAfterWait === "string" &&
+        redisHtmlAfterWait.includes("cfg") &&
+        !redisHtmlAfterWait.includes("Access blocked")
+      ) {
+        playerCache.set(`casino_${eventId}`, {
+          html: redisHtmlAfterWait,
+          expiresAt: Date.now() + CASINO_CACHE_TTL,
+        });
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        res.setHeader("Permissions-Policy", "unload=*");
+        res.setHeader(
+          "Content-Security-Policy",
+          securityEngine.getFrameAncestorsCSP(),
+        );
+        return res.send(redisHtmlAfterWait);
+      }
+    }
+  }
+
+  // Deduplicate in-flight requests within the local node process
   if (inFlightPlayers.has(eventId)) {
     try {
       const html = await inFlightPlayers.get(eventId);
@@ -976,7 +969,7 @@ router.get("/player/:eventId", async (req, res) => {
                 };
                 tableTokenCache.set(eventId, tokenPayload);
                 redisClient
-                  .set(`table_token:${eventId}`, tokenPayload, 900) // 15 minutes in Redis
+                  .set(`table_token:${eventId}`, tokenPayload, 600) // 10 minutes in Redis
                   .catch(() => {});
                 pingCache.set(targetUrl, {
                   data: { ...data, wsUrl: proxiedWs },
@@ -997,7 +990,7 @@ router.get("/player/:eventId", async (req, res) => {
                   expiresAt: Date.now() + CASINO_CACHE_TTL,
                   timestamp: Date.now(),
                 });
-                redisClient.set(`html:${eventId}`, html, 900).catch(() => {});
+                redisClient.set(`html:${eventId}`, html, 1800).catch(() => {});
               }
             }
           } catch (_) {}
@@ -1050,6 +1043,7 @@ router.get("/player/:eventId", async (req, res) => {
     return res.status(200).send(cleanPlayerHtml);
   } finally {
     inFlightPlayers.delete(eventId);
+    await redisClient.releaseLock(clusterLockKey).catch(() => {});
   }
 });
 
@@ -1468,18 +1462,10 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
   // 2. FAST ZERO-PROXY PATH FOR INIT PINGS WITH ACTIVE TOKEN:
   if (isInit && eventId) {
     let cachedObj = tableTokenCache.get(eventId);
-    if (
-      !cachedObj ||
-      !cachedObj.token ||
-      Date.now() >= (cachedObj.expiresAt || 0)
-    ) {
+    if (!cachedObj || !cachedObj.token) {
       try {
         const redisData = await redisClient.get(`table_token:${eventId}`);
-        if (
-          redisData &&
-          redisData.token &&
-          Date.now() < (redisData.expiresAt || 0)
-        ) {
+        if (redisData && redisData.token) {
           cachedObj = redisData;
           tableTokenCache.set(eventId, cachedObj);
         }
