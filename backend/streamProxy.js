@@ -262,7 +262,7 @@ async function warmCasinoTable(eventId, forceFresh = false) {
     }
 
     // 2. FRESH TICKET FETCH: On user demand or when ticket actually expires
-    const watchData = await getWatchUrl(eventId, { forceFresh: true });
+    const watchData = await getWatchUrl(eventId, { forceFresh });
     const watchUrl = typeof watchData === "string" ? watchData : watchData.url;
     const providerOrigin = watchData.origin
       ? watchData.origin.endsWith("/")
@@ -506,36 +506,32 @@ async function runContinuousWarmerCycle() {
   }
 }
 
-// Proactive Token Sentinel: Runs every 20s across active tables.
-// If any active table's token has <40s remaining, it auto-renews in the background so viewers NEVER see a drop!
+// Proactive Token Sentinel: Gentle background sync every 60s for active tables.
+// Only warms if table is completely missing a token, avoiding aggressive upstream rate-limits.
 setInterval(async () => {
   try {
     const tableIds = Object.keys(GAME_MAP);
     for (const id of tableIds) {
       if (await isTableActive(id)) {
         let tokenObj = tableTokenCache.get(id);
-        if (!isTokenValid(tokenObj)) {
+        if (!tokenObj || !tokenObj.token) {
           const redisToken = await redisClient.get(`table_token:${id}`).catch(() => null);
-          if (isTokenValid(redisToken)) {
-            tokenObj = redisToken;
-            tableTokenCache.set(id, tokenObj);
+          if (redisToken && redisToken.token) {
+            tableTokenCache.set(id, redisToken);
+          } else {
+            console.log(
+              `[Token Sentinel] ⚡ Restoring missing token for active table ${id}...`,
+            );
+            await warmCasinoTable(id, false).catch(() => {});
+            await new Promise((r) => setTimeout(r, 1500));
           }
-        }
-
-        const expiresAt = Number(tokenObj?.expiresAt) || 0;
-        const remainingMs = expiresAt - Date.now();
-        if (remainingMs < 40000) {
-          console.log(
-            `[Token Sentinel] ⚡ Proactively auto-renewing token for active table ${id} (${Math.round(remainingMs / 1000)}s remaining)...`,
-          );
-          await warmCasinoTable(id, true).catch(() => {});
         }
       }
     }
   } catch (err) {
     console.warn("[Token Sentinel] Warning:", err.message);
   }
-}, 20000);
+}, 60000);
 
 // On boot: Pre-warm top flagship tables sequentially so first hits are instantaneous (<1s)
 setTimeout(async () => {
@@ -1532,27 +1528,14 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
 
   // 1. FAST ZERO-PROXY PATH FOR ALL ROUTINE HEARTBEATS (!isInit):
   // When a player is running, it pings every 3-5 seconds.
-  // Replying locally in 0ms saves 99% of proxy requests and stops proxy quota drain!
+  // Replying locally in 0ms saves 100% of proxy requests and stops provider rate-limiting!
   if (!isInit) {
     let cachedObj = tableTokenCache.get(eventId);
-    if (!isTokenValid(cachedObj)) {
+    if (!cachedObj) {
       try {
         const redisData = await redisClient.get(`table_token:${eventId}`);
-        if (isTokenValid(redisData)) cachedObj = redisData;
+        if (redisData) cachedObj = redisData;
       } catch (_) {}
-    }
-
-    // If token is expiring or missing, auto-renew right now so stream never drops!
-    if (!isTokenValid(cachedObj) && eventId) {
-      console.log(`[Proxy-Ping] Heartbeat noticed expiring/missing token for table ${eventId}. Auto-refreshing...`);
-      await warmCasinoTable(eventId, true).catch(() => {});
-      cachedObj = tableTokenCache.get(eventId);
-      if (!isTokenValid(cachedObj)) {
-        try {
-          const redisData = await redisClient.get(`table_token:${eventId}`);
-          if (redisData && redisData.token) cachedObj = redisData;
-        } catch (_) {}
-      }
     }
 
     const token = cachedObj?.token || "";
@@ -1599,7 +1582,7 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
 
     // Auto-renew on the fly if token is expired or missing on init!
     console.log(`[Proxy-Ping] Init ping: token for ${eventId} expired/missing. Auto-renewing on the fly...`);
-    await warmCasinoTable(eventId, true).catch(() => {});
+    await warmCasinoTable(eventId, false).catch(() => {});
     cachedObj = tableTokenCache.get(eventId);
     if (!isTokenValid(cachedObj)) {
       try {
