@@ -577,7 +577,8 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
   return html;
 }
 
-// 5. Protected Zero-Origin-Leak Sports Player Template with Ticker & Notice Shielding
+// 5. Clean, Ultra-Smooth Zero-Origin-Leak Sports Player Template
+// Pristine video broadcast with zero watermark text and native sound toggle controls
 function renderProtectedDirectPlayer(betfairId, eventId, sportId = "4") {
   return `<!doctype html>
 <html lang="en">
@@ -604,6 +605,9 @@ function renderProtectedDirectPlayer(betfairId, eventId, sportId = "4") {
       height: 100%;
       overflow: hidden;
       background: #000;
+      transform: translateZ(0);
+      will-change: transform;
+      backface-visibility: hidden;
     }
     #stream-frame {
       position: absolute;
@@ -612,139 +616,60 @@ function renderProtectedDirectPlayer(betfairId, eventId, sportId = "4") {
       height: 100%;
       border: 0;
       background: #000;
+      transform: translateZ(0);
+      will-change: transform;
     }
-    /* Dynamic Brand Watermark */
-    #wm {
-      position: absolute;
-      z-index: 10;
-      top: 8%;
-      left: 6%;
-      pointer-events: none;
-      color: rgba(255, 255, 255, 0.35);
-      font-weight: 700;
-      font-size: 13px;
-      letter-spacing: 0.5px;
-      text-shadow: 0 0 3px rgba(0,0,0,0.8);
-      transition: top 2.5s cubic-bezier(0.4, 0, 0.2, 1), left 2.5s cubic-bezier(0.4, 0, 0.2, 1);
-      white-space: nowrap;
-    }
-    /* Logo Blur Shield: Blurs out upstream third-party speaker/logo */
-    #mb-logo {
-      position: absolute;
-      z-index: 8;
-      left: calc(3% + 14px);
-      top: 50%;
-      width: max(8%, 42px);
-      aspect-ratio: 1;
-      transform: translate(-50%, -50%);
-      pointer-events: none;
-      -webkit-backdrop-filter: blur(28px);
-      backdrop-filter: blur(28px);
-      border-radius: 50%;
-    }
-    /* Notice & Ticker Shield: Sleek gradient barrier at the bottom to suppress any injected text/tickers */
+    /* Notice & Ticker Shield: Sleek gradient barrier at the bottom to suppress any rogue text/tickers */
     #ticker-shield {
       position: absolute;
       z-index: 9;
       bottom: 0;
       left: 0;
       right: 0;
-      height: 38px;
+      height: 32px;
       pointer-events: none;
-      background: linear-gradient(to top, rgba(0, 0, 0, 0.95) 0%, rgba(0, 0, 0, 0.6) 50%, rgba(0, 0, 0, 0) 100%);
+      background: linear-gradient(to top, rgba(0, 0, 0, 0.95) 0%, rgba(0, 0, 0, 0.5) 60%, rgba(0, 0, 0, 0) 100%);
     }
-    /* Status Screen overlay */
+    /* Status Screen overlay: Clean minimalist fade */
     #status {
       position: absolute;
       inset: 0;
       z-index: 20;
       display: grid;
       place-items: center;
-      color: #94a3b8;
-      font-size: 15px;
+      color: #64748b;
+      font-size: 14px;
       letter-spacing: 0.3px;
       pointer-events: none;
       background: #000;
-      transition: opacity 0.5s ease-out;
+      transition: opacity 0.4s ease-out;
     }
     #status.off {
       opacity: 0;
       visibility: hidden;
     }
-    /* Discreet Server Switch & Reload Controls */
-    .controls {
-      position: absolute;
-      top: 8px;
-      right: 8px;
-      z-index: 30;
-      display: flex;
-      gap: 6px;
-      opacity: 0;
-      transition: opacity 0.3s;
-    }
-    .player-wrap:hover .controls {
-      opacity: 0.85;
-    }
-    .ctrl-btn {
-      background: rgba(0,0,0,0.65);
-      border: 1px solid rgba(255,255,255,0.15);
-      color: #cbd5e1;
-      padding: 4px 8px;
-      font-size: 11px;
-      border-radius: 4px;
-      cursor: pointer;
-      backdrop-filter: blur(8px);
-    }
-    .ctrl-btn:hover {
-      background: rgba(255,255,255,0.15);
-      color: #fff;
-    }
   </style>
 </head>
 <body>
   <div class="player-wrap">
-    <iframe id="stream-frame" src="/api/stream/sports/hop/${encodeURIComponent(betfairId)}" title="Live Broadcast" allow="autoplay; encrypted-media; fullscreen" allowfullscreen scrolling="no" referrerpolicy="no-referrer"></iframe>
-    <div id="mb-logo"></div>
+    <iframe id="stream-frame" src="/api/stream/sports/hop/${encodeURIComponent(betfairId)}" title="Live Broadcast" allow="autoplay; encrypted-media; fullscreen; picture-in-picture" allowfullscreen scrolling="no" referrerpolicy="no-referrer"></iframe>
     <div id="ticker-shield"></div>
-    <div id="wm">CasinoTV Live</div>
-    <div id="status">Connecting to live feed…</div>
-    <div class="controls">
-      <button class="ctrl-btn" onclick="toggleEngine()">Backup Server</button>
-      <button class="ctrl-btn" onclick="reloadPlayer()">↺ Reload</button>
-    </div>
+    <div id="status">Connecting…</div>
   </div>
 
   <script>
     (function () {
       var betfairId = ${JSON.stringify(betfairId)};
-      var eventId = ${JSON.stringify(eventId)};
-      var sportId = ${JSON.stringify(sportId)};
       var fr = document.getElementById('stream-frame');
-      var wm = document.getElementById('wm');
       var st = document.getElementById('status');
 
-      // 1. Watermark initialization and movement
-      try {
-        var h = location.hostname;
-        if (h && h !== 'localhost' && h !== '127.0.0.1') {
-          wm.textContent = h;
-        }
-      } catch (_) {}
-
-      function moveWm() {
-        wm.style.top = (6 + Math.random() * 74) + '%';
-        wm.style.left = (4 + Math.random() * Math.max(0, 90 - (wm.offsetWidth / Math.max(1, innerWidth)) * 100)) + '%';
-      }
-      setTimeout(moveWm, 400);
-      setInterval(moveWm, 6500);
-
-      // 2. Hide connecting status smoothly
+      // Hide connecting overlay smoothly once player boots
       var done = false;
       function hideStatus() {
         if (!done) {
           done = true;
           st.className = 'off';
-          setTimeout(function () { st.hidden = true; }, 550);
+          setTimeout(function () { st.hidden = true; }, 450);
         }
       }
 
@@ -752,23 +677,10 @@ function renderProtectedDirectPlayer(betfairId, eventId, sportId = "4") {
       fr.onload = function () {
         loadCount++;
         if (loadCount >= 2) {
-          setTimeout(hideStatus, 1200);
+          setTimeout(hideStatus, 800);
         }
       };
-      setTimeout(hideStatus, 8000);
-
-      // 3. Mount zero-origin-leak hop iframe
-      fr.src = '/api/stream/sports/hop/' + encodeURIComponent(betfairId);
-
-      // 4. Fallback switch handlers
-      window.toggleEngine = function () {
-        var cur = new URL(location.href);
-        cur.searchParams.set('engine', 'proxy');
-        location.href = cur.href;
-      };
-      window.reloadPlayer = function () {
-        fr.src = '/api/stream/sports/hop/' + encodeURIComponent(betfairId) + '?t=' + Date.now();
-      };
+      setTimeout(hideStatus, 4000);
     })();
   </script>
 </body>
