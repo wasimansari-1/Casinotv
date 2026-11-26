@@ -11,16 +11,16 @@ const redisClient = require('./redisClient');
 // Global System Configuration (Configurable via Environment Variables)
 // ============================================================================
 const CONFIG = {
-  // Provider concurrency: 1 strictly sequential request to prevent WAF / 422 trigger
-  concurrency: Math.max(1, parseInt(process.env.PROVIDER_CONCURRENCY, 10) || 1),
-  // Minimum interval between requests to the same provider (1200ms human pace)
-  minIntervalMs: Math.max(100, parseInt(process.env.PROVIDER_MIN_INTERVAL_MS, 10) || 1200),
-  // Maximum retries for temporary failures
-  maxRetries: Math.max(0, parseInt(process.env.PROVIDER_MAX_RETRIES, 10) || 3),
+  // Provider concurrency: number of simultaneous requests allowed per provider (default: 4)
+  concurrency: Math.max(1, parseInt(process.env.PROVIDER_CONCURRENCY, 10) || 4),
+  // Minimum interval between requests to the same provider in ms (default: 100)
+  minIntervalMs: Math.max(20, parseInt(process.env.PROVIDER_MIN_INTERVAL_MS, 10) || 100),
+  // Maximum retries for temporary failures (default: 5 fast session rotations)
+  maxRetries: Math.max(0, parseInt(process.env.PROVIDER_MAX_RETRIES, 10) || 5),
   // Exponential backoff delays in ms
   backoffMs: [
-    parseInt(process.env.PROVIDER_BACKOFF_1_MS, 10) || 500,
-    parseInt(process.env.PROVIDER_BACKOFF_2_MS, 10) || 1500
+    parseInt(process.env.PROVIDER_BACKOFF_1_MS, 10) || 150,
+    parseInt(process.env.PROVIDER_BACKOFF_2_MS, 10) || 500
   ],
   // Circuit breaker cooldown on HTTP 429 in ms (default: 5000 = 5s)
   cooldownMs: parseInt(process.env.CIRCUIT_BREAKER_COOLDOWN_MS, 10) || 5000,
