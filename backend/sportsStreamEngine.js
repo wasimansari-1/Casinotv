@@ -132,13 +132,31 @@ function getPatchedSportsPlayerJs() {
   return _cachedSportsPlayerJs;
 }
 
-// 2. Resolve 20-digit internal exchange event ID to real Betfair event ID
+
+// 2. Resolve internal exchange event ID to real Betfair event ID
 async function resolveBetfairEventId(rawId, sportId = "4") {
   const streamId = String(rawId || "").trim();
 
-  // If already an 8-9 digit Betfair ID, return immediately
-  if (/^\d{7,9}$/.test(streamId)) {
+  // If already an 7-10 digit Betfair ID, return immediately
+  if (/^\d{7,10}$/.test(streamId)) {
     return streamId;
+  }
+
+  // 20wickets match ID mapping: starts with 8000 (e.g. 8000036223050 -> 36223050)
+  if (streamId.length >= 12 && streamId.startsWith("8000")) {
+    const stripped = String(Number(streamId.slice(4)));
+    if (/^\d{6,10}$/.test(stripped)) {
+      return stripped;
+    }
+  }
+
+  // Large numeric 12-14 digit ID starting with 8e12
+  const numId = Number(streamId);
+  if (!isNaN(numId) && numId >= 8e12 && numId < 9e12) {
+    const stripped = String(numId - 8e12);
+    if (/^\d{6,10}$/.test(stripped)) {
+      return stripped;
+    }
   }
 
   // Check local RAM cache
@@ -191,7 +209,7 @@ async function resolveBetfairEventId(rawId, sportId = "4") {
       const resolved =
         matchOdds?.eventId || bookmaker?.eventId || rawData.streamId;
 
-      if (resolved && /^\d{7,9}$/.test(String(resolved))) {
+      if (resolved && /^\d{6,10}$/.test(String(resolved))) {
         const betfairId = String(resolved);
         betfairIdCache.set(streamId, betfairId);
         await redisClient.set(
@@ -559,7 +577,205 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
   return html;
 }
 
-// 5. Native Minimalist Unavailable Screen matching original provider
+// 5. Protected Zero-Origin-Leak Sports Player Template with Ticker & Notice Shielding
+function renderProtectedDirectPlayer(betfairId, eventId, sportId = "4") {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <title>Live Sports TV</title>
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: #000;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    .player-wrap {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+    }
+    #stream-frame {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: #000;
+    }
+    /* Dynamic Brand Watermark */
+    #wm {
+      position: absolute;
+      z-index: 10;
+      top: 8%;
+      left: 6%;
+      pointer-events: none;
+      color: rgba(255, 255, 255, 0.35);
+      font-weight: 700;
+      font-size: 13px;
+      letter-spacing: 0.5px;
+      text-shadow: 0 0 3px rgba(0,0,0,0.8);
+      transition: top 2.5s cubic-bezier(0.4, 0, 0.2, 1), left 2.5s cubic-bezier(0.4, 0, 0.2, 1);
+      white-space: nowrap;
+    }
+    /* Logo Blur Shield: Blurs out upstream third-party speaker/logo */
+    #mb-logo {
+      position: absolute;
+      z-index: 8;
+      left: calc(3% + 14px);
+      top: 50%;
+      width: max(8%, 42px);
+      aspect-ratio: 1;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      -webkit-backdrop-filter: blur(28px);
+      backdrop-filter: blur(28px);
+      border-radius: 50%;
+    }
+    /* Notice & Ticker Shield: Sleek gradient barrier at the bottom to suppress any injected text/tickers */
+    #ticker-shield {
+      position: absolute;
+      z-index: 9;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 38px;
+      pointer-events: none;
+      background: linear-gradient(to top, rgba(0, 0, 0, 0.95) 0%, rgba(0, 0, 0, 0.6) 50%, rgba(0, 0, 0, 0) 100%);
+    }
+    /* Status Screen overlay */
+    #status {
+      position: absolute;
+      inset: 0;
+      z-index: 20;
+      display: grid;
+      place-items: center;
+      color: #94a3b8;
+      font-size: 15px;
+      letter-spacing: 0.3px;
+      pointer-events: none;
+      background: #000;
+      transition: opacity 0.5s ease-out;
+    }
+    #status.off {
+      opacity: 0;
+      visibility: hidden;
+    }
+    /* Discreet Server Switch & Reload Controls */
+    .controls {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      z-index: 30;
+      display: flex;
+      gap: 6px;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .player-wrap:hover .controls {
+      opacity: 0.85;
+    }
+    .ctrl-btn {
+      background: rgba(0,0,0,0.65);
+      border: 1px solid rgba(255,255,255,0.15);
+      color: #cbd5e1;
+      padding: 4px 8px;
+      font-size: 11px;
+      border-radius: 4px;
+      cursor: pointer;
+      backdrop-filter: blur(8px);
+    }
+    .ctrl-btn:hover {
+      background: rgba(255,255,255,0.15);
+      color: #fff;
+    }
+  </style>
+</head>
+<body>
+  <div class="player-wrap">
+    <iframe id="stream-frame" src="/api/stream/sports/hop/${encodeURIComponent(betfairId)}" title="Live Broadcast" allow="autoplay; encrypted-media; fullscreen" allowfullscreen scrolling="no" referrerpolicy="no-referrer"></iframe>
+    <div id="mb-logo"></div>
+    <div id="ticker-shield"></div>
+    <div id="wm">CasinoTV Live</div>
+    <div id="status">Connecting to live feed…</div>
+    <div class="controls">
+      <button class="ctrl-btn" onclick="toggleEngine()">Backup Server</button>
+      <button class="ctrl-btn" onclick="reloadPlayer()">↺ Reload</button>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      var betfairId = ${JSON.stringify(betfairId)};
+      var eventId = ${JSON.stringify(eventId)};
+      var sportId = ${JSON.stringify(sportId)};
+      var fr = document.getElementById('stream-frame');
+      var wm = document.getElementById('wm');
+      var st = document.getElementById('status');
+
+      // 1. Watermark initialization and movement
+      try {
+        var h = location.hostname;
+        if (h && h !== 'localhost' && h !== '127.0.0.1') {
+          wm.textContent = h;
+        }
+      } catch (_) {}
+
+      function moveWm() {
+        wm.style.top = (6 + Math.random() * 74) + '%';
+        wm.style.left = (4 + Math.random() * Math.max(0, 90 - (wm.offsetWidth / Math.max(1, innerWidth)) * 100)) + '%';
+      }
+      setTimeout(moveWm, 400);
+      setInterval(moveWm, 6500);
+
+      // 2. Hide connecting status smoothly
+      var done = false;
+      function hideStatus() {
+        if (!done) {
+          done = true;
+          st.className = 'off';
+          setTimeout(function () { st.hidden = true; }, 550);
+        }
+      }
+
+      var loadCount = 0;
+      fr.onload = function () {
+        loadCount++;
+        if (loadCount >= 2) {
+          setTimeout(hideStatus, 1200);
+        }
+      };
+      setTimeout(hideStatus, 8000);
+
+      // 3. Mount zero-origin-leak hop iframe
+      fr.src = '/api/stream/sports/hop/' + encodeURIComponent(betfairId);
+
+      // 4. Fallback switch handlers
+      window.toggleEngine = function () {
+        var cur = new URL(location.href);
+        cur.searchParams.set('engine', 'proxy');
+        location.href = cur.href;
+      };
+      window.reloadPlayer = function () {
+        fr.src = '/api/stream/sports/hop/' + encodeURIComponent(betfairId) + '?t=' + Date.now();
+      };
+    })();
+  </script>
+</body>
+</html>`;
+}
+
+// 6. Native Minimalist Unavailable Screen matching original provider
 function renderNoTvHtml(matchName = "") {
   return `
     <!DOCTYPE html>
@@ -751,10 +967,42 @@ router.get("/events", async (req, res) => {
   }
 });
 
+// 3b. Dedicated Zero-Origin-Leak Hop Gateway
+// Strips Referer completely (<meta name="referrer" content="no-referrer">) before navigating to Oddsdata
+router.get("/hop/:betfairId", (req, res) => {
+  let id = String(req.params.betfairId || "").replace(/\D/g, "");
+  if (id.length >= 12 && id.startsWith("8000")) {
+    id = String(Number(id.slice(4)));
+  }
+
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  res.setHeader("Permissions-Policy", "unload=*");
+
+  res.send(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="referrer" content="no-referrer">
+  <style>html,body{margin:0;height:100%;background:#000;overflow:hidden;}</style>
+</head>
+<body>
+<script>
+var id = ${JSON.stringify(id)};
+if (id) {
+  location.replace('https://oddsdata.org/score/619d50045eb8d022a9cd0b2389b8a96f42884d74/' + id);
+}
+</script>
+</body>
+</html>`);
+});
+
 // 4. Dedicated Sports TV Player Iframe
 router.get("/player/:eventId", async (req, res) => {
   const { eventId } = req.params;
   const sportId = req.query.sportId || "4";
+  const engine = String(req.query.engine || "direct").toLowerCase();
 
   // Master Security Whitelist Guard
   const access = await securityEngine.verifyAccess(req, "sports");
@@ -773,6 +1021,27 @@ router.get("/player/:eventId", async (req, res) => {
       );
   }
 
+  // 1. Direct Zero-Origin-Leak Hop Engine (Default: 0 proxy bandwidth, 0ms load, clean visual masking)
+  if (engine !== "proxy") {
+    try {
+      const betfairId = await resolveBetfairEventId(eventId, sportId);
+      if (betfairId) {
+        const directHtml = renderProtectedDirectPlayer(betfairId, eventId, sportId);
+        res.setHeader("Content-Type", "text/html; charset=utf-8");
+        res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        res.setHeader("Permissions-Policy", "unload=*");
+        res.setHeader(
+          "Content-Security-Policy",
+          securityEngine.getFrameAncestorsCSP(),
+        );
+        return res.send(directHtml);
+      }
+    } catch (e) {
+      console.warn(`[SportsEngine] Direct player resolution fallback to proxy for ${eventId}:`, e.message);
+    }
+  }
+
+  // 2. Multi-Provider Proxy Relay Engine (Fallback)
   const cacheKey = `sports_player_${eventId}`;
 
   // 1. Check local RAM cache (serves in 0ms)
