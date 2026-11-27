@@ -58,26 +58,45 @@ function escapeHtml(str) {
     .replace(/'/g, '&#039;');
 }
 
-function getCustomMessageForDomain(domain) {
-  if (!domain) return globalCustomMessage.active ? globalCustomMessage : null;
-  const clean = String(domain).toLowerCase().trim();
+function getCustomMessageForTarget(domain, clientIp) {
+  let cleanDomain = domain ? String(domain).toLowerCase().trim() : '';
+  if (cleanDomain.startsWith('direct: ')) cleanDomain = cleanDomain.replace('direct: ', '').trim();
+  let cleanIp = clientIp ? String(clientIp).toLowerCase().trim() : '';
 
-  // 1. Exact match
-  if (customMessagesMap.has(clean)) {
-    const m = customMessagesMap.get(clean);
+  // 1. Direct match on domain or IP in customMessagesMap
+  if (cleanDomain && customMessagesMap.has(cleanDomain)) {
+    const m = customMessagesMap.get(cleanDomain);
+    if (m && m.active) return m;
+  }
+  if (cleanIp && customMessagesMap.has(cleanIp)) {
+    const m = customMessagesMap.get(cleanIp);
+    if (m && m.active) return m;
+  }
+  if (cleanIp && customMessagesMap.has(`direct: ${cleanIp}`)) {
+    const m = customMessagesMap.get(`direct: ${cleanIp}`);
+    if (m && m.active) return m;
+  }
+  if (cleanIp && customMessagesMap.has(`direct_${cleanIp}`)) {
+    const m = customMessagesMap.get(`direct_${cleanIp}`);
     if (m && m.active) return m;
   }
 
   // 2. Wildcard or root domain match
-  for (const [key, val] of customMessagesMap.entries()) {
-    if (val && val.active) {
-      if (clean === key || clean.endsWith('.' + key)) return val;
-      if (key.startsWith('*.') && clean.endsWith(key.slice(2))) return val;
+  if (cleanDomain) {
+    for (const [key, val] of customMessagesMap.entries()) {
+      if (val && val.active) {
+        if (cleanDomain === key || cleanDomain.endsWith('.' + key)) return val;
+        if (key.startsWith('*.') && cleanDomain.endsWith(key.slice(2))) return val;
+      }
     }
   }
 
-  if (globalCustomMessage.active) return globalCustomMessage;
+  if (globalCustomMessage && globalCustomMessage.active) return globalCustomMessage;
   return null;
+}
+
+function getCustomMessageForDomain(domain) {
+  return getCustomMessageForTarget(domain, null);
 }
 
 // 1. Save Permanently to Local Disk Database (whitelist_database.json)
@@ -1020,6 +1039,7 @@ function processTelemetryRecord({
       blocked: 0,
       intents: {},
       projects: {},
+      projectIntents: {},
       bypassAttempts: 0,
       lastBypassReason: '',
       lastSeen: new Date().toISOString(),
@@ -1033,7 +1053,7 @@ function processTelemetryRecord({
         note: matchedEntry.note || '',
         status: matchedEntry.status
       } : null,
-      hasCustomMessage: Boolean(getCustomMessageForDomain(domain))
+      hasCustomMessage: Boolean(getCustomMessageForTarget(domain, clientIp))
     };
     telemetryState.originStatsMap.set(originCleanKey, oStat);
   }
@@ -1044,6 +1064,11 @@ function processTelemetryRecord({
   if (clientIp && clientIp !== 'Unknown') oStat.ips.add(clientIp);
   oStat.intents[intent] = (oStat.intents[intent] || 0) + 1;
   oStat.projects[resolvedProject] = (oStat.projects[resolvedProject] || 0) + 1;
+
+  if (!oStat.projectIntents) oStat.projectIntents = {};
+  if (!oStat.projectIntents[resolvedProject]) oStat.projectIntents[resolvedProject] = {};
+  oStat.projectIntents[resolvedProject][intent] = (oStat.projectIntents[resolvedProject][intent] || 0) + 1;
+
   if (isBypassAttempt) {
     oStat.bypassAttempts++;
     oStat.lastBypassReason = bypassReason;
@@ -1061,7 +1086,7 @@ function processTelemetryRecord({
       status: matchedEntry.status
     };
   }
-  oStat.hasCustomMessage = Boolean(getCustomMessageForDomain(domain));
+  oStat.hasCustomMessage = Boolean(getCustomMessageForTarget(domain, clientIp));
 
   // Intent aggregation
   telemetryState.intentStatsMap.set(intent, (telemetryState.intentStatsMap.get(intent) || 0) + 1);
@@ -1224,6 +1249,72 @@ function trafficMiddleware(req, res, next) {
       recordRequestTelemetry(req, res, Date.now() - start);
     } catch (_) {}
   });
+
+  const urlObj = new URL(req.originalUrl || req.url, 'http://localhost');
+  const pathname = urlObj.pathname;
+
+  // Always allow master guard routes, static assets, login, and root paths
+  if (
+    pathname.startsWith('/api/master/') ||
+    pathname.startsWith('/assets/') ||
+    pathname === '/status' ||
+    pathname === '/master' ||
+    pathname === '/favicon.ico' ||
+    pathname === '/' ||
+    req.method === 'OPTIONS'
+  ) {
+    return next();
+  }
+
+  let clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket?.remoteAddress || req.ip || '';
+  if (clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
+  const domain = extractDomain(req);
+
+  // 1. Whitelist Check: If whitelisted domain or IP, PASS THROUGH IMMEDIATELY with 0 delay ("jo white list hai us me koi issue na aaye")
+  const isWhitelisted = (domain && findMatchedEntry(domain)?.status === 'active') ||
+                        (clientIp && clientIp !== '127.0.0.1' && clientIp !== 'Unknown' && findMatchedEntry(clientIp)?.status === 'active');
+  if (isWhitelisted) {
+    return next();
+  }
+
+  // 2. Custom Message Hijack Check ("agar send message me kuchh bhi likh denga to jaha jaha api use ho rha h sab api ke jagah hamara message dikhne lagega")
+  const customNotice = getCustomMessageForTarget(domain, clientIp);
+  if (customNotice && customNotice.active) {
+    const isApi = pathname.startsWith('/api/') || req.headers['accept']?.includes('application/json');
+    if (isApi) {
+      return res.status(403).json({
+        success: false,
+        error: true,
+        blocked: true,
+        status: 403,
+        heading: customNotice.heading || 'PROTECTED BROADCAST NOTICE',
+        message: customNotice.message || 'Access restricted by administrator.',
+        notice: customNotice.message,
+        contact: 'WhatsApp: +63 945 146 9623 / +63 915 922 4695'
+      });
+    } else {
+      return res.status(403).send(renderUnauthorizedScreen(domain || clientIp, 'API / Stream', customNotice.message, customNotice.heading));
+    }
+  }
+
+  // 3. Blocked Check
+  const domainBlocked = domain && findMatchedEntry(domain)?.status === 'blocked';
+  const ipBlocked = clientIp && findMatchedEntry(clientIp)?.status === 'blocked';
+  if (domainBlocked || ipBlocked) {
+    const isApi = pathname.startsWith('/api/') || req.headers['accept']?.includes('application/json');
+    if (isApi) {
+      return res.status(403).json({
+        success: false,
+        error: true,
+        blocked: true,
+        status: 403,
+        message: 'Access denied: Caller IP or domain has been permanently blocked by CSTV Master Guard.'
+      });
+    } else {
+      return res.status(403).send(renderUnauthorizedScreen(domain || clientIp, 'API / Stream', 'Access permanently blocked by CSTV Guard administrator.', 'ACCESS BLOCKED'));
+    }
+  }
+
   next();
 }
 
@@ -1434,7 +1525,7 @@ router.post('/api/master/custom-messages', requireMasterAuth, async (req, res) =
     return res.json({ success: true, globalCustomMessage });
   }
 
-  const clean = domain.toLowerCase().trim().replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
+  const clean = domain.toLowerCase().trim().replace(/^https?:\/\//, '').replace(/^direct:\s*/i, '').split('/')[0].split(':')[0];
   const entry = {
     domain: clean,
     heading: heading || 'Unauthorized Broadcast Warning',
@@ -1444,15 +1535,40 @@ router.post('/api/master/custom-messages', requireMasterAuth, async (req, res) =
   };
 
   customMessagesMap.set(clean, entry);
+  if (domain && domain.toLowerCase() !== clean) {
+    customMessagesMap.set(domain.toLowerCase(), entry);
+  }
   await syncToRedis();
   res.json({ success: true, customMessage: entry });
 });
 
 router.delete('/api/master/custom-messages/:domain', requireMasterAuth, async (req, res) => {
-  const clean = req.params.domain.toLowerCase().trim();
+  const clean = req.params.domain.toLowerCase().trim().replace(/^direct:\s*/i, '');
   const deleted = customMessagesMap.delete(clean);
+  customMessagesMap.delete(req.params.domain.toLowerCase().trim());
   await syncToRedis();
   res.json({ success: true, deleted });
+});
+
+// Delete Origin / Caller completely from Telemetry & Tracking
+router.delete('/api/master/origins/:originKey', requireMasterAuth, async (req, res) => {
+  let originKey = decodeURIComponent(req.params.originKey).trim();
+  let cleanDomain = originKey.replace(/^direct:\s*/i, '').trim();
+
+  telemetryState.originStatsMap.delete(originKey);
+  telemetryState.originStatsMap.delete(cleanDomain);
+  telemetryState.originStatsMap.delete(`direct_${cleanDomain}`);
+
+  whitelistMap.delete(cleanDomain.toLowerCase());
+  customMessagesMap.delete(cleanDomain.toLowerCase());
+  customMessagesMap.delete(originKey.toLowerCase());
+  await syncToRedis();
+
+  telemetryState.requestsRingBuffer = telemetryState.requestsRingBuffer.filter(
+    r => r.origin !== originKey && r.ip !== cleanDomain && r.origin !== cleanDomain
+  );
+
+  res.json({ success: true, message: `Origin ${originKey} deleted.` });
 });
 
 // 5. 1-Click Toggle Block/Unlock for Any Origin

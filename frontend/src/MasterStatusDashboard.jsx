@@ -29,10 +29,13 @@ import {
   ExternalLink,
   Layers,
   Sparkles,
-  Sliders
+  Sliders,
+  Send,
+  X
 } from 'lucide-react';
 
 export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
+  // Auth & Token
   const [token, setToken] = useState(() => localStorage.getItem('cstv_master_token') || '');
   const [loginId, setLoginId] = useState('');
   const [loginPass, setLoginPass] = useState('');
@@ -42,15 +45,19 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
   // Live Telemetry Data
   const [telemetry, setTelemetry] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [autoRefreshInterval, setAutoRefreshInterval] = useState(5000); // 5s smooth non-fluctuating default
+  const [autoRefreshInterval, setAutoRefreshInterval] = useState(5000); // 5s smooth non-fluctuating
   const [lastUpdated, setLastUpdated] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeTab, setActiveTab] = useState('whitelisted'); // 'whitelisted' | 'unauthorized' | 'traffic' | 'all_origins' | 'countermeasures'
+
+  // Primary Domain Isolation & Tab Selectors
+  const [selectedVpsDomain, setSelectedVpsDomain] = useState('ALL'); // 'ALL' | 'diamondapi.cc' | 'cstv.chimneysolutions.info'
+  const [activeTab, setActiveTab] = useState('unauthorized'); // 'unauthorized' | 'whitelisted' | 'traffic' | 'countermeasures'
+
+  // Sub-Filters
   const [whitelistFilterType, setWhitelistFilterType] = useState('ALL'); // 'ALL' | 'DOMAIN' | 'IP' | 'ACTIVE'
   const [unauthorizedFilterType, setUnauthorizedFilterType] = useState('ALL'); // 'ALL' | 'BYPASS_ONLY' | 'BLOCKED_ONLY'
   const [intentFilter, setIntentFilter] = useState('ALL');
   const [actionFilter, setActionFilter] = useState('ALL');
-  const [projectFilter, setProjectFilter] = useState('ALL');
 
   // Quick Inline Whitelist Add State
   const [quickAddInput, setQuickAddInput] = useState('');
@@ -60,9 +67,9 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
   // Custom Message Modal / State
   const [msgModalOpen, setMsgModalOpen] = useState(false);
   const [selectedDomainForMsg, setSelectedDomainForMsg] = useState('');
-  const [customHeading, setCustomHeading] = useState('ACCESS VIOLATION: UNAUTHORIZED STREAM DETECTED');
+  const [customHeading, setCustomHeading] = useState('ACCESS RESTRICTED: UNAUTHORIZED REQUEST');
   const [customBody, setCustomBody] = useState(
-    'This live broadcast belongs to CSTV Master Guard. Unauthorized broadcasting on this domain is strictly forbidden. Broadcast terminated.\nContact Support WhatsApp: +63 945 146 9623'
+    'This API and live feed is protected by CSTV Master Guard. Unauthorized access or scraping is strictly prohibited.\nContact Integration Support WhatsApp: +63 945 146 9623 / +63 915 922 4695'
   );
   const [savingMsg, setSavingMsg] = useState(false);
   const [actionStatus, setActionStatus] = useState({ type: '', text: '' });
@@ -70,19 +77,19 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
   // Quick Preset Templates for Countermeasure Messages
   const PRESET_MESSAGES = [
     {
-      title: 'Copyright & Stolen Stream Warning',
-      heading: 'CRITICAL ACCESS TERMINATION: STOLEN STREAM',
-      body: 'WARNING: This live feed is proprietary to CSTV Master Guard. Unauthorized proxying or iframe framing has been detected and logged.\nCease and desist immediately.\nWhatsApp Support: +63 945 146 9623 / +63 915 922 4695'
+      title: 'Copyright & Stolen Feed Warning',
+      heading: 'CRITICAL ACCESS TERMINATION: STOLEN FEED',
+      body: 'WARNING: This API and live stream is proprietary to CSTV Master Guard. Unauthorized proxying, framing or rate scraping has been detected and logged.\nCease and desist immediately.\nWhatsApp Support: +63 945 146 9623'
     },
     {
       title: 'Commercial Whitelist Required',
-      heading: 'STREAM ACCESS SUSPENDED: COMMERCIAL LICENSE REQUIRED',
-      body: 'Notice: This player requires verified domain authorization. Your origin is not enrolled in the authorized network.\nTo whitelist your operator platform, contact our integration desk:\nWhatsApp: +63 945 146 9623'
+      heading: 'STREAM & API ACCESS SUSPENDED: LICENSE REQUIRED',
+      body: 'Notice: This operator endpoint requires verified domain authorization. Your origin or IP is not enrolled in the authorized network.\nTo whitelist your operator platform, contact our integration desk:\nWhatsApp: +63 945 146 9623'
     },
     {
-      title: 'Hostile Competitor Blacklist Takeover',
-      heading: 'HOSTILE ACCESS BLOCKED: DOMAIN BLACKLISTED',
-      body: 'Access permanently prohibited for this domain under CSTV Anti-Scraping Policy.\nAll media tunnels severed.\nOfficial Admin Desk: +63 945 146 9623'
+      title: 'Competitor Blacklist Takeover',
+      heading: 'ACCESS PERMANENTLY BLOCKED',
+      body: 'Access permanently prohibited for this caller under CSTV Anti-Theft Security Policy.\nAll media and rate tunnels severed.\nOfficial Admin Desk WhatsApp: +63 945 146 9623'
     }
   ];
 
@@ -108,7 +115,7 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
         setLoginError(data.error || 'Invalid Master ID or Password');
       }
     } catch (err) {
-      setLoginError('Connection error: could not connect to server.');
+      setLoginError('Authentication service connection failure');
     } finally {
       setLoginLoading(false);
     }
@@ -119,7 +126,7 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
     localStorage.removeItem('cstv_master_token');
   };
 
-  // Fetch Live Telemetry from /api/master/telemetry
+  // Fetch Live Telemetry from Master Security Engine
   const fetchTelemetry = async () => {
     if (!token) return;
     try {
@@ -135,20 +142,27 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
         setTelemetry(data);
         setLastUpdated(new Date());
       }
-    } catch (e) {
-      console.warn('[Telemetry] Poll error:', e.message);
+    } catch (_) {
+      // Background retry
+    } finally {
+      setLoading(false);
     }
   };
 
+  // Auto Refresh Poller
   useEffect(() => {
     if (!token) return;
     fetchTelemetry();
-
     if (autoRefreshInterval > 0) {
       const interval = setInterval(fetchTelemetry, autoRefreshInterval);
       return () => clearInterval(interval);
     }
   }, [token, autoRefreshInterval]);
+
+  const showActionStatus = (type, text) => {
+    setActionStatus({ type, text });
+    setTimeout(() => setActionStatus({ type: '', text: '' }), 4000);
+  };
 
   // 1-Click Toggle Block / Unlock
   const handleToggleBlock = async (rawTarget) => {
@@ -196,7 +210,7 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
           domain: target,
           casino: true,
           sports: true,
-          note: 'Quick Whitelist from Status Threat Matrix'
+          note: 'Quick Whitelist from Threat Dashboard'
         })
       });
       const data = await res.json();
@@ -206,6 +220,32 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
       }
     } catch (_) {
       showActionStatus('error', 'Failed to whitelist target');
+    }
+  };
+
+  // 1-Click Delete Origin from Tracking
+  const handleDeleteOrigin = async (rawTarget) => {
+    if (!rawTarget) return;
+    let target = rawTarget;
+    if (rawTarget.startsWith('Direct: ')) {
+      target = rawTarget.replace('Direct: ', '').trim();
+    }
+    if (!window.confirm(`Are you sure you want to permanently delete "${target}" from tracking and records?`)) return;
+
+    try {
+      const res = await fetch(`/api/master/origins/${encodeURIComponent(target)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      const data = await res.json();
+      if (data.success) {
+        showActionStatus('success', `"${target}" deleted successfully! 🗑️`);
+        fetchTelemetry();
+      } else {
+        showActionStatus('error', data.error || 'Failed to delete origin');
+      }
+    } catch (_) {
+      showActionStatus('error', 'Failed to delete origin');
     }
   };
 
@@ -244,26 +284,29 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
     }
   };
 
-  // Open Message Modal for Domain
-  const openCustomMsgModal = (domain = '') => {
+  // Open Message Modal for Target (Domain or Direct IP)
+  const openCustomMsgModal = (rawDomain = '') => {
+    let domain = rawDomain;
+    if (rawDomain.startsWith('Direct: ')) {
+      domain = rawDomain.replace('Direct: ', '').trim();
+    }
     setSelectedDomainForMsg(domain);
-    // If existing message exists, load it
     const existing = telemetry?.customMessages?.find(
       (m) => m.domain.toLowerCase() === domain.toLowerCase()
     );
     if (existing) {
-      setCustomHeading(existing.heading || 'ACCESS VIOLATION: UNAUTHORIZED STREAM DETECTED');
+      setCustomHeading(existing.heading || 'ACCESS RESTRICTED: UNAUTHORIZED REQUEST');
       setCustomBody(existing.message || '');
     } else {
-      setCustomHeading('ACCESS VIOLATION: UNAUTHORIZED STREAM DETECTED');
+      setCustomHeading('ACCESS RESTRICTED: UNAUTHORIZED REQUEST');
       setCustomBody(
-        `This live broadcast belongs to CSTV Master Guard. Unauthorized broadcasting on "${domain || 'your domain'}" is strictly forbidden.\nAll media tunnels severed.\nSupport WhatsApp: +63 945 146 9623`
+        `This API and live feed is protected by CSTV Master Guard. Unauthorized broadcasting on "${domain || 'your domain'}" is strictly forbidden.\nAll media and rate tunnels severed.\nSupport WhatsApp: +63 945 146 9623`
       );
     }
     setMsgModalOpen(true);
   };
 
-  // Save Custom Message
+  // Save Custom Takeover Message
   const handleSaveCustomMessage = async () => {
     setSavingMsg(true);
     try {
@@ -274,55 +317,49 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
           Authorization: `Bearer ${token}`
         },
         body: JSON.stringify({
-          domain: selectedDomainForMsg || '*',
+          domain: selectedDomainForMsg,
           heading: customHeading,
           message: customBody,
-          active: true,
-          isGlobal: !selectedDomainForMsg || selectedDomainForMsg === '*'
+          active: true
         })
       });
       const data = await res.json();
       if (data.success) {
-        showActionStatus('success', `Custom countermeasure message deployed for "${selectedDomainForMsg || 'ALL UNLISTED THIEVES'}"!`);
+        showActionStatus('success', `Message deployed for "${selectedDomainForMsg}"! 💬`);
         setMsgModalOpen(false);
         fetchTelemetry();
+      } else {
+        showActionStatus('error', data.error || 'Failed to deploy message');
       }
-    } catch (err) {
-      showActionStatus('error', 'Error deploying countermeasure message');
+    } catch (_) {
+      showActionStatus('error', 'Error deploying message');
     } finally {
       setSavingMsg(false);
     }
   };
 
-  // Delete Custom Message
   const handleDeleteCustomMessage = async (domain) => {
-    if (!confirm(`Delete custom countermeasure message for "${domain}"?`)) return;
     try {
-      await fetch(`/api/master/custom-messages/${encodeURIComponent(domain)}`, {
+      const res = await fetch(`/api/master/custom-messages/${encodeURIComponent(domain)}`, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
       });
-      showActionStatus('success', `Message deleted for "${domain}"`);
-      fetchTelemetry();
-    } catch (err) {
-      showActionStatus('error', 'Failed to delete message');
+      const data = await res.json();
+      if (data.success) {
+        showActionStatus('success', `Takeover message for "${domain}" removed.`);
+        fetchTelemetry();
+      }
+    } catch (_) {
+      showActionStatus('error', 'Failed to remove message');
     }
   };
 
-  const showActionStatus = (type, text) => {
-    setActionStatus({ type, text });
-    setTimeout(() => setActionStatus({ type: '', text: '' }), 4000);
-  };
-
-  // Helper formatting
-  const formatUptime = (seconds = 0) => {
-    const d = Math.floor(seconds / (3600 * 24));
-    const h = Math.floor((seconds % (3600 * 24)) / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    const s = Math.floor(seconds % 60);
-    if (d > 0) return `${d}d ${h}h ${m}m`;
-    if (h > 0) return `${h}h ${m}m ${s}s`;
-    return `${m}m ${s}s`;
+  const formatUptime = (sec) => {
+    if (!sec) return '0s';
+    const d = Math.floor(sec / 86400);
+    const h = Math.floor((sec % 86400) / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    return `${d > 0 ? `${d}d ` : ''}${h}h ${m}m`;
   };
 
   // -------------------------------------------------------------
@@ -330,81 +367,70 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
   // -------------------------------------------------------------
   if (!token) {
     return (
-      <div className="min-h-screen bg-[#07090E] text-slate-200 flex items-center justify-center p-4">
-        <div className="w-full max-w-md bg-[#0F1420] border border-slate-800 rounded-2xl p-8 shadow-2xl relative overflow-hidden">
-          <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-emerald-500 via-cyan-500 to-emerald-500" />
-          
-          <div className="flex items-center gap-3 mb-6">
-            <div className="w-12 h-12 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-              <Activity className="w-6 h-6 animate-pulse" />
+      <div className="min-h-screen bg-[#07090E] flex items-center justify-center p-4 font-sans text-slate-200">
+        <div className="w-full max-w-md bg-[#0F1420] border border-slate-800 rounded-2xl shadow-2xl p-6 sm:p-8 relative overflow-hidden">
+          <div className="text-center space-y-2 mb-6">
+            <div className="w-12 h-12 bg-emerald-500/10 border border-emerald-500/30 rounded-xl flex items-center justify-center mx-auto text-emerald-400">
+              <Shield className="w-6 h-6" />
             </div>
-            <div>
-              <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
-                CSTV STATUS CENTER
-                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                  LIVE SOC
-                </span>
-              </h1>
-              <p className="text-xs text-slate-400">VPS Telemetry & Origin Guard Engine</p>
-            </div>
+            <h1 className="text-xl font-bold text-white tracking-tight">CSTV MASTER GUARD</h1>
+            <p className="text-xs text-slate-400 font-mono">
+              VPS Live Status, Domain Intelligence & Anti-Theft SOC
+            </p>
           </div>
 
-          {loginError && (
-            <div className="mb-5 p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 shrink-0 text-rose-400" />
-              <span>{loginError}</span>
-            </div>
-          )}
-
           <form onSubmit={handleLogin} className="space-y-4">
+            {loginError && (
+              <div className="p-3 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs font-medium text-center">
+                {loginError}
+              </div>
+            )}
+
             <div>
-              <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
-                Master Security ID
+              <label className="block text-xs font-semibold text-slate-300 mb-1.5 uppercase font-mono tracking-wider">
+                Master Operator ID
               </label>
               <input
                 type="text"
                 value={loginId}
                 onChange={(e) => setLoginId(e.target.value)}
                 placeholder="Enter Master ID"
+                className="w-full px-3.5 py-2.5 bg-[#07090E] border border-slate-700/80 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition font-mono"
                 required
-                className="w-full px-3.5 py-2.5 bg-[#090C14] border border-slate-700/80 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono"
               />
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
-                Master Password
+              <label className="block text-xs font-semibold text-slate-300 mb-1.5 uppercase font-mono tracking-wider">
+                Passphrase
               </label>
               <input
                 type="password"
                 value={loginPass}
                 onChange={(e) => setLoginPass(e.target.value)}
-                placeholder="••••••••••••"
+                placeholder="Enter Passphrase"
+                className="w-full px-3.5 py-2.5 bg-[#07090E] border border-slate-700/80 rounded-xl text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 transition font-mono"
                 required
-                className="w-full px-3.5 py-2.5 bg-[#090C14] border border-slate-700/80 rounded-lg text-sm text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono"
               />
             </div>
 
             <button
               type="submit"
               disabled={loginLoading}
-              className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-semibold rounded-lg text-sm transition flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/30 disabled:opacity-50 mt-2"
+              className="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-semibold text-sm transition flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/30 disabled:opacity-50"
             >
               {loginLoading ? (
-                <>
-                  <RefreshCw className="w-4 h-4 animate-spin" />
-                  <span>Authenticating...</span>
-                </>
+                <span>Authenticating...</span>
               ) : (
                 <>
                   <Lock className="w-4 h-4" />
-                  <span>Access Live Telemetry Dashboard</span>
+                  <span>Authenticate to Console</span>
                 </>
               )}
             </button>
           </form>
 
-          <div className="mt-6 pt-5 border-t border-slate-800 text-center">
+          <div className="mt-6 pt-4 border-t border-slate-800/80 text-center">
             <button
               onClick={onBack}
               className="text-xs text-slate-400 hover:text-white flex items-center justify-center gap-1.5 mx-auto transition"
@@ -429,30 +455,107 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
   const unauthorizedOrigins =
     telemetry?.unauthorizedOrigins ||
     origins.filter((o) => !o.isWhitelisted || o.bypassAttempts > 0 || o.isBlocked);
-  const intents = telemetry?.intents || [];
-  const vpsProjects = telemetry?.vpsProjects || [];
-  const projectDistribution = telemetry?.projectDistribution || [];
-  const bypassAlerts = telemetry?.bypassAlerts || [];
   const customMessages = telemetry?.customMessages || [];
   const recentRequests = telemetry?.recentRequests || [];
 
-  // Source list for Whitelisted view (prefers full DB with live stats, fallbacks to active whitelisted origins)
-  const sourceWhitelisted = whitelistedList.length > 0 ? whitelistedList : whitelistedOrigins;
-
-  const filteredWhitelisted = sourceWhitelisted.filter((w) => {
-    if (whitelistFilterType === 'DOMAIN' && w.entryType !== 'domain') return false;
-    if (whitelistFilterType === 'IP' && w.entryType !== 'ip') return false;
-    if (whitelistFilterType === 'ACTIVE' && !(w.liveHits > 0 || w.count > 0)) return false;
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      const name = (w.domain || w.origin || '').toLowerCase();
-      const note = (w.note || '').toLowerCase();
-      return name.includes(q) || note.includes(q);
+  // 1. Available Target Domains on VPS (Extracted accurately)
+  const targetDomainSet = new Set(['diamondapi.cc', 'cstv.chimneysolutions.info']);
+  (telemetry?.projectDistribution || []).forEach((p) => {
+    if (p.project && p.project !== 'VPS Web Front' && p.project !== 'access') {
+      targetDomainSet.add(p.project);
     }
-    return true;
+  });
+  origins.forEach((o) => {
+    (o.projectsBreakdown || []).forEach((p) => {
+      if (p.name && p.name !== 'VPS Web Front' && p.name !== 'access') {
+        targetDomainSet.add(p.name);
+      }
+    });
+  });
+  const domainTabsList = ['ALL', ...Array.from(targetDomainSet)];
+
+  // 2. Domain-Specific Hit Counts and Totals
+  const domainStatsMap = {};
+  domainTabsList.forEach((dom) => {
+    domainStatsMap[dom] = {
+      totalHits: 0,
+      whitelistedHits: 0,
+      unauthorizedHits: 0,
+      unauthorizedCount: 0,
+      whitelistedCount: 0
+    };
   });
 
-  const filteredUnauthorized = unauthorizedOrigins.filter((u) => {
+  origins.forEach((o) => {
+    const isW = o.isWhitelisted;
+    domainStatsMap['ALL'].totalHits += o.count || 0;
+    if (isW) {
+      domainStatsMap['ALL'].whitelistedHits += o.count || 0;
+      domainStatsMap['ALL'].whitelistedCount++;
+    } else {
+      domainStatsMap['ALL'].unauthorizedHits += o.count || 0;
+      domainStatsMap['ALL'].unauthorizedCount++;
+    }
+
+    (o.projectsBreakdown || []).forEach((p) => {
+      if (domainStatsMap[p.name]) {
+        domainStatsMap[p.name].totalHits += p.count || 0;
+        if (isW) {
+          domainStatsMap[p.name].whitelistedHits += p.count || 0;
+          domainStatsMap[p.name].whitelistedCount++;
+        } else {
+          domainStatsMap[p.name].unauthorizedHits += p.count || 0;
+          domainStatsMap[p.name].unauthorizedCount++;
+        }
+      }
+    });
+  });
+
+  const curDomainStats = domainStatsMap[selectedVpsDomain] || domainStatsMap['ALL'];
+
+  // 3. Scoped Callers based on selectedVpsDomain
+  const scopedOrigins = origins
+    .map((o) => {
+      if (selectedVpsDomain === 'ALL') {
+        return {
+          ...o,
+          scopedHits: o.count,
+          scopedPercent: o.percent,
+          scopedIntents: o.intentsBreakdown || []
+        };
+      }
+      const match = (o.projectsBreakdown || []).find((p) => p.name === selectedVpsDomain);
+      if (!match || match.count === 0) return null;
+
+      const domTotal = curDomainStats.totalHits || 1;
+      const scopedPercent = Math.round((match.count / domTotal) * 1000) / 10;
+
+      let scopedIntents = [];
+      if (o.projectIntents && o.projectIntents[selectedVpsDomain]) {
+        scopedIntents = Object.entries(o.projectIntents[selectedVpsDomain])
+          .map(([name, count]) => ({ name, count }))
+          .sort((a, b) => b.count - a.count);
+      } else {
+        scopedIntents = o.intentsBreakdown || [];
+      }
+
+      return {
+        ...o,
+        scopedHits: match.count,
+        scopedPercent,
+        scopedIntents
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.scopedHits - a.scopedHits);
+
+  const scopedUnauthorized = scopedOrigins.filter(
+    (o) => !o.isWhitelisted || o.bypassAttempts > 0 || o.isBlocked
+  );
+  const scopedWhitelisted = scopedOrigins.filter((o) => o.isWhitelisted);
+
+  // Filtered Unauthorized based on search & subfilter
+  const filteredUnauthorized = scopedUnauthorized.filter((u) => {
     if (unauthorizedFilterType === 'BYPASS_ONLY' && !(u.bypassAttempts > 0)) return false;
     if (unauthorizedFilterType === 'BLOCKED_ONLY' && !u.isBlocked) return false;
     if (searchQuery) {
@@ -464,9 +567,24 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
     return true;
   });
 
+  // Source list for Whitelisted view
+  const sourceWhitelisted = whitelistedList.length > 0 ? whitelistedList : whitelistedOrigins;
+  const filteredWhitelisted = (scopedWhitelisted.length > 0 ? scopedWhitelisted : sourceWhitelisted).filter((w) => {
+    if (whitelistFilterType === 'DOMAIN' && w.entryType !== 'domain') return false;
+    if (whitelistFilterType === 'IP' && w.entryType !== 'ip') return false;
+    if (whitelistFilterType === 'ACTIVE' && !(w.scopedHits > 0 || w.liveHits > 0 || w.count > 0)) return false;
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      const name = (w.domain || w.origin || '').toLowerCase();
+      const note = (w.note || '').toLowerCase();
+      return name.includes(q) || note.includes(q);
+    }
+    return true;
+  });
+
   // Filtered requests based on UI selections (Universal VPS Filter)
   const filteredRequests = recentRequests.filter((r) => {
-    if (projectFilter !== 'ALL' && (!r.project || !r.project.toLowerCase().includes(projectFilter.toLowerCase()))) return false;
+    if (selectedVpsDomain !== 'ALL' && (!r.project || !r.project.toLowerCase().includes(selectedVpsDomain.toLowerCase()))) return false;
     if (intentFilter !== 'ALL' && r.intent !== intentFilter) return false;
     if (actionFilter !== 'ALL' && r.action !== actionFilter) return false;
     if (searchQuery) {
@@ -482,12 +600,12 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
   });
 
   return (
-    <div className="min-h-screen bg-[#07090E] text-slate-200 flex flex-col font-sans selection:bg-emerald-500/30">
+    <div className="min-h-screen bg-[#070A12] text-slate-200 flex flex-col font-sans selection:bg-emerald-500/30">
       {/* Top Navbar */}
       <header className="sticky top-0 z-30 bg-[#0B0F19]/90 backdrop-blur-md border-b border-slate-800/80 px-4 lg:px-8 py-3">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
+            <div className="w-9 h-9 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
               <Activity className="w-5 h-5 animate-pulse" />
             </div>
             <div>
@@ -497,18 +615,17 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
                 </h1>
                 <span className="inline-flex items-center gap-1.5 text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-semibold">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                  LIVE TELEMETRY
+                  LIVE SOC
                 </span>
               </div>
-              <p className="text-xs text-slate-400">
-                Multi-Project VPS Traffic, Origin Breakdown & Anti-Theft Guard Engine
+              <p className="text-xs text-slate-400 font-mono">
+                Multi-Domain VPS Isolation, Anti-Theft Guard & API Interception
               </p>
             </div>
           </div>
 
-          {/* Quick Nav & Controls */}
+          {/* Quick Controls */}
           <div className="flex items-center gap-2 flex-wrap">
-            {/* Auto Refresh Selector */}
             <div className="flex items-center bg-[#0F1420] border border-slate-800 rounded-lg p-0.5 text-xs font-mono">
               <span className="px-2 py-1 text-slate-400 text-[11px]">Interval:</span>
               <button
@@ -529,23 +646,8 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
               >
                 5s
               </button>
-              <button
-                onClick={() => setAutoRefreshInterval(10000)}
-                className={`px-2 py-1 rounded transition ${autoRefreshInterval === 10000 ? 'bg-emerald-600 text-white font-bold' : 'text-slate-400 hover:text-white'}`}
-              >
-                10s
-              </button>
             </div>
 
-            <button
-              onClick={fetchTelemetry}
-              className="p-2 rounded-lg bg-[#0F1420] border border-slate-800 hover:border-slate-700 text-slate-300 hover:text-white text-xs transition flex items-center gap-1.5"
-              title="Refresh Now"
-            >
-              <RefreshCw className="w-4 h-4" />
-            </button>
-
-            {/* Switch to Domain Whitelist */}
             <button
               onClick={() => {
                 if (onNavigateWhitelist) onNavigateWhitelist();
@@ -557,7 +659,7 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
               className="px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs font-semibold flex items-center gap-1.5 transition"
             >
               <Shield className="w-3.5 h-3.5" />
-              <span>Domain Whitelist</span>
+              <span>Whitelist Manager</span>
             </button>
 
             <button
@@ -579,7 +681,7 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
         </div>
       </header>
 
-      {/* Global Status Alert Banner if Any */}
+      {/* Global Status Alert Banner */}
       {actionStatus.text && (
         <div
           className={`px-4 py-2 text-center text-xs font-semibold transition ${
@@ -593,273 +695,150 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
       )}
 
       {/* Main Dashboard Container */}
-      <main className="max-w-7xl w-full mx-auto p-4 lg:p-8 flex-1 flex flex-col gap-6">
-        {/* VPS SITES & PM2 PROJECTS STRIP (ALL SITES MONITORED) */}
-        <div className="bg-[#0B0F19] border border-slate-800 rounded-xl p-3.5 flex flex-col gap-3">
-          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs">
-            <span className="font-bold text-white flex items-center gap-2">
+      <main className="max-w-7xl w-full mx-auto p-4 lg:p-8 flex-1 flex flex-col gap-5">
+        {/* DOMAIN ISOLATION SELECTOR STRIP (CRITICAL FEATURE) */}
+        <div className="bg-[#0A0E18] border border-slate-800 rounded-xl p-3 flex flex-col gap-2.5 shadow-lg">
+          <div className="flex items-center justify-between text-xs">
+            <span className="font-bold text-white flex items-center gap-2 font-mono">
               <Layers className="w-4 h-4 text-cyan-400" />
-              <span>ACTIVE SITES & SERVICES ON THIS VPS ({vpsProjects.length} Microservices Detected)</span>
+              <span>TARGET VPS SITES & DOMAINS (Click to Isolate Data):</span>
             </span>
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] font-mono text-slate-400">
-                Click any project to filter live traffic stream:
-              </span>
-              {projectFilter !== 'ALL' && (
-                <button
-                  onClick={() => setProjectFilter('ALL')}
-                  className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[10px] font-mono font-bold"
-                >
-                  Clear Filter [Show All]
-                </button>
-              )}
-            </div>
+            <span className="text-[11px] font-mono text-slate-400">
+              Active Focus: <strong className="text-cyan-300">{selectedVpsDomain === 'ALL' ? 'ALL DOMAINS COMBINED' : selectedVpsDomain}</strong>
+            </span>
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-            {vpsProjects.map((p, idx) => {
-              const isSelected = projectFilter === p.name || (p.domain && projectFilter === p.domain);
+          <div className="flex items-center gap-2 overflow-x-auto pb-1 custom-scroll">
+            {domainTabsList.map((dom) => {
+              const isSelected = selectedVpsDomain === dom;
+              const stats = domainStatsMap[dom] || { totalHits: 0 };
               return (
-                <div
-                  key={idx}
-                  onClick={() => setProjectFilter(isSelected ? 'ALL' : (p.name || p.domain))}
-                  className={`p-2.5 rounded-lg border transition cursor-pointer flex items-center justify-between ${
+                <button
+                  key={dom}
+                  onClick={() => setSelectedVpsDomain(dom)}
+                  className={`px-4 py-2 rounded-lg text-xs font-mono font-bold flex items-center gap-2.5 transition whitespace-nowrap border ${
                     isSelected
-                      ? 'bg-cyan-500/15 border-cyan-500 text-white shadow-md'
-                      : 'bg-[#07090E] border-slate-800 hover:border-slate-700 text-slate-300'
+                      ? 'bg-cyan-500/20 text-cyan-300 border-cyan-500 shadow-md shadow-cyan-950/40 ring-1 ring-cyan-500/50'
+                      : 'bg-[#06080E] text-slate-400 border-slate-800 hover:border-slate-700 hover:text-white'
                   }`}
                 >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-                    <div className="truncate">
-                      <div className="text-xs font-bold font-mono truncate">{p.name || p.domain}</div>
-                      <div className="text-[10px] text-slate-400 truncate">
-                        {p.source || 'Active'} {p.memoryMb ? `• ${p.memoryMb}MB RAM` : ''}
-                      </div>
-                    </div>
-                  </div>
-                  <ChevronRight className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                </div>
+                  <span className={`w-2 h-2 rounded-full ${isSelected ? 'bg-cyan-400 animate-pulse' : 'bg-slate-600'}`} />
+                  <span>{dom === 'ALL' ? '🌐 ALL VPS SITES COMBINED' : dom}</span>
+                  <span className={`px-2 py-0.5 rounded text-[10px] font-semibold ${isSelected ? 'bg-cyan-500/30 text-white' : 'bg-slate-800/80 text-slate-400'}`}>
+                    {stats.totalHits.toLocaleString()} hits
+                  </span>
+                </button>
               );
             })}
           </div>
         </div>
 
-        {/* TOP TELEMETRY 4 CARDS */}
-        <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* CARD 1: VPS Host Health */}
-          <div className="bg-[#0F1420] border border-slate-800 rounded-xl p-4.5 relative overflow-hidden">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-lg bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-400">
-                  <Server className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="text-xs font-bold text-white uppercase tracking-wider">VPS Host Health</h3>
-                  <p className="text-[10px] text-slate-400">Node.js Stream Daemon</p>
-                </div>
-              </div>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 font-semibold">
-                NORMAL
-              </span>
+        {/* TOP 4 CLEAN EXECUTIVE METRICS CARDS */}
+        <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+          {/* CARD 1: Selected Domain Profile */}
+          <div className="bg-[#0A0E18] border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
+              <span className="font-mono uppercase font-bold tracking-wider text-[11px]">Inspection Target</span>
+              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
             </div>
-
-            <div className="space-y-1.5 text-xs font-mono">
-              <div className="flex justify-between items-center text-slate-400">
-                <span>System Uptime:</span>
-                <span className="text-white font-semibold">{formatUptime(vps.uptime)}</span>
+            <div>
+              <div className="text-sm font-bold font-mono text-cyan-300 truncate">
+                {selectedVpsDomain === 'ALL' ? 'All VPS Domains' : selectedVpsDomain}
               </div>
-              <div className="flex justify-between items-center text-slate-400">
-                <span>RAM Used:</span>
-                <span className="text-cyan-300 font-semibold">
-                  {vps.usedMemMb ? `${vps.usedMemMb} MB / ${vps.totalMemMb} MB` : 'Calculating...'}
-                </span>
-              </div>
-              <div className="flex justify-between items-center text-slate-400">
-                <span>Node RSS Memory:</span>
-                <span className="text-slate-200">{vps.nodeRssMb ? `${vps.nodeRssMb} MB` : '-'}</span>
-              </div>
-              <div className="flex justify-between items-center text-slate-400">
-                <span>CPU Load (1m/5m):</span>
-                <span className="text-slate-200">
-                  {vps.loadavg ? vps.loadavg.slice(0, 2).map((l) => l.toFixed(2)).join(', ') : '-'}
-                </span>
-              </div>
-            </div>
-
-            {/* Visual RAM Usage Bar */}
-            <div className="mt-3">
-              <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden">
-                <div
-                  className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full rounded-full transition-all duration-500"
-                  style={{ width: `${Math.min(100, vps.memUsagePercent || 40)}%` }}
-                />
+              <div className="text-[11px] text-slate-400 mt-0.5 font-mono">
+                {selectedVpsDomain === 'ALL' ? 'Consolidated VPS Traffic' : 'Isolated Virtual Host'}
               </div>
             </div>
           </div>
 
-          {/* CARD 2: Request Velocity */}
-          <div className="bg-[#0F1420] border border-slate-800 rounded-xl p-4.5 relative overflow-hidden">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400">
-                  <Activity className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="text-xs font-bold text-white uppercase tracking-wider">Request Velocity</h3>
-                  <p className="text-[10px] text-slate-400">Real-time Traffic Volume</p>
-                </div>
-              </div>
-              <span className="text-xs font-mono font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded">
+          {/* CARD 2: Total Volume on Selected Domain */}
+          <div className="bg-[#0A0E18] border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
+              <span className="font-mono uppercase font-bold tracking-wider text-[11px]">Total Requests</span>
+              <span className="text-[11px] font-mono font-bold text-emerald-400 bg-emerald-500/10 px-1.5 py-0.5 rounded">
                 {vps.reqPerSec || 0} req/s
               </span>
             </div>
-
-            <div className="space-y-1.5 text-xs font-mono">
-              <div className="flex justify-between items-center text-slate-400">
-                <span>Total Requests:</span>
-                <span className="text-white font-bold text-sm">
-                  {summary.totalRequests?.toLocaleString() || 0}
-                </span>
+            <div>
+              <div className="text-xl font-bold font-mono text-white">
+                {curDomainStats.totalHits.toLocaleString()}
               </div>
-              <div className="flex justify-between items-center text-slate-400">
-                <span>Authorized (200 OK):</span>
-                <span className="text-emerald-400 font-semibold">
-                  {summary.allowedRequests?.toLocaleString() || 0}
-                </span>
-              </div>
-              <div className="flex justify-between items-center text-slate-400">
-                <span>Blocked / Dropped:</span>
-                <span className="text-rose-400 font-semibold">
-                  {summary.blockedRequests?.toLocaleString() || 0}
-                </span>
-              </div>
-              <div className="flex justify-between items-center text-slate-400">
-                <span>Unique Caller Origins:</span>
-                <span className="text-cyan-300 font-semibold">{summary.totalOrigins || 0}</span>
+              <div className="text-[11px] text-slate-400 mt-0.5 font-mono">
+                Live recorded traffic buffer
               </div>
             </div>
           </div>
 
-          {/* CARD 3: Active Live Broadcasters */}
-          <div className="bg-[#0F1420] border border-slate-800 rounded-xl p-4.5 relative overflow-hidden">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-amber-400">
-                  <Radio className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="text-xs font-bold text-white uppercase tracking-wider">Broadcast Status</h3>
-                  <p className="text-[10px] text-slate-400">Casino TV & Sports TV</p>
-                </div>
-              </div>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/15 text-amber-400 border border-amber-500/30 font-semibold">
-                ACTIVE
-              </span>
+          {/* CARD 3: Whitelisted Traffic */}
+          <div className="bg-[#0A0E18] border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
+              <span className="font-mono uppercase font-bold tracking-wider text-[11px]">Whitelisted Traffic</span>
+              <ShieldCheck className="w-4 h-4 text-emerald-400" />
             </div>
-
-            <div className="space-y-1.5 text-xs font-mono">
-              <div className="flex justify-between items-center text-slate-400">
-                <span>Casino Tables:</span>
-                <span className="text-white font-semibold">17 Tables Active in RAM</span>
+            <div>
+              <div className="text-xl font-bold font-mono text-emerald-400">
+                {curDomainStats.whitelistedHits.toLocaleString()}
               </div>
-              <div className="flex justify-between items-center text-slate-400">
-                <span>Sports TV Engine:</span>
-                <span className="text-emerald-400 font-semibold">Direct Native Feeds</span>
-              </div>
-              <div className="flex justify-between items-center text-slate-400">
-                <span>Zero Proxy Bandwidth:</span>
-                <span className="text-emerald-300 font-semibold">100% Enforced</span>
-              </div>
-              <div className="flex justify-between items-center text-slate-400">
-                <span>Upstream Token Exp:</span>
-                <span className="text-slate-300">Auto-Prewarmed</span>
+              <div className="text-[11px] text-slate-400 mt-0.5 font-mono">
+                {curDomainStats.whitelistedCount} Verified Partners
               </div>
             </div>
           </div>
 
-          {/* CARD 4: Theft & Bypass Countermeasures */}
-          <div className="bg-[#0F1420] border border-slate-800 rounded-xl p-4.5 relative overflow-hidden">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-lg bg-rose-500/10 border border-rose-500/20 flex items-center justify-center text-rose-400">
-                  <AlertOctagon className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="text-xs font-bold text-white uppercase tracking-wider">Theft Countermeasures</h3>
-                  <p className="text-[10px] text-slate-400">Bypass & Hijack Defense</p>
-                </div>
-              </div>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-rose-500/15 text-rose-400 border border-rose-500/30 font-semibold">
-                GUARD ON
-              </span>
+          {/* CARD 4: Unauthorized / Threats on Selected Domain */}
+          <div className="bg-[#0A0E18] border border-slate-800 rounded-xl p-4 flex flex-col justify-between">
+            <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
+              <span className="font-mono uppercase font-bold tracking-wider text-[11px]">Unauthorized Hits</span>
+              <AlertOctagon className="w-4 h-4 text-rose-400 animate-pulse" />
             </div>
-
-            <div className="space-y-1.5 text-xs font-mono">
-              <div className="flex justify-between items-center text-slate-400">
-                <span>Whitelisted Entities:</span>
-                <span className="text-emerald-400 font-bold">
-                  {sourceWhitelisted.length} Approved ({summary.allowedRequests?.toLocaleString() || 0} hits)
-                </span>
+            <div>
+              <div className="text-xl font-bold font-mono text-rose-400">
+                {curDomainStats.unauthorizedHits.toLocaleString()}
               </div>
-              <div className="flex justify-between items-center text-slate-400">
-                <span>Non-Whitelisted Callers:</span>
-                <span className="text-rose-400 font-bold">
-                  {unauthorizedOrigins.length} Flagged
-                </span>
-              </div>
-              <div className="flex justify-between items-center text-slate-400">
-                <span>Total Intrusions Blocked:</span>
-                <span className="text-rose-400 font-semibold">
-                  {summary.totalBypassAlerts || 0}
-                </span>
-              </div>
-              <div className="flex justify-between items-center text-slate-400">
-                <span>Custom Warning Takeovers:</span>
-                <span className="text-cyan-300 font-semibold">
-                  {customMessages.length} Active Notice{customMessages.length === 1 ? '' : 's'}
-                </span>
+              <div className="text-[11px] text-rose-300/80 mt-0.5 font-mono">
+                {curDomainStats.unauthorizedCount} Callers Flagged
               </div>
             </div>
           </div>
         </section>
 
-        {/* WORKSTATION TABS */}
-        <section className="bg-[#0F1420] border border-slate-800 rounded-xl overflow-hidden shadow-xl flex-1 flex flex-col">
+        {/* WORKSTATION TABS & CONTROLS */}
+        <section className="bg-[#0A0E18] border border-slate-800 rounded-xl overflow-hidden shadow-xl flex-1 flex flex-col">
           {/* Tab Navigation Header */}
-          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between border-b border-slate-800 p-2 sm:px-4 bg-[#090C14]">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between border-b border-slate-800 p-2 sm:px-4 bg-[#080B14]">
             <div className="flex items-center gap-1 overflow-x-auto custom-scroll pb-1 sm:pb-0">
-              <button
-                onClick={() => setActiveTab('whitelisted')}
-                className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition whitespace-nowrap ${
-                  activeTab === 'whitelisted'
-                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
-                    : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
-                }`}
-              >
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-300" />
-                <span>Whitelisted Domains & IPs ({sourceWhitelisted.length})</span>
-              </button>
-
+              {/* Tab 1: UNAUTHORIZED THREATS (DEFAULT) */}
               <button
                 onClick={() => setActiveTab('unauthorized')}
                 className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition whitespace-nowrap ${
                   activeTab === 'unauthorized'
-                    ? 'bg-rose-600 text-white shadow-md shadow-rose-900/40'
-                    : unauthorizedOrigins.length > 0
-                    ? 'text-rose-400 hover:text-white hover:bg-rose-950/40 border border-rose-900/60'
+                    ? 'bg-rose-600 text-white shadow-md shadow-rose-950/40'
+                    : 'text-rose-400/80 hover:text-white hover:bg-rose-950/30'
+                }`}
+              >
+                <AlertOctagon className="w-3.5 h-3.5" />
+                <span>Non-Whitelisted Threats ({scopedUnauthorized.length})</span>
+              </button>
+
+              {/* Tab 2: WHITELISTED PARTNERS */}
+              <button
+                onClick={() => setActiveTab('whitelisted')}
+                className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition whitespace-nowrap ${
+                  activeTab === 'whitelisted'
+                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-950/30'
                     : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
                 }`}
               >
-                <AlertOctagon className={`w-3.5 h-3.5 ${unauthorizedOrigins.length > 0 ? 'text-rose-300 animate-pulse' : 'text-slate-400'}`} />
-                <span>Non-Whitelisted & Bypassers ({unauthorizedOrigins.length})</span>
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>Whitelisted Partners ({filteredWhitelisted.length})</span>
               </button>
 
+              {/* Tab 3: REAL-TIME TRAFFIC STREAM */}
               <button
                 onClick={() => setActiveTab('traffic')}
                 className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition whitespace-nowrap ${
                   activeTab === 'traffic'
-                    ? 'bg-cyan-600 text-white shadow-md shadow-cyan-900/30'
+                    ? 'bg-cyan-600 text-white shadow-md shadow-cyan-950/30'
                     : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
                 }`}
               >
@@ -867,32 +846,21 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
                 <span>Real-Time Request Stream ({filteredRequests.length})</span>
               </button>
 
-              <button
-                onClick={() => setActiveTab('all_origins')}
-                className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition whitespace-nowrap ${
-                  activeTab === 'all_origins'
-                    ? 'bg-slate-700 text-white shadow-md'
-                    : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
-                }`}
-              >
-                <Globe className="w-3.5 h-3.5" />
-                <span>All Callers Matrix ({origins.length})</span>
-              </button>
-
+              {/* Tab 4: SCREEN & API TAKEOVER NOTICES */}
               <button
                 onClick={() => setActiveTab('countermeasures')}
                 className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition whitespace-nowrap ${
                   activeTab === 'countermeasures'
-                    ? 'bg-purple-600 text-white shadow-md shadow-purple-900/30'
+                    ? 'bg-purple-600 text-white shadow-md shadow-purple-950/30'
                     : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
                 }`}
               >
                 <MessageSquare className="w-3.5 h-3.5" />
-                <span>Screen Takeovers ({customMessages.length})</span>
+                <span>API Takeover Notices ({customMessages.length})</span>
               </button>
             </div>
 
-            {/* Quick Filter & Search Bar */}
+            {/* Search & Sub-Filter Bar */}
             <div className="flex items-center gap-2 mt-2 sm:mt-0">
               <div className="relative">
                 <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
@@ -900,194 +868,412 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Filter Origin / IP / Path..."
-                  className="pl-8 pr-3 py-1.5 bg-[#07090E] border border-slate-700/80 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 w-44 sm:w-56 font-mono"
+                  placeholder="Search IP / Origin / Path..."
+                  className="pl-8 pr-3 py-1.5 bg-[#06080E] border border-slate-700/80 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 w-44 sm:w-56 font-mono"
                 />
               </div>
-
-              {activeTab === 'whitelisted' && (
-                <select
-                  value={whitelistFilterType}
-                  onChange={(e) => setWhitelistFilterType(e.target.value)}
-                  className="px-2.5 py-1.5 bg-[#07090E] border border-slate-700/80 rounded-lg text-xs text-slate-300 font-mono focus:outline-none focus:border-emerald-500"
-                >
-                  <option value="ALL">All Whitelisted ({sourceWhitelisted.length})</option>
-                  <option value="DOMAIN">Domains Only</option>
-                  <option value="IP">IP Addresses Only</option>
-                  <option value="ACTIVE">Active Traffic Only</option>
-                </select>
-              )}
 
               {activeTab === 'unauthorized' && (
                 <select
                   value={unauthorizedFilterType}
                   onChange={(e) => setUnauthorizedFilterType(e.target.value)}
-                  className="px-2.5 py-1.5 bg-[#07090E] border border-slate-700/80 rounded-lg text-xs text-slate-300 font-mono focus:outline-none focus:border-rose-500"
+                  className="px-2.5 py-1.5 bg-[#06080E] border border-slate-700/80 rounded-lg text-xs text-slate-300 font-mono focus:outline-none focus:border-rose-500"
                 >
-                  <option value="ALL">All Non-Whitelisted ({unauthorizedOrigins.length})</option>
-                  <option value="BYPASS_ONLY">Active Bypass Threats Only</option>
-                  <option value="BLOCKED_ONLY">Blocked Targets Only</option>
+                  <option value="ALL">All Threats</option>
+                  <option value="BYPASS_ONLY">Bypass Attempts Only</option>
+                  <option value="BLOCKED_ONLY">Blocked Only</option>
                 </select>
               )}
 
-              {activeTab === 'traffic' && (
-                <>
-                  <select
-                    value={projectFilter}
-                    onChange={(e) => setProjectFilter(e.target.value)}
-                    className="px-2.5 py-1.5 bg-[#07090E] border border-slate-700/80 rounded-lg text-xs text-slate-300 font-mono focus:outline-none focus:border-emerald-500"
-                  >
-                    <option value="ALL">All VPS Sites</option>
-                    {vpsProjects.map((p, idx) => (
-                      <option key={idx} value={p.name}>
-                        {p.name} {p.domain ? `(${p.domain})` : ''}
-                      </option>
-                    ))}
-                  </select>
-
-                  <select
-                    value={intentFilter}
-                    onChange={(e) => setIntentFilter(e.target.value)}
-                    className="px-2.5 py-1.5 bg-[#07090E] border border-slate-700/80 rounded-lg text-xs text-slate-300 font-mono focus:outline-none focus:border-emerald-500"
-                  >
-                    <option value="ALL">All Intents</option>
-                    <option value="Sports TV Stream">Sports TV Stream</option>
-                    <option value="Casino TV Stream">Casino TV Stream</option>
-                    <option value="Sports Match List">Sports Match List</option>
-                    <option value="Casino Tables List">Casino Tables List</option>
-                    <option value="Token Pre-Warm & Ping">Token Pre-Warm & Ping</option>
-                    <option value="WebSocket Tunnel">WebSocket Tunnel</option>
-                    <option value="Master Guard Admin API">Master Admin API</option>
-                  </select>
-
-                  <select
-                    value={actionFilter}
-                    onChange={(e) => setActionFilter(e.target.value)}
-                    className="px-2.5 py-1.5 bg-[#07090E] border border-slate-700/80 rounded-lg text-xs text-slate-300 font-mono focus:outline-none focus:border-emerald-500"
-                  >
-                    <option value="ALL">All Actions</option>
-                    <option value="ALLOWED">Allowed Only</option>
-                    <option value="BLOCKED">Blocked Only</option>
-                  </select>
-                </>
+              {activeTab === 'whitelisted' && (
+                <select
+                  value={whitelistFilterType}
+                  onChange={(e) => setWhitelistFilterType(e.target.value)}
+                  className="px-2.5 py-1.5 bg-[#06080E] border border-slate-700/80 rounded-lg text-xs text-slate-300 font-mono focus:outline-none focus:border-emerald-500"
+                >
+                  <option value="ALL">All Whitelisted</option>
+                  <option value="DOMAIN">Domains Only</option>
+                  <option value="IP">IPs Only</option>
+                  <option value="ACTIVE">Active Traffic Only</option>
+                </select>
               )}
             </div>
           </div>
 
-          {/* TAB 2: REAL-TIME TRAFFIC INSPECTOR STREAM */}
+          {/* TAB 1: NON-WHITELISTED CALLERS & THREATS (CLEAN NOC ARCHITECTURE) */}
+          {activeTab === 'unauthorized' && (
+            <div className="p-4 flex-1 flex flex-col gap-3.5 overflow-y-auto">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
+                <div>
+                  <div className="text-xs font-bold text-slate-300 font-mono flex items-center gap-2">
+                    <span>NON-WHITELISTED CALLERS & DATA SCRAPERS</span>
+                    <span className="text-slate-500">•</span>
+                    <span className="text-cyan-400 font-normal">
+                      Target Domain: <strong>{selectedVpsDomain === 'ALL' ? 'All VPS Sites' : selectedVpsDomain}</strong>
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    Callers hitting without whitelist authorization. Use the action bar below to Whitelist, Block, or Inject a custom takeover message into their API feeds.
+                  </p>
+                </div>
+              </div>
+
+              {filteredUnauthorized.length === 0 ? (
+                <div className="py-16 text-center text-slate-500 font-mono text-xs">
+                  Zero non-whitelisted callers detected for {selectedVpsDomain === 'ALL' ? 'any VPS site' : selectedVpsDomain}!
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3">
+                  {filteredUnauthorized.map((o) => {
+                    const hasBypass = o.bypassAttempts > 0;
+                    return (
+                      <div
+                        key={o.rawKey}
+                        className={`rounded-xl border p-4 transition ${
+                          o.isBlocked
+                            ? 'bg-rose-950/20 border-rose-800/60'
+                            : hasBypass
+                            ? 'bg-rose-950/10 border-rose-700/40'
+                            : 'bg-[#080B14] border-slate-800/90 hover:border-slate-700'
+                        }`}
+                      >
+                        {/* Top Line: Caller Identification & Load */}
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 pb-3 border-b border-slate-800/80">
+                          <div className="flex items-center gap-2.5 flex-wrap">
+                            <span className="font-bold text-white text-sm font-mono tracking-wide flex items-center gap-1.5">
+                              {o.origin.startsWith('Direct') ? (
+                                <Server className="w-4 h-4 text-amber-400 shrink-0" />
+                              ) : (
+                                <Globe className="w-4 h-4 text-rose-400 shrink-0" />
+                              )}
+                              <span>{o.origin}</span>
+                            </span>
+
+                            {/* Status Pills */}
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-rose-500/10 text-rose-300 border border-rose-500/30">
+                              Unauthorized
+                            </span>
+
+                            {hasBypass && (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-rose-500/20 text-rose-300 border border-rose-500/50 flex items-center gap-1">
+                                <AlertOctagon className="w-3 h-3 text-rose-400" />
+                                <span>{o.bypassAttempts} Bypass Blocks</span>
+                              </span>
+                            )}
+
+                            {o.isBlocked && (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-rose-600/30 text-rose-200 border border-rose-500">
+                                ⛔ BLOCKED
+                              </span>
+                            )}
+
+                            {o.hasCustomMessage && (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 flex items-center gap-1">
+                                <MessageSquare className="w-3 h-3 text-purple-400" />
+                                <span>💬 Custom Message Active</span>
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Hit Volume & Share */}
+                          <div className="text-right flex items-center gap-4">
+                            <div>
+                              <div className="text-base font-bold font-mono text-white">
+                                {o.scopedHits.toLocaleString()} <span className="text-xs font-normal text-slate-400">Hits</span>
+                              </div>
+                              <div className="text-[11px] font-mono text-rose-400">
+                                {o.scopedPercent}% of {selectedVpsDomain === 'ALL' ? 'VPS Load' : selectedVpsDomain}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Middle Line: 2 Clean Balanced Columns */}
+                        <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                          {/* Left: APIs & Routes Called */}
+                          <div className="bg-[#05070D] p-3 rounded-lg border border-slate-800/80">
+                            <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2 font-mono flex items-center gap-1.5">
+                              <Activity className="w-3.5 h-3.5 text-cyan-400" />
+                              <span>APIs & Services Requested:</span>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {o.scopedIntents && o.scopedIntents.length > 0 ? (
+                                o.scopedIntents.map((item, idx) => (
+                                  <span
+                                    key={idx}
+                                    className="px-2 py-0.5 rounded text-[11px] font-mono font-medium bg-slate-800/80 text-slate-200 border border-slate-700/60 flex items-center gap-1.5"
+                                  >
+                                    <span className="text-cyan-400 font-bold">{item.name}:</span>
+                                    <span className="text-white font-bold">{item.count}</span>
+                                  </span>
+                                ))
+                              ) : (
+                                <span className="text-slate-500 font-mono text-[11px]">General Traffic</span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Right: Target Routing & Client Info */}
+                          <div className="bg-[#05070D] p-3 rounded-lg border border-slate-800/80 flex flex-col justify-between">
+                            <div className="space-y-1.5 font-mono text-xs">
+                              <div className="flex items-center justify-between text-slate-400">
+                                <span>Target Virtual Host:</span>
+                                <span className="text-cyan-300 font-semibold">
+                                  {selectedVpsDomain === 'ALL' ? (o.projectsBreakdown?.[0]?.name || 'diamondapi.cc') : selectedVpsDomain}
+                                </span>
+                              </div>
+                              <div className="flex items-center justify-between text-slate-400">
+                                <span>Caller IP:</span>
+                                <span className="text-slate-200 font-semibold">{o.primaryIp || o.ips?.[0] || 'Direct'}</span>
+                              </div>
+                              <div className="flex items-center justify-between text-slate-400">
+                                <span>Last Activity:</span>
+                                <span className="text-white">
+                                  {o.lastSeen ? (o.lastSeen.includes('T') ? o.lastSeen.split('T')[1].slice(0, 8) : o.lastSeen) : 'Live Now'}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Bottom Line: 4 Distinct Action Buttons (CRITICAL REQUIREMENT) */}
+                        <div className="mt-3 pt-2.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2">
+                          <div className="text-[11px] font-mono text-slate-500">
+                            Countermeasures for: <strong className="text-slate-300">{o.origin}</strong>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            {/* 1. Whitelist Button */}
+                            <button
+                              onClick={() => handleQuickWhitelist(o.origin)}
+                              className="px-3 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 text-xs font-semibold flex items-center gap-1.5 transition"
+                              title="Authorize this origin / IP permanently"
+                            >
+                              <ShieldCheck className="w-3.5 h-3.5" />
+                              <span>Whitelist</span>
+                            </button>
+
+                            {/* 2. Block / Unlock Button */}
+                            <button
+                              onClick={() => handleToggleBlock(o.origin)}
+                              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition ${
+                                o.isBlocked
+                                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                                  : 'bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/40'
+                              }`}
+                              title={o.isBlocked ? 'Unlock access' : 'Drop packets and return 403'}
+                            >
+                              <Ban className="w-3.5 h-3.5" />
+                              <span>{o.isBlocked ? 'Unlock' : 'Block Target'}</span>
+                            </button>
+
+                            {/* 3. Send Takeover Message Button */}
+                            <button
+                              onClick={() => openCustomMsgModal(o.origin)}
+                              className="px-3 py-1.5 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 border border-cyan-500/40 text-xs font-semibold flex items-center gap-1.5 transition"
+                              title="Return custom message across their API feeds & player screen"
+                            >
+                              <MessageSquare className="w-3.5 h-3.5" />
+                              <span>Send Message</span>
+                            </button>
+
+                            {/* 4. Delete Origin Button */}
+                            <button
+                              onClick={() => handleDeleteOrigin(o.origin)}
+                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-950/40 text-slate-400 hover:text-rose-400 border border-slate-700/60 transition"
+                              title="Delete this origin from tracking"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB 2: WHITELISTED PARTNERS */}
+          {activeTab === 'whitelisted' && (
+            <div className="p-4 flex-1 flex flex-col gap-3.5 overflow-y-auto">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
+                <div>
+                  <div className="text-xs font-bold text-white font-mono flex items-center gap-2">
+                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                    <span>WHITELISTED PARTNER DOMAINS & CLIENT IPS</span>
+                  </div>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    Official verified partners permitted to access live streams and APIs without restriction.
+                  </p>
+                </div>
+
+                <form onSubmit={handleQuickAddWhitelist} className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={quickAddInput}
+                    onChange={(e) => setQuickAddInput(e.target.value)}
+                    placeholder="Quick Add Domain / IP..."
+                    className="px-3 py-1.5 bg-[#06080E] border border-slate-700/80 rounded-lg text-xs text-white placeholder-slate-500 font-mono focus:outline-none focus:border-emerald-500 w-52"
+                  />
+                  <button
+                    type="submit"
+                    disabled={addingWhitelist || !quickAddInput.trim()}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1 transition"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add</span>
+                  </button>
+                </form>
+              </div>
+
+              {filteredWhitelisted.length === 0 ? (
+                <div className="py-16 text-center text-slate-500 font-mono text-xs">
+                  No whitelisted entities found. Use the quick add box above to whitelist an authorized partner.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3">
+                  {filteredWhitelisted.map((w, idx) => {
+                    const isBlocked = w.status === 'blocked';
+                    const hits = w.scopedHits || w.liveHits || w.count || 0;
+                    const displayKey = w.domain || w.origin;
+                    const isIp = w.entryType === 'ip' || /^(\d{1,3}\.){3}\d{1,3}$/.test(displayKey);
+
+                    return (
+                      <div
+                        key={w.domain || w.rawKey || idx}
+                        className={`rounded-xl border p-4 transition ${
+                          isBlocked ? 'bg-rose-950/20 border-rose-800/60' : 'bg-[#080B14] border-slate-800'
+                        }`}
+                      >
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 pb-3 border-b border-slate-800/80">
+                          <div className="flex items-center gap-2.5 flex-wrap">
+                            <span className="font-bold text-white text-sm font-mono tracking-wide flex items-center gap-1.5">
+                              {isIp ? (
+                                <Server className="w-4 h-4 text-emerald-400" />
+                              ) : (
+                                <Globe className="w-4 h-4 text-cyan-400" />
+                              )}
+                              <span>{displayKey}</span>
+                            </span>
+
+                            <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-800 text-slate-300 border border-slate-700">
+                              {isIp ? 'IP' : 'DOMAIN'}
+                            </span>
+
+                            {isBlocked ? (
+                              <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                                ⛔ SUSPENDED
+                              </span>
+                            ) : (
+                              <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                                ✅ WHITELISTED
+                              </span>
+                            )}
+
+                            {w.note && (
+                              <span className="text-xs text-slate-400 font-mono italic">
+                                ({w.note})
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="text-right">
+                            <div className="text-sm font-bold font-mono text-white">
+                              {hits.toLocaleString()} <span className="text-xs font-normal text-slate-400">Hits</span>
+                            </div>
+                            <div className="text-[11px] font-mono text-emerald-400">
+                              {hits > 0 ? `${w.scopedPercent || w.percent || 0}% Share` : 'Standby'}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="mt-3 pt-2 border-t border-slate-800/80 flex items-center justify-between">
+                          <div className="text-[11px] font-mono text-slate-500">
+                            Last Active: {w.lastSeen ? (w.lastSeen.includes('T') ? w.lastSeen.split('T')[1].slice(0, 8) : w.lastSeen) : 'Standby'}
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => handleToggleBlock(displayKey)}
+                              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition"
+                            >
+                              {isBlocked ? 'Unlock' : 'Block'}
+                            </button>
+
+                            <button
+                              onClick={() => openCustomMsgModal(displayKey)}
+                              className="px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs font-semibold transition"
+                            >
+                              Send Message
+                            </button>
+
+                            <button
+                              onClick={() => handleDeleteOrigin(displayKey)}
+                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-950/40 text-slate-400 hover:text-rose-400 border border-slate-700/60 transition"
+                              title="Delete from whitelist"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB 3: REAL-TIME REQUEST STREAM */}
           {activeTab === 'traffic' && (
             <div className="flex-1 overflow-x-auto max-h-[640px] overflow-y-auto custom-scroll">
               <table className="w-full text-left border-collapse text-xs">
-                <thead className="sticky top-0 bg-[#090C14] z-10 shadow-sm shadow-slate-900">
-                  <tr className="border-b border-slate-800 bg-[#090C14] text-slate-400 font-mono text-[11px] uppercase tracking-wider">
-                    <th className="py-2.5 px-3">Timestamp</th>
-                    <th className="py-2.5 px-3">Target VPS Site</th>
+                <thead className="sticky top-0 bg-[#080B14] z-10 shadow-sm border-b border-slate-800">
+                  <tr className="text-slate-400 font-mono text-[11px] uppercase tracking-wider">
+                    <th className="py-2.5 px-3">Time</th>
+                    <th className="py-2.5 px-3">Target Domain</th>
                     <th className="py-2.5 px-3">Caller IP</th>
                     <th className="py-2.5 px-3">Origin / Domain</th>
-                    <th className="py-2.5 px-3">Resource Intent</th>
-                    <th className="py-2.5 px-3">Method & Path</th>
+                    <th className="py-2.5 px-3">API Intent</th>
+                    <th className="py-2.5 px-3">Path</th>
                     <th className="py-2.5 px-3">Status</th>
-                    <th className="py-2.5 px-3">Latency</th>
-                    <th className="py-2.5 px-3 text-right">Quick Defense</th>
+                    <th className="py-2.5 px-3 text-right">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/60 font-mono text-xs">
                   {filteredRequests.length === 0 ? (
                     <tr>
-                      <td colSpan={9} className="py-12 text-center text-slate-500 font-sans">
-                        No requests matching active filters in memory buffer. Waiting for live traffic...
+                      <td colSpan={8} className="py-12 text-center text-slate-500 font-sans">
+                        No requests matching filter.
                       </td>
                     </tr>
                   ) : (
                     filteredRequests.map((req) => {
                       const isBlocked = req.action === 'BLOCKED';
                       return (
-                        <tr
-                          key={req.id}
-                          className={`hover:bg-slate-800/30 transition ${
-                            isBlocked ? 'bg-rose-950/10' : ''
-                          }`}
-                        >
-                          <td className="py-2.5 px-3 text-slate-400 text-[11px] whitespace-nowrap">
-                            {req.timestamp.split('T')[1].slice(0, 12)}
+                        <tr key={req.id} className={`hover:bg-slate-800/20 transition ${isBlocked ? 'bg-rose-950/10' : ''}`}>
+                          <td className="py-2 px-3 text-slate-400 text-[11px] whitespace-nowrap">
+                            {req.timestamp.split('T')[1].slice(0, 8)}
                           </td>
-                          <td className="py-2.5 px-3 whitespace-nowrap">
-                            <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-800/90 text-emerald-400 border border-slate-700/60">
-                              {req.project || 'CasinoTV'}
+                          <td className="py-2 px-3 text-cyan-300 font-semibold whitespace-nowrap">{req.project}</td>
+                          <td className="py-2 px-3 text-slate-300 whitespace-nowrap">{req.ip}</td>
+                          <td className="py-2 px-3 text-amber-300 whitespace-nowrap">{req.origin}</td>
+                          <td className="py-2 px-3 text-slate-200 whitespace-nowrap">{req.intent}</td>
+                          <td className="py-2 px-3 text-slate-400 max-w-xs truncate" title={req.path}>{req.path}</td>
+                          <td className="py-2 px-3 whitespace-nowrap">
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${isBlocked ? 'bg-rose-500/20 text-rose-300' : 'bg-emerald-500/20 text-emerald-300'}`}>
+                              {req.status}
                             </span>
                           </td>
-                          <td className="py-2.5 px-3 whitespace-nowrap">
-                            <span className="text-slate-200 font-bold">{req.ip}</span>
-                          </td>
-                          <td className="py-2.5 px-3 whitespace-nowrap">
-                            <span
-                              className={`px-2 py-0.5 rounded text-[11px] font-semibold border ${
-                                req.origin.includes('Direct')
-                                  ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
-                                  : isBlocked
-                                  ? 'bg-rose-500/10 text-rose-300 border-rose-500/30'
-                                  : 'bg-cyan-500/10 text-cyan-300 border-cyan-500/30'
-                              }`}
+                          <td className="py-2 px-3 text-right whitespace-nowrap">
+                            <button
+                              onClick={() => openCustomMsgModal(req.origin)}
+                              className="px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-300 text-[11px] font-semibold hover:bg-cyan-500/20 transition"
                             >
-                              {req.origin}
-                            </span>
-                          </td>
-                          <td className="py-2.5 px-3 whitespace-nowrap">
-                            <span
-                              className={`px-2 py-0.5 rounded text-[10px] font-semibold uppercase ${
-                                req.intent.includes('Sports')
-                                  ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/30'
-                                  : req.intent.includes('Casino')
-                                  ? 'bg-amber-500/10 text-amber-300 border border-amber-500/30'
-                                  : req.intent.includes('Token')
-                                  ? 'bg-purple-500/10 text-purple-300 border border-purple-500/30'
-                                  : 'bg-slate-800 text-slate-300'
-                              }`}
-                            >
-                              {req.intent}
-                            </span>
-                          </td>
-                          <td className="py-2.5 px-3 max-w-xs truncate text-slate-300 text-[11px]">
-                            <span className="text-slate-500 font-bold mr-1.5">{req.method}</span>
-                            <span title={req.path}>{req.path}</span>
-                          </td>
-                          <td className="py-2.5 px-3 whitespace-nowrap">
-                            <span
-                              className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                                isBlocked
-                                  ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
-                                  : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                              }`}
-                            >
-                              {req.status} {req.action}
-                            </span>
-                          </td>
-                          <td className="py-2.5 px-3 text-slate-400 text-[11px] whitespace-nowrap">
-                            {req.durationMs}ms
-                          </td>
-                          <td className="py-2.5 px-3 text-right whitespace-nowrap">
-                            <div className="flex items-center justify-end gap-1.5 font-sans">
-                              {req.origin && !req.origin.includes('Direct') && (
-                                <>
-                                  <button
-                                    onClick={() => handleToggleBlock(req.origin)}
-                                    className="px-2 py-1 rounded bg-rose-500/10 hover:bg-rose-500/20 border border-rose-500/30 text-rose-300 text-[11px] font-semibold transition"
-                                    title="Block Origin"
-                                  >
-                                    <Ban className="w-3 h-3 inline mr-1" />
-                                    <span>Block</span>
-                                  </button>
-                                  <button
-                                    onClick={() => openCustomMsgModal(req.origin)}
-                                    className="px-2 py-1 rounded bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/30 text-cyan-300 text-[11px] font-semibold transition"
-                                    title="Set Custom Hijack Message"
-                                  >
-                                    <MessageSquare className="w-3 h-3 inline mr-1" />
-                                    <span>Set Msg</span>
-                                  </button>
-                                </>
-                              )}
-                            </div>
+                              Message
+                            </button>
                           </td>
                         </tr>
                       );
@@ -1098,915 +1284,173 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
             </div>
           )}
 
-          {/* TAB 1: WHITELISTED DOMAINS & AUTHORIZED IPS (ALAG SECTION) */}
-          {activeTab === 'whitelisted' && (
-            <div className="p-4 flex-1 flex flex-col gap-4 overflow-y-auto">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
-                <div>
-                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                    <span>Whitelisted Domains & Authorized IPs</span>
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                      {filteredWhitelisted.length} Authorized
-                    </span>
-                  </h3>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    Official authorized partner domains & whitelisted client IPs allowed to embed streams and access VPS APIs.
-                  </p>
-                </div>
-
-                <button
-                  onClick={onNavigateWhitelist}
-                  className="px-3 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 text-xs font-semibold flex items-center gap-1.5 transition whitespace-nowrap self-start sm:self-auto"
-                >
-                  <Sliders className="w-3.5 h-3.5" />
-                  <span>Open Full Whitelist Desk</span>
-                </button>
-              </div>
-
-              {/* Quick Inline Whitelist Add Box */}
-              <form
-                onSubmit={handleQuickAddWhitelist}
-                className="bg-[#090C14] border border-emerald-800/40 rounded-xl p-3 flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5"
-              >
-                <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-400 whitespace-nowrap px-1 font-mono">
-                  <Plus className="w-4 h-4" />
-                  <span>Quick Add to Whitelist:</span>
-                </div>
-                <input
-                  type="text"
-                  value={quickAddInput}
-                  onChange={(e) => setQuickAddInput(e.target.value)}
-                  placeholder="Domain or IP (e.g. aura.igambli.com or 23.111.15.175)..."
-                  className="flex-1 px-3 py-1.5 bg-[#06080E] border border-slate-700/80 rounded-lg text-xs text-white placeholder-slate-500 font-mono focus:outline-none focus:border-emerald-500"
-                />
-                <input
-                  type="text"
-                  value={quickAddNote}
-                  onChange={(e) => setQuickAddNote(e.target.value)}
-                  placeholder="Partner Name / Note (e.g. Aura Client)..."
-                  className="w-full sm:w-56 px-3 py-1.5 bg-[#06080E] border border-slate-700/80 rounded-lg text-xs text-white placeholder-slate-500 font-mono focus:outline-none focus:border-emerald-500"
-                />
-                <button
-                  type="submit"
-                  disabled={addingWhitelist || !quickAddInput.trim()}
-                  className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-md shadow-emerald-900/30 whitespace-nowrap"
-                >
-                  <ShieldCheck className="w-3.5 h-3.5" />
-                  <span>{addingWhitelist ? 'Adding...' : '+ Whitelist'}</span>
-                </button>
-              </form>
-
-              {/* Whitelisted Cards Grid */}
-              {filteredWhitelisted.length === 0 ? (
-                <div className="py-16 text-center text-slate-500 font-sans">
-                  No whitelisted entities matching active filter. Use the Quick Add bar above to whitelist a domain or IP.
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 gap-3.5">
-                  {filteredWhitelisted.map((w, idx) => {
-                    const isBlocked = w.status === 'blocked';
-                    const hits = w.liveHits || w.count || 0;
-                    const displayKey = w.domain || w.origin;
-                    const isIp = w.entryType === 'ip' || /^(\d{1,3}\.){3}\d{1,3}$/.test(displayKey);
-
-                    return (
-                      <div
-                        key={w.domain || w.rawKey || idx}
-                        className={`rounded-xl border p-4 transition-all duration-200 ${
-                          isBlocked
-                            ? 'bg-rose-950/20 border-rose-800/60 shadow-lg shadow-rose-950/20'
-                            : 'bg-[#0B101D] border-emerald-800/40 shadow-lg shadow-emerald-950/10'
-                        }`}
-                      >
-                        {/* Top Line: Origin Name, Badges, Total Hits & % Load */}
-                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 pb-3 border-b border-slate-800/80">
-                          <div className="flex items-center gap-2.5 flex-wrap">
-                            <span className="font-bold text-white text-base font-mono tracking-tight flex items-center gap-1.5">
-                              {isIp ? (
-                                <Server className="w-4 h-4 text-emerald-400" />
-                              ) : (
-                                <Globe className="w-4 h-4 text-cyan-400" />
-                              )}
-                              <span>{displayKey}</span>
-                            </span>
-
-                            <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-800 text-slate-300 border border-slate-700">
-                              {isIp ? 'IP ADDRESS' : 'DOMAIN'}
-                            </span>
-
-                            {/* Guard Status Badge */}
-                            {isBlocked ? (
-                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
-                                ⛔ ACCESS BLOCKED
-                              </span>
-                            ) : (
-                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                                ✅ WHITELISTED PARTNER
-                              </span>
-                            )}
-
-                            {/* Service Permissions */}
-                            <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-cyan-950/40 text-cyan-300 border border-cyan-800/60">
-                              {w.casino ? '🎰 Casino TV' : ''} {w.casino && w.sports ? '• ' : ''} {w.sports ? '⚽ Sports TV' : ''}
-                            </span>
-
-                            {w.note && (
-                              <span className="text-xs text-slate-400 font-mono italic">
-                                ({w.note})
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Hit Volume & Traffic Share */}
-                          <div className="flex items-center gap-3">
-                            <div className="text-right">
-                              <div className="text-sm font-bold font-mono text-white">
-                                {hits.toLocaleString()} <span className="text-xs font-normal text-slate-400">Total Hits</span>
-                              </div>
-                              <div className="text-[11px] font-mono text-emerald-400">
-                                {hits > 0 ? `${w.percent || 0}% of VPS Server Load` : 'Standby / Registered'}
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Middle Line: Resource Intents & VPS Projects */}
-                        <div className="mt-3 pt-1 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                          {/* Left: Resource Intents */}
-                          <div className="bg-[#07090E] p-2.5 rounded-lg border border-slate-800/80">
-                            <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5 font-mono">
-                              <Activity className="w-3.5 h-3.5 text-emerald-400" />
-                              <span>Requested Resources & APIs:</span>
-                            </div>
-                            <div className="flex flex-wrap gap-1.5">
-                              {w.intentsBreakdown && w.intentsBreakdown.length > 0 ? (
-                                w.intentsBreakdown.map((item, i) => (
-                                  <span
-                                    key={i}
-                                    className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-slate-800/90 text-slate-200 border border-slate-700/80 flex items-center gap-1.5"
-                                  >
-                                    <span className="text-emerald-400 font-bold">⚡ {item.name}:</span>
-                                    <span className="text-white font-bold">{item.count}</span>
-                                  </span>
-                                ))
-                              ) : (
-                                <span className="text-slate-500 font-mono text-[11px]">
-                                  {hits > 0 ? 'Standard API Access' : 'No active traffic in current buffer'}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-
-                          {/* Right: Target VPS Sites */}
-                          <div className="bg-[#07090E] p-2.5 rounded-lg border border-slate-800/80 flex flex-col justify-between">
-                            <div>
-                              <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5 font-mono">
-                                <Cpu className="w-3.5 h-3.5 text-cyan-400" />
-                                <span>Target VPS Site(s) Monitored:</span>
-                              </div>
-                              <div className="flex flex-wrap gap-1.5 mb-1.5">
-                                {w.projectsBreakdown && w.projectsBreakdown.length > 0 ? (
-                                  w.projectsBreakdown.map((item, i) => (
-                                    <span
-                                      key={i}
-                                      className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-cyan-950/30 text-cyan-300 border border-cyan-800/50 flex items-center gap-1.5"
-                                    >
-                                      <span>🎯 {item.name}:</span>
-                                      <span className="font-bold text-white">{item.count}</span>
-                                    </span>
-                                  ))
-                                ) : (
-                                  <span className="text-slate-500 font-mono text-[11px]">cstv.chimneysolutions.info</span>
-                                )}
-                              </div>
-                            </div>
-
-                            {w.ips && w.ips.length > 0 && (
-                              <div className="text-[11px] font-mono text-slate-400 flex items-center gap-1.5 pt-1.5 border-t border-slate-800/60 truncate">
-                                <span className="text-slate-500 font-bold">Caller IPs:</span>
-                                <span className="text-slate-300 truncate">{w.ips.join(', ')}</span>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Bottom Line: 1-Click Action Bar */}
-                        <div className="mt-3 pt-2.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2">
-                          <div className="text-[11px] font-mono text-slate-400 flex items-center gap-2">
-                            <span>Last Seen:</span>
-                            <span className="text-white font-bold">
-                              {w.lastSeen ? (w.lastSeen.includes('T') ? w.lastSeen.split('T')[1].slice(0, 8) : w.lastSeen) : 'Standby'}
-                            </span>
-                          </div>
-
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => handleToggleBlock(displayKey)}
-                              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition ${
-                                isBlocked
-                                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-md shadow-emerald-950/40'
-                                  : 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                              }`}
-                            >
-                              <Ban className="w-3.5 h-3.5" />
-                              <span>{isBlocked ? 'Unlock & Allow Partner' : 'Block Target'}</span>
-                            </button>
-
-                            <button
-                              onClick={() => openCustomMsgModal(displayKey)}
-                              className="px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs font-semibold flex items-center gap-1.5 transition"
-                            >
-                              <MessageSquare className="w-3.5 h-3.5" />
-                              <span>Set Screen Takeover</span>
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* TAB 2: NON-WHITELISTED CALLERS & BYPASS INTRUDERS (ALAG SECTION) */}
-          {activeTab === 'unauthorized' && (
-            <div className="p-4 flex-1 flex flex-col gap-4 overflow-y-auto">
-              {/* Alert Header Banner */}
-              <div className="bg-rose-950/30 border border-rose-800/80 rounded-xl p-3.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-lg bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400 shrink-0">
-                    <AlertOctagon className="w-5 h-5 animate-pulse" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-white flex items-center gap-2 font-mono">
-                      <span>🚨 NON-WHITELISTED CALLERS & BYPASS THREATS</span>
-                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
-                        {filteredUnauthorized.length} Flagged
-                      </span>
-                    </h3>
-                    <p className="text-xs text-rose-200/80 mt-0.5 font-sans">
-                      Ye wo caller origins, scrapers aur direct IPs hain jo whitelist me nahi hain. Yahan se aap unhe 1-click me whitelist kar sakte hain ya permanently block kar sakte hain.
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Unauthorized Cards Grid */}
-              {filteredUnauthorized.length === 0 ? (
-                <div className="py-16 text-center text-slate-500 font-sans">
-                  Zero non-whitelisted callers detected! All traffic is coming from authorized whitelisted partners.
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 gap-3.5">
-                  {filteredUnauthorized.map((o) => {
-                    const hasBypass = o.bypassAttempts > 0;
-                    return (
-                      <div
-                        key={o.rawKey}
-                        className={`rounded-xl border p-4 transition-all duration-200 ${
-                          o.isBlocked
-                            ? 'bg-rose-950/30 border-rose-800 shadow-lg shadow-rose-950/30'
-                            : hasBypass
-                            ? 'bg-rose-950/20 border-rose-700/70 shadow-lg shadow-rose-950/20'
-                            : 'bg-amber-950/15 border-amber-800/60'
-                        }`}
-                      >
-                        {/* Top Line: Origin Name, Badges, Total Hits & % Load */}
-                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 pb-3 border-b border-slate-800/80">
-                          <div className="flex items-center gap-2.5 flex-wrap">
-                            <span className="font-bold text-white text-base font-mono tracking-tight flex items-center gap-1.5">
-                              {o.origin.startsWith('Direct') ? (
-                                <Server className="w-4 h-4 text-amber-400" />
-                              ) : (
-                                <Globe className="w-4 h-4 text-rose-400" />
-                              )}
-                              <span>{o.origin}</span>
-                            </span>
-
-                            {/* Unauthorized Warning Badge */}
-                            <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
-                              ⚠️ NOT WHITELISTED (UNAUTHORIZED HIT)
-                            </span>
-
-                            {/* Bypass Alert Badge */}
-                            {hasBypass ? (
-                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-rose-900/60 text-rose-200 border border-rose-600 animate-pulse flex items-center gap-1">
-                                <AlertOctagon className="w-3 h-3 text-rose-400" />
-                                <span>🚨 {o.bypassAttempts} BYPASS ATTEMPTS ({o.lastBypassReason || 'Direct API/Bot Hit'})</span>
-                              </span>
-                            ) : null}
-
-                            {o.isBlocked && (
-                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-rose-500/30 text-rose-200 border border-rose-500">
-                                ⛔ CURRENTLY BLOCKED
-                              </span>
-                            )}
-
-                            {o.hasCustomMessage && (
-                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 flex items-center gap-1">
-                                <MessageSquare className="w-3 h-3 text-purple-400" />
-                                <span>💬 SCREEN TAKEOVER ACTIVE</span>
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Hit Volume & Traffic Share */}
-                          <div className="flex items-center gap-3">
-                            <div className="text-right">
-                              <div className="text-sm font-bold font-mono text-white">
-                                {o.count.toLocaleString()} <span className="text-xs font-normal text-slate-400">Total Hits</span>
-                              </div>
-                              <div className="text-[11px] font-mono text-rose-400 font-bold">
-                                {o.percent}% of VPS Server Load
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Middle Line: "Bina Whitelist Ke Kya Hit Kar Raha Hai" */}
-                        <div className="mt-3 pt-1 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                          {/* Left: Resource Intents */}
-                          <div className="bg-[#07090E] p-2.5 rounded-lg border border-slate-800/80">
-                            <div className="text-[11px] font-bold text-rose-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5 font-mono">
-                              <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
-                              <span>Bina Whitelist Ke Kya Access Kar Raha Hai:</span>
-                            </div>
-                            <div className="flex flex-wrap gap-1.5">
-                              {o.intentsBreakdown && o.intentsBreakdown.length > 0 ? (
-                                o.intentsBreakdown.map((item, idx) => (
-                                  <span
-                                    key={idx}
-                                    className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-rose-950/40 text-rose-200 border border-rose-800/50 flex items-center gap-1.5"
-                                  >
-                                    <span className="text-rose-400 font-bold">⚠️ {item.name}:</span>
-                                    <span className="text-white font-bold">{item.count}</span>
-                                  </span>
-                                ))
-                              ) : (
-                                <span className="text-slate-500 font-mono text-[11px]">API / Stream Requests</span>
-                              )}
-                            </div>
-                          </div>
-
-                          {/* Right: Target VPS Sites & Caller IPs */}
-                          <div className="bg-[#07090E] p-2.5 rounded-lg border border-slate-800/80 flex flex-col justify-between">
-                            <div>
-                              <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5 font-mono">
-                                <Cpu className="w-3.5 h-3.5 text-cyan-400" />
-                                <span>Target VPS Site(s) Hit:</span>
-                              </div>
-                              <div className="flex flex-wrap gap-1.5 mb-2">
-                                {o.projectsBreakdown && o.projectsBreakdown.length > 0 ? (
-                                  o.projectsBreakdown.map((item, idx) => (
-                                    <span
-                                      key={idx}
-                                      className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-cyan-950/30 text-cyan-300 border border-cyan-800/50 flex items-center gap-1.5"
-                                    >
-                                      <span>🎯 {item.name}:</span>
-                                      <span className="font-bold text-white">{item.count}</span>
-                                    </span>
-                                  ))
-                                ) : (
-                                  <span className="text-slate-500 font-mono text-[11px]">cstv.chimneysolutions.info</span>
-                                )}
-                              </div>
-                            </div>
-
-                            {o.ips && o.ips.length > 0 && (
-                              <div className="text-[11px] font-mono text-slate-400 flex items-center gap-1.5 pt-1.5 border-t border-slate-800/60 truncate">
-                                <span className="text-slate-500 font-bold">Caller IPs:</span>
-                                <span className="text-slate-300 truncate">{o.ips.join(', ')}</span>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Bottom Line: 1-Click Action Bar */}
-                        <div className="mt-3 pt-2.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2">
-                          <div className="text-[11px] font-mono text-slate-400 flex items-center gap-2">
-                            <span>Last Active:</span>
-                            <span className="text-white font-bold">
-                              {o.lastSeen ? o.lastSeen.split('T')[1].slice(0, 8) : 'Live Now'}
-                            </span>
-                          </div>
-
-                          <div className="flex items-center gap-2">
-                            {/* 1-Click Whitelist Button */}
-                            <button
-                              onClick={() => handleQuickWhitelist(o.origin)}
-                              className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 transition shadow-md shadow-emerald-950/40"
-                            >
-                              <ShieldCheck className="w-3.5 h-3.5" />
-                              <span>✅ Whitelist This Origin</span>
-                            </button>
-
-                            {/* Block / Unlock Toggle Button */}
-                            <button
-                              onClick={() => handleToggleBlock(o.origin)}
-                              className="px-3 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-semibold flex items-center gap-1.5 transition"
-                            >
-                              <Ban className="w-3.5 h-3.5" />
-                              <span>{o.isBlocked ? 'Unlock Target' : '⛔ Block Target'}</span>
-                            </button>
-
-                            {/* Set Custom Screen Takeover Message Button */}
-                            <button
-                              onClick={() => openCustomMsgModal(o.origin)}
-                              className="px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs font-semibold flex items-center gap-1.5 transition"
-                            >
-                              <MessageSquare className="w-3.5 h-3.5" />
-                              <span>💬 Set Screen Takeover</span>
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* TAB 3: ALL CALLERS CONSOLIDATED MATRIX */}
-          {activeTab === 'all_origins' && (
-            <div className="p-4 flex-1 flex flex-col gap-4 overflow-y-auto">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
-                <div>
-                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                    <Globe className="w-4 h-4 text-emerald-400" />
-                    <span>Consolidated Callers Matrix (All Traffic Sources)</span>
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                      {origins.length} Total Callers
-                    </span>
-                  </h3>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    Unified view of all whitelisted and non-whitelisted callers recorded in the current server lifecycle.
-                  </p>
-                </div>
-              </div>
-
-              {origins.length === 0 ? (
-                <div className="py-16 text-center text-slate-500 font-sans">
-                  No active caller origins recorded yet. Waiting for incoming traffic...
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 gap-3.5">
-                  {origins.map((o) => {
-                    const hasBypass = o.bypassAttempts > 0;
-                    return (
-                      <div
-                        key={o.rawKey}
-                        className={`rounded-xl border p-4 transition-all duration-200 ${
-                          o.isBlocked
-                            ? 'bg-rose-950/20 border-rose-800/60 shadow-lg shadow-rose-950/20'
-                            : hasBypass
-                            ? 'bg-amber-950/20 border-amber-800/60 shadow-lg shadow-amber-950/20'
-                            : o.isWhitelisted
-                            ? 'bg-[#0B101D] border-emerald-800/40 shadow-lg shadow-emerald-950/10'
-                            : 'bg-[#0B101D] border-slate-800'
-                        }`}
-                      >
-                        {/* Top Line: Origin Name, Badges, Total Hits & % Load */}
-                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 pb-3 border-b border-slate-800/80">
-                          <div className="flex items-center gap-2.5 flex-wrap">
-                            <span className="font-bold text-white text-base font-mono tracking-tight flex items-center gap-1.5">
-                              {o.origin.startsWith('Direct') ? (
-                                <Server className="w-4 h-4 text-amber-400" />
-                              ) : (
-                                <Globe className="w-4 h-4 text-cyan-400" />
-                              )}
-                              <span>{o.origin}</span>
-                            </span>
-
-                            {/* Guard Status Badge */}
-                            {o.isBlocked ? (
-                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
-                                ⛔ ACCESS BLOCKED
-                              </span>
-                            ) : o.isWhitelisted ? (
-                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                                ✅ WHITELISTED PARTNER
-                              </span>
-                            ) : (
-                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
-                                ⚠️ UNLISTED ORIGIN
-                              </span>
-                            )}
-
-                            {/* Bypass / Anti-Theft Status Badge */}
-                            {hasBypass ? (
-                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-rose-900/40 text-rose-300 border border-rose-700 animate-pulse flex items-center gap-1">
-                                <AlertOctagon className="w-3 h-3 text-rose-400" />
-                                <span>🚨 {o.bypassAttempts} BYPASS ATTEMPTS ({o.lastBypassReason || 'Direct Stream / Bot Hit'})</span>
-                              </span>
-                            ) : (
-                              <span className="px-2.5 py-0.5 rounded text-[11px] font-medium bg-emerald-950/30 text-emerald-400 border border-emerald-800/50 flex items-center gap-1">
-                                <ShieldCheck className="w-3 h-3 text-emerald-400" />
-                                <span>Zero Security Bypass</span>
-                              </span>
-                            )}
-
-                            {/* Active Custom Takeover Notice Badge */}
-                            {o.hasCustomMessage && (
-                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 flex items-center gap-1">
-                                <MessageSquare className="w-3 h-3 text-purple-400" />
-                                <span>💬 SCREEN TAKEOVER ACTIVE</span>
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Hit Volume & Traffic Share */}
-                          <div className="flex items-center gap-3">
-                            <div className="text-right">
-                              <div className="text-sm font-bold font-mono text-white">
-                                {o.count.toLocaleString()} <span className="text-xs font-normal text-slate-400">Total Hits</span>
-                              </div>
-                              <div className="text-[11px] font-mono text-cyan-400">
-                                {o.percent}% of VPS Server Load
-                              </div>
-                            </div>
-
-                            <div className="flex flex-col text-right text-[11px] font-mono pl-3 border-l border-slate-800">
-                              <span className="text-emerald-400 font-bold">{o.allowed} Allowed</span>
-                              <span className="text-rose-400 font-bold">{o.blocked} Blocked</span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Middle Line: Resource Intents & VPS Projects */}
-                        <div className="mt-3 pt-1 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                          {/* Left: Resource Intents Breakdown */}
-                          <div className="bg-[#07090E] p-2.5 rounded-lg border border-slate-800/80">
-                            <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5 font-mono">
-                              <Activity className="w-3.5 h-3.5 text-emerald-400" />
-                              <span>Kis Kis Cheez Ka Request Aa Raha Hai:</span>
-                            </div>
-                            <div className="flex flex-wrap gap-1.5">
-                              {o.intentsBreakdown && o.intentsBreakdown.length > 0 ? (
-                                o.intentsBreakdown.map((item, idx) => (
-                                  <span
-                                    key={idx}
-                                    className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-slate-800/90 text-slate-200 border border-slate-700/80 flex items-center gap-1.5"
-                                  >
-                                    <span className="text-emerald-400 font-bold">⚡ {item.name}:</span>
-                                    <span className="text-white font-bold">{item.count}</span>
-                                  </span>
-                                ))
-                              ) : (
-                                <span className="text-slate-500 font-mono text-[11px]">General API Traffic</span>
-                              )}
-                            </div>
-                          </div>
-
-                          {/* Right: Target VPS Sites & Caller IPs */}
-                          <div className="bg-[#07090E] p-2.5 rounded-lg border border-slate-800/80 flex flex-col justify-between">
-                            <div>
-                              <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5 font-mono">
-                                <Cpu className="w-3.5 h-3.5 text-cyan-400" />
-                                <span>Target VPS Site(s) Hit:</span>
-                              </div>
-                              <div className="flex flex-wrap gap-1.5 mb-2">
-                                {o.projectsBreakdown && o.projectsBreakdown.length > 0 ? (
-                                  o.projectsBreakdown.map((item, idx) => (
-                                    <span
-                                      key={idx}
-                                      className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-cyan-950/30 text-cyan-300 border border-cyan-800/50 flex items-center gap-1.5"
-                                    >
-                                      <span>🎯 {item.name}:</span>
-                                      <span className="font-bold text-white">{item.count}</span>
-                                    </span>
-                                  ))
-                                ) : (
-                                  <span className="text-slate-500 font-mono text-[11px]">cstv.chimneysolutions.info</span>
-                                )}
-                              </div>
-                            </div>
-
-                            {o.ips && o.ips.length > 0 && (
-                              <div className="text-[11px] font-mono text-slate-400 flex items-center gap-1.5 pt-1.5 border-t border-slate-800/60 truncate">
-                                <span className="text-slate-500 font-bold">Caller IPs:</span>
-                                <span className="text-slate-300 truncate">{o.ips.join(', ')}</span>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-
-                        {/* Bottom Line: 1-Click Action Bar */}
-                        <div className="mt-3 pt-2.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2">
-                          <div className="text-[11px] font-mono text-slate-400 flex items-center gap-2">
-                            <span>Last Active:</span>
-                            <span className="text-white font-bold">
-                              {o.lastSeen ? o.lastSeen.split('T')[1].slice(0, 8) : 'Live Now'}
-                            </span>
-                          </div>
-
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => handleToggleBlock(o.origin)}
-                              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition ${
-                                o.isBlocked
-                                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-md shadow-emerald-950/40'
-                                  : 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                              }`}
-                            >
-                              <Ban className="w-3.5 h-3.5" />
-                              <span>{o.isBlocked ? 'Unlock & Allow Origin' : 'Block This Origin'}</span>
-                            </button>
-
-                            <button
-                              onClick={() => openCustomMsgModal(o.origin)}
-                              className="px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs font-semibold flex items-center gap-1.5 transition"
-                            >
-                              <MessageSquare className="w-3.5 h-3.5" />
-                              <span>Set Screen Takeover Message</span>
-                            </button>
-
-                            {!o.isWhitelisted && !o.isBlocked && (
-                              <button
-                                onClick={() => handleQuickWhitelist(o.origin)}
-                                className="px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-xs font-semibold flex items-center gap-1.5 transition"
-                              >
-                                <ShieldCheck className="w-3.5 h-3.5" />
-                                <span>Whitelist</span>
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* TAB 3: BYPASS & INTRUSION ALERTS */}
-          {activeTab === 'bypass' && (
-            <div className="p-4 flex-1 flex flex-col gap-4">
-              <div className="flex items-center justify-between text-xs text-slate-400">
-                <span>
-                  Log of entities caught attempting to bypass stream security (direct address bar visits, automated scraping tools, or hostile competitor framing).
-                </span>
-                <span className="font-mono text-rose-400 font-bold">
-                  {bypassAlerts.length} Intrusion Attempts Blocked
-                </span>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {bypassAlerts.length === 0 ? (
-                  <div className="col-span-2 py-12 text-center text-slate-500 font-sans">
-                    Zero bypass attempts recorded. All traffic is fully authorized.
-                  </div>
-                ) : (
-                  bypassAlerts.map((alert) => (
-                    <div
-                      key={alert.id}
-                      className="bg-[#090C14] border border-rose-500/30 rounded-xl p-4 flex flex-col justify-between gap-3 relative overflow-hidden"
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex items-center gap-2">
-                          <div className="w-7 h-7 rounded-lg bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400 shrink-0">
-                            <AlertTriangle className="w-3.5 h-3.5" />
-                          </div>
-                          <div>
-                            <span className="font-bold text-white text-sm font-mono">{alert.origin}</span>
-                            <div className="text-[11px] text-slate-400 font-mono">IP: {alert.ip}</div>
-                          </div>
-                        </div>
-                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30 font-bold whitespace-nowrap">
-                          {alert.action}
-                        </span>
-                      </div>
-
-                      <div className="bg-[#06080E] border border-slate-800 rounded-lg p-2.5 text-xs font-mono space-y-1">
-                        <div className="text-rose-300 font-semibold">{alert.reason}</div>
-                        <div className="text-slate-400 truncate">Target: {alert.path}</div>
-                        <div className="text-slate-500 text-[10px] truncate">User-Agent: {alert.ua}</div>
-                      </div>
-
-                      <div className="flex items-center justify-between pt-1 border-t border-slate-800/80 text-[11px]">
-                        <span className="text-slate-400 font-mono">
-                          {alert.timestamp.split('T')[1].slice(0, 8)}
-                        </span>
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => handleToggleBlock(alert.origin)}
-                            className="px-2 py-0.5 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 font-semibold border border-rose-500/30 text-[11px]"
-                          >
-                            Permanent Block
-                          </button>
-                          <button
-                            onClick={() => openCustomMsgModal(alert.origin)}
-                            className="px-2 py-0.5 rounded bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-300 font-semibold border border-cyan-500/30 text-[11px]"
-                          >
-                            Deploy Message
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* TAB 4: CUSTOM HIJACK MESSAGES CENTER */}
+          {/* TAB 4: API & SCREEN TAKEOVER MESSAGES */}
           {activeTab === 'countermeasures' && (
-            <div className="p-4 flex-1 flex flex-col gap-6">
-              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div className="p-4 flex-1 flex flex-col gap-4">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
                 <div>
-                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                    <MessageSquare className="w-4 h-4 text-emerald-400" />
-                    <span>Custom Countermeasure & Hijack Takeover Notices</span>
+                  <h3 className="text-sm font-bold text-white font-mono flex items-center gap-2">
+                    <MessageSquare className="w-4 h-4 text-cyan-400" />
+                    <span>ACTIVE API & SCREEN TAKEOVER NOTICES</span>
                   </h3>
-                  <p className="text-xs text-slate-400">
-                    When an unauthorized origin attempts to scrape or embed your live streams, you can inject a custom takeover message that will render across their entire embedded video screen.
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Any caller listed below will receive this custom message returned in JSON for their API requests, and rendered on full screen if they embed the video player.
                   </p>
                 </div>
+
                 <button
                   onClick={() => openCustomMsgModal('')}
-                  className="px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 transition shadow-lg shadow-emerald-900/30 whitespace-nowrap"
+                  className="px-3.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold flex items-center gap-1.5 transition"
                 >
-                  <Plus className="w-4 h-4" />
-                  <span>Create Countermeasure Notice</span>
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Create Notice</span>
                 </button>
               </div>
 
-              {/* Active Messages List */}
-              <div className="space-y-3">
-                {customMessages.length === 0 ? (
-                  <div className="py-12 bg-[#090C14] border border-slate-800 rounded-xl text-center text-slate-500 text-xs">
-                    No custom domain countermeasure notices active yet. Click "Create Countermeasure Notice" above to configure one.
-                  </div>
-                ) : (
-                  customMessages.map((msg) => (
-                    <div
-                      key={msg.domain}
-                      className="bg-[#090C14] border border-slate-800 rounded-xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-4"
-                    >
-                      <div className="space-y-1.5 flex-1">
+              {customMessages.length === 0 ? (
+                <div className="py-16 text-center text-slate-500 font-mono text-xs">
+                  No active takeover messages. Click "Send Message" on any caller to inject one.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3">
+                  {customMessages.map((msg) => (
+                    <div key={msg.domain} className="bg-[#080B14] border border-slate-800 rounded-xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
+                      <div className="space-y-1.5 flex-1 font-mono">
                         <div className="flex items-center gap-2">
-                          <span className="font-mono font-bold text-cyan-300 text-sm">
-                            {msg.domain === '*' ? 'GLOBAL NOTICE (ALL UNLISTED THIEVES)' : msg.domain}
-                          </span>
-                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-bold">
-                            ACTIVE TAKEOVER
+                          <span className="font-bold text-cyan-300 text-sm">{msg.domain === '*' ? 'GLOBAL ALL' : msg.domain}</span>
+                          <span className="px-2 py-0.5 rounded text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                            Active Interception
                           </span>
                         </div>
-                        <h4 className="text-xs font-semibold text-white uppercase">{msg.heading}</h4>
-                        <p className="text-xs text-slate-300 font-mono whitespace-pre-wrap bg-[#06080E] p-2.5 rounded border border-slate-800">
+                        <div className="text-xs font-semibold text-white">{msg.heading}</div>
+                        <div className="text-xs text-slate-300 whitespace-pre-wrap bg-[#05070D] p-2 rounded border border-slate-800">
                           {msg.message}
-                        </p>
+                        </div>
                       </div>
 
                       <div className="flex items-center gap-2 shrink-0">
                         <button
                           onClick={() => openCustomMsgModal(msg.domain)}
-                          className="px-3 py-1.5 rounded-lg bg-[#0F1420] hover:bg-slate-800 border border-slate-700 text-xs font-semibold text-slate-300 transition"
+                          className="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-200 text-xs font-semibold hover:bg-slate-700 transition"
                         >
                           Edit
                         </button>
                         <button
                           onClick={() => handleDeleteCustomMessage(msg.domain)}
-                          className="p-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/20 transition"
+                          className="p-1.5 rounded-lg bg-rose-500/10 text-rose-400 hover:bg-rose-500/20 transition"
                           title="Delete"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
                       </div>
                     </div>
-                  ))
-                )}
-              </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </section>
       </main>
 
-      {/* MODAL: CREATE / EDIT CUSTOM HIJACK MESSAGE */}
+      {/* MODAL: CUSTOM API & SCREEN TAKEOVER MESSAGE (FULLY FUNCTIONAL) */}
       {msgModalOpen && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-2xl bg-[#0F1420] border border-slate-700 rounded-2xl p-6 shadow-2xl relative overflow-hidden flex flex-col gap-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+          <div className="w-full max-w-xl bg-[#0C101C] border border-slate-700 rounded-2xl shadow-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div className="flex items-center gap-2">
-                <div className="w-8 h-8 rounded-lg bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400">
-                  <MessageSquare className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-white">Deploy Custom Countermeasure Takeover</h3>
-                  <p className="text-[11px] text-slate-400">
-                    This message will replace the live video on the target rogue domain.
-                  </p>
-                </div>
+                <MessageSquare className="w-5 h-5 text-cyan-400" />
+                <h3 className="text-sm font-bold text-white font-mono uppercase tracking-wide">
+                  Deploy Custom Message & API Takeover
+                </h3>
               </div>
               <button
                 onClick={() => setMsgModalOpen(false)}
-                className="text-slate-400 hover:text-white p-1 text-xs"
+                className="text-slate-400 hover:text-white transition"
               >
-                ✕
+                <X className="w-5 h-5" />
               </button>
             </div>
 
-            {/* Quick Template Selector */}
+            <div className="bg-[#070A12] p-3 rounded-lg border border-slate-800 text-xs font-mono space-y-1">
+              <div className="text-slate-400">Target Caller / Origin:</div>
+              <div className="text-cyan-300 font-bold text-sm">
+                {selectedDomainForMsg || 'Global (All Unlisted)'}
+              </div>
+              <div className="text-[11px] text-slate-500 pt-1 border-t border-slate-800">
+                Notice: Is target ko set kiya hua message har API response (rates, exchange, scores) me JSON format me aur live player screen par turant return hoga.
+              </div>
+            </div>
+
+            {/* Presets */}
             <div>
-              <label className="block text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
-                Quick Preset Templates
+              <label className="block text-[11px] font-mono text-slate-400 uppercase mb-1.5 font-bold">
+                Quick Template Presets:
               </label>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                {PRESET_MESSAGES.map((t, idx) => (
+              <div className="flex flex-wrap gap-2">
+                {PRESET_MESSAGES.map((preset, idx) => (
                   <button
                     key={idx}
                     type="button"
                     onClick={() => {
-                      setCustomHeading(t.heading);
-                      setCustomBody(t.body);
+                      setCustomHeading(preset.heading);
+                      setCustomBody(preset.body);
                     }}
-                    className="p-2 rounded-lg bg-[#090C14] hover:bg-slate-800 border border-slate-800 text-left text-[11px] text-slate-300 hover:text-white transition"
+                    className="px-2.5 py-1 rounded bg-[#070A12] hover:bg-slate-800 border border-slate-700 text-[11px] text-slate-300 transition"
                   >
-                    <div className="font-bold text-cyan-400 truncate">{t.title}</div>
-                    <div className="text-slate-500 truncate text-[10px]">{t.heading}</div>
+                    {preset.title}
                   </button>
                 ))}
               </div>
             </div>
 
-            {/* Form Fields */}
-            <div className="space-y-3 font-mono text-xs">
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1">
-                  Target Domain / Origin:
-                </label>
-                <input
-                  type="text"
-                  value={selectedDomainForMsg}
-                  onChange={(e) => setSelectedDomainForMsg(e.target.value)}
-                  placeholder="e.g. series444.com or pirate-stream.net (* for all unlisted)"
-                  className="w-full px-3 py-2 bg-[#090C14] border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500"
-                />
-                <span className="text-[10px] text-slate-500 font-sans">
-                  Leave empty or enter * to set this as the default global countermeasure notice for any unauthorized origin.
-                </span>
-              </div>
-
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1">
-                  Alert Heading / Banner Title:
-                </label>
-                <input
-                  type="text"
-                  value={customHeading}
-                  onChange={(e) => setCustomHeading(e.target.value)}
-                  placeholder="e.g. CRITICAL SECURITY NOTICE"
-                  className="w-full px-3 py-2 bg-[#090C14] border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-slate-300 font-semibold mb-1">
-                  Custom Warning Message Body:
-                </label>
-                <textarea
-                  rows={4}
-                  value={customBody}
-                  onChange={(e) => setCustomBody(e.target.value)}
-                  placeholder="Write your custom countermeasure message here..."
-                  className="w-full px-3 py-2 bg-[#090C14] border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 custom-scroll font-mono"
-                />
-              </div>
-            </div>
-
-            {/* LIVE PREVIEW BOX */}
+            {/* Heading */}
             <div>
-              <label className="block text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">
-                Live Countermeasure Screen Preview (What the thief sees):
+              <label className="block text-xs font-mono font-bold text-slate-300 mb-1 uppercase">
+                Notice Heading
               </label>
-              <div className="bg-[#090D16] border border-rose-500/50 rounded-xl p-4 text-center">
-                <div className="inline-block px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-rose-500/10 text-rose-400 border border-rose-500/30 mb-2">
-                  CASINO / SPORTS TV RESTRICTED
-                </div>
-                <h4 className="text-sm font-bold text-white uppercase mb-2">{customHeading}</h4>
-                <div className="bg-rose-500/15 border border-rose-500/40 rounded-lg p-3 text-left mb-2">
-                  <div className="text-[10px] font-bold text-rose-300 uppercase tracking-wider mb-1">
-                    🚨 ADMINISTRATOR COUNTERMEASURE NOTICE
-                  </div>
-                  <div className="text-xs font-semibold text-white whitespace-pre-wrap font-mono">
-                    {customBody}
-                  </div>
-                  <div className="text-[10px] text-slate-400 font-mono mt-1">
-                    DETECTED ROGUE ORIGIN: <b className="text-cyan-400">{selectedDomainForMsg || 'unauthorized-site.com'}</b>
-                  </div>
-                </div>
-              </div>
+              <input
+                type="text"
+                value={customHeading}
+                onChange={(e) => setCustomHeading(e.target.value)}
+                placeholder="ACCESS RESTRICTED"
+                className="w-full px-3 py-2 bg-[#070A12] border border-slate-700 rounded-lg text-xs text-white font-mono focus:outline-none focus:border-cyan-500"
+              />
             </div>
 
-            {/* Modal Actions */}
-            <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-800">
+            {/* Body */}
+            <div>
+              <label className="block text-xs font-mono font-bold text-slate-300 mb-1 uppercase">
+                Takeover Message Body (Shown in API response and on screen)
+              </label>
+              <textarea
+                value={customBody}
+                onChange={(e) => setCustomBody(e.target.value)}
+                rows={4}
+                className="w-full px-3 py-2 bg-[#070A12] border border-slate-700 rounded-lg text-xs text-white font-mono focus:outline-none focus:border-cyan-500"
+              />
+            </div>
+
+            {/* Live API Response Preview */}
+            <div className="bg-[#05070D] p-3 rounded-lg border border-slate-800 text-[11px] font-mono">
+              <span className="text-slate-500 font-bold block mb-1">Live API Response Preview:</span>
+              <pre className="text-cyan-300 overflow-x-auto">
+{JSON.stringify({
+  success: false,
+  error: true,
+  blocked: true,
+  heading: customHeading,
+  message: customBody.split('\n')[0],
+  contact: 'WhatsApp: +63 945 146 9623'
+}, null, 2)}
+              </pre>
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
               <button
                 type="button"
                 onClick={() => setMsgModalOpen(false)}
-                className="px-4 py-2 rounded-lg bg-[#090C14] hover:bg-slate-800 text-slate-300 text-xs font-semibold transition"
+                className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition"
               >
                 Cancel
               </button>
@@ -2014,19 +1458,10 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
                 type="button"
                 disabled={savingMsg}
                 onClick={handleSaveCustomMessage}
-                className="px-5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition flex items-center gap-2 shadow-lg shadow-emerald-900/30 disabled:opacity-50"
+                className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 transition shadow-lg shadow-cyan-900/30"
               >
-                {savingMsg ? (
-                  <>
-                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                    <span>Deploying...</span>
-                  </>
-                ) : (
-                  <>
-                    <ShieldCheck className="w-3.5 h-3.5" />
-                    <span>Deploy Countermeasure</span>
-                  </>
-                )}
+                <Send className="w-3.5 h-3.5" />
+                <span>{savingMsg ? 'Deploying...' : 'Deploy Message Takeover'}</span>
               </button>
             </div>
           </div>
