@@ -152,10 +152,10 @@ function getPatchedSportsPlayerJs() {
     "liveSyncDurationCount:3,liveMaxLatencyDurationCount:10,maxBufferLength:25,maxMaxBufferLength:60,backBufferLength:10,maxBufferHole:0.5,nudgeOffset:0.1,nudgeMaxRetry:5,highBufferWatchdogPeriod:1,enableWorker:!0,lowLatencyMode:!1",
   );
 
-  // 2. Keep Connecting status hidden only once video actually plays (never hide on empty manifest!)
+  // 2. Hide Connecting status instantly when manifest is parsed or fragment buffered
   js = js.replace(
     /xp\.on\(mp\.Events\.MANIFEST_PARSED,\(\)=>\{Tp\(``\),\$\.play\(\)\.catch\(\(\)=>\{\}\)\}\)/g,
-    "xp.on(mp.Events.MANIFEST_PARSED,()=>{$.play().catch(()=>{})}),xp.on(mp.Events.FRAG_BUFFERED,()=>{if($.readyState>=2)Tp(``)})",
+    "xp.on(mp.Events.MANIFEST_PARSED,()=>{Tp(``);$.play().catch(()=>{})}),xp.on(mp.Events.FRAG_BUFFERED,()=>{Tp(``)})",
   );
 
   // 2b. Debounced Buffering Indicator & Instant 0.1s Auto-Unsticker (Eliminates flashing Buffering... text)
@@ -500,6 +500,9 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, p
       }
       #status[hidden] {
         display: none !important;
+        opacity: 0 !important;
+        visibility: hidden !important;
+        pointer-events: none !important;
       }
       #status::before {
         content: "" !important;
@@ -552,11 +555,14 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, p
         function checkSportsHeartbeat() {
           var v = document.querySelector('video');
           if (!v || document.hidden) return;
-          if (v.readyState >= 2 && (v.currentTime > 0 || v.srcObject)) {
+          if ((v.readyState >= 1 && (v.currentTime > 0 || v.srcObject)) || !v.paused) {
             if (!_everPlayed) {
               _everPlayed = true;
               var st = document.getElementById('status');
-              if (st) st.hidden = true;
+              if (st) {
+                st.hidden = true;
+                st.style.display = 'none';
+              }
             }
           }
           if (!_everPlayed || v.paused || v.ended) return;
@@ -575,14 +581,23 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, p
         }
 
         window.addEventListener('load', function() {
-          setInterval(checkSportsHeartbeat, 1000);
+          setInterval(checkSportsHeartbeat, 500);
           var v = document.querySelector('video');
           if (v) {
-            v.addEventListener('playing', function() {
+            var hideStatus = function() {
               _everPlayed = true;
               _freezeCounter = 0;
               var st = document.getElementById('status');
-              if (st) st.hidden = true;
+              if (st) {
+                st.hidden = true;
+                st.style.display = 'none';
+              }
+            };
+            v.addEventListener('playing', hideStatus);
+            v.addEventListener('canplay', hideStatus);
+            v.addEventListener('loadeddata', hideStatus);
+            v.addEventListener('timeupdate', function() {
+              if (v.currentTime > 0) hideStatus();
             });
           }
         });
@@ -623,8 +638,8 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, p
         offlineRetry: 3,
         forceHls: false, // Native zero-latency WebRTC primary (just like Casino TV!)
         startMode: "webrtc",
-        webrtcRetries: 3,
-        webrtcTimeout: 10, // Clean 10s WebRTC handshake before HLS fallback
+        webrtcRetries: 1, // Fast 1 retry (prevents 50s reconnecting loops)
+        webrtcTimeout: 3, // Fast 3s WebRTC handshake (instant failover to HLS in 3s flat!)
         frameAllow: {
           enforce: false,
           outer: { apps: false, hosts: [], sites: [] },
@@ -1834,12 +1849,20 @@ router.get("/hls/chunk.ts", async (req, res) => {
 
             const contentType =
               chunkRes.headers["content-type"] || "video/mp2t";
+            res.setHeader("Content-Type", contentType);
+            res.setHeader("Access-Control-Allow-Origin", "*");
+            res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+
             const chunks = [];
-            chunkRes.on("data", (c) => chunks.push(c));
+            chunkRes.on("data", (c) => {
+              chunks.push(c);
+              try { res.write(c); } catch (_) {}
+            });
             chunkRes.on("end", () => {
+              try { res.end(); } catch (_) {}
               const fullBuffer = Buffer.concat(chunks);
               // Cache segment for 60 seconds (video segments never change once created)
-              if (sportsChunkCache.size > 60) {
+              if (sportsChunkCache.size > 80) {
                 const oldest = sportsChunkCache.keys().next().value;
                 sportsChunkCache.delete(oldest);
               }
@@ -1849,7 +1872,7 @@ router.get("/hls/chunk.ts", async (req, res) => {
                 expiresAt: Date.now() + 60000,
               };
               sportsChunkCache.set(cacheKey, entry);
-              resolve(entry);
+              resolve({ streamed: true });
             });
             chunkRes.on("error", reject);
           },
@@ -1869,6 +1892,9 @@ router.get("/hls/chunk.ts", async (req, res) => {
       const result = await task;
       if (result.redirect) {
         return res.redirect(result.redirect);
+      }
+      if (result.streamed) {
+        return;
       }
       res.setHeader("Content-Type", result.contentType || "video/mp2t");
       res.setHeader("Access-Control-Allow-Origin", "*");

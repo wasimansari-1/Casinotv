@@ -48,6 +48,7 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
   const [activeTab, setActiveTab] = useState('traffic'); // 'traffic' | 'origins' | 'bypass' | 'countermeasures'
   const [intentFilter, setIntentFilter] = useState('ALL');
   const [actionFilter, setActionFilter] = useState('ALL');
+  const [projectFilter, setProjectFilter] = useState('ALL');
 
   // Custom Message Modal / State
   const [msgModalOpen, setMsgModalOpen] = useState(false);
@@ -345,17 +346,21 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
   const summary = telemetry?.summary || {};
   const origins = telemetry?.origins || [];
   const intents = telemetry?.intents || [];
+  const vpsProjects = telemetry?.vpsProjects || [];
+  const projectDistribution = telemetry?.projectDistribution || [];
   const bypassAlerts = telemetry?.bypassAlerts || [];
   const customMessages = telemetry?.customMessages || [];
   const recentRequests = telemetry?.recentRequests || [];
 
-  // Filtered requests based on UI selections
+  // Filtered requests based on UI selections (Universal VPS Filter)
   const filteredRequests = recentRequests.filter((r) => {
+    if (projectFilter !== 'ALL' && (!r.project || !r.project.toLowerCase().includes(projectFilter.toLowerCase()))) return false;
     if (intentFilter !== 'ALL' && r.intent !== intentFilter) return false;
     if (actionFilter !== 'ALL' && r.action !== actionFilter) return false;
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
       return (
+        (r.project && r.project.toLowerCase().includes(q)) ||
         r.origin.toLowerCase().includes(q) ||
         r.ip.toLowerCase().includes(q) ||
         r.path.toLowerCase().includes(q)
@@ -477,6 +482,57 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
 
       {/* Main Dashboard Container */}
       <main className="max-w-7xl w-full mx-auto p-4 lg:p-8 flex-1 flex flex-col gap-6">
+        {/* VPS SITES & PM2 PROJECTS STRIP (ALL SITES MONITORED) */}
+        <div className="bg-[#0B0F19] border border-slate-800 rounded-xl p-3.5 flex flex-col gap-3">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs">
+            <span className="font-bold text-white flex items-center gap-2">
+              <Layers className="w-4 h-4 text-cyan-400" />
+              <span>ACTIVE SITES & SERVICES ON THIS VPS ({vpsProjects.length} Microservices Detected)</span>
+            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-mono text-slate-400">
+                Click any project to filter live traffic stream:
+              </span>
+              {projectFilter !== 'ALL' && (
+                <button
+                  onClick={() => setProjectFilter('ALL')}
+                  className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 border border-rose-500/30 text-[10px] font-mono font-bold"
+                >
+                  Clear Filter [Show All]
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            {vpsProjects.map((p, idx) => {
+              const isSelected = projectFilter === p.name || (p.domain && projectFilter === p.domain);
+              return (
+                <div
+                  key={idx}
+                  onClick={() => setProjectFilter(isSelected ? 'ALL' : (p.name || p.domain))}
+                  className={`p-2.5 rounded-lg border transition cursor-pointer flex items-center justify-between ${
+                    isSelected
+                      ? 'bg-cyan-500/15 border-cyan-500 text-white shadow-md'
+                      : 'bg-[#07090E] border-slate-800 hover:border-slate-700 text-slate-300'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                    <div className="truncate">
+                      <div className="text-xs font-bold font-mono truncate">{p.name || p.domain}</div>
+                      <div className="text-[10px] text-slate-400 truncate">
+                        {p.source || 'Active'} {p.memoryMb ? `• ${p.memoryMb}MB RAM` : ''}
+                      </div>
+                    </div>
+                  </div>
+                  <ChevronRight className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
         {/* TOP TELEMETRY 4 CARDS */}
         <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {/* CARD 1: VPS Host Health */}
@@ -722,6 +778,19 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
               {activeTab === 'traffic' && (
                 <>
                   <select
+                    value={projectFilter}
+                    onChange={(e) => setProjectFilter(e.target.value)}
+                    className="px-2.5 py-1.5 bg-[#07090E] border border-slate-700/80 rounded-lg text-xs text-slate-300 font-mono focus:outline-none focus:border-emerald-500"
+                  >
+                    <option value="ALL">All VPS Sites</option>
+                    {vpsProjects.map((p, idx) => (
+                      <option key={idx} value={p.name}>
+                        {p.name} {p.domain ? `(${p.domain})` : ''}
+                      </option>
+                    ))}
+                  </select>
+
+                  <select
                     value={intentFilter}
                     onChange={(e) => setIntentFilter(e.target.value)}
                     className="px-2.5 py-1.5 bg-[#07090E] border border-slate-700/80 rounded-lg text-xs text-slate-300 font-mono focus:outline-none focus:border-emerald-500"
@@ -757,6 +826,7 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
                 <thead>
                   <tr className="border-b border-slate-800 bg-[#090C14]/70 text-slate-400 font-mono text-[11px] uppercase tracking-wider">
                     <th className="py-2.5 px-3">Timestamp</th>
+                    <th className="py-2.5 px-3">Target VPS Site</th>
                     <th className="py-2.5 px-3">Caller IP</th>
                     <th className="py-2.5 px-3">Origin / Domain</th>
                     <th className="py-2.5 px-3">Resource Intent</th>
@@ -769,7 +839,7 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
                 <tbody className="divide-y divide-slate-800/60 font-mono text-xs">
                   {filteredRequests.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="py-12 text-center text-slate-500 font-sans">
+                      <td colSpan={9} className="py-12 text-center text-slate-500 font-sans">
                         No requests matching active filters in memory buffer. Waiting for live traffic...
                       </td>
                     </tr>
@@ -785,6 +855,11 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
                         >
                           <td className="py-2.5 px-3 text-slate-400 text-[11px] whitespace-nowrap">
                             {req.timestamp.split('T')[1].slice(0, 12)}
+                          </td>
+                          <td className="py-2.5 px-3 whitespace-nowrap">
+                            <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-slate-800/90 text-emerald-400 border border-slate-700/60">
+                              {req.project || 'CasinoTV'}
+                            </span>
                           </td>
                           <td className="py-2.5 px-3 whitespace-nowrap">
                             <span className="text-slate-200 font-bold">{req.ip}</span>
