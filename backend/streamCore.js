@@ -34,7 +34,7 @@ const CONFIG = {
 let _cachedAgent = null;
 let _cachedProxyUrl = null;
 const _sessionAgentPool = new Map(); // effectiveProxyUrl -> https.Agent with persistent Keep-Alive
-let _currentStickySession = Math.floor(Math.random() * 450) + 20;
+let _currentStickySession = Math.floor(Math.random() * 8000) + 1000;
 
 function getSessionForTable(tableId) {
   return _currentStickySession;
@@ -47,7 +47,7 @@ function rotateTableSession(tableId, reason = "") {
 function getEffectiveProxyUrl(proxyUrlStr, sessionOverride = null) {
   if (!proxyUrlStr) return null;
   const rawSession = sessionOverride || _currentStickySession;
-  const session = ((Math.abs(Number(rawSession) || 1) - 1) % 500) + 1; // 500 clean residential IPs
+  const session = Math.max(1, Math.abs(Number(rawSession) || 1));
   if (proxyUrlStr.includes("webshare.io")) {
     if (proxyUrlStr.includes("-rotate")) {
       return proxyUrlStr.replace("-rotate", `-${session}`);
@@ -93,7 +93,7 @@ function rotateStickySession(reason = "") {
   }
   _lastRotateTime = now;
   const oldSession = _currentStickySession;
-  _currentStickySession = Math.floor(Math.random() * 450) + 20;
+  _currentStickySession = Math.floor(Math.random() * 8000) + 1000;
   resetProxyAgent();
   for (const k of Object.keys(sessionState)) {
     sessionState[k].token = null;
@@ -484,11 +484,10 @@ const PROVIDERS = {
     base: "https://cbtfexchange.com",
     casinoBase: "https://casino.cbtfexchange.com",
     accounts: [
-      { user: "pridev", pass: "Asdf1234", siteKey: "2", session: 82 },
-      { user: "khans12", pass: "Asdf1234", siteKey: "2", session: 83 },
-      { user: "8292463648", pass: "Asdf1234", siteKey: "2", session: 84 },
-      { user: "warsa12", pass: "Asdf1234", siteKey: "2", session: 85 },
-      ...(process.env.CBTF_USER5 ? [{ user: process.env.CBTF_USER5, pass: process.env.CBTF_PASS5 || "Asdf1234", siteKey: "2", session: 86 }] : []),
+      { user: "pridev", pass: "Asdf1234", siteKey: "2", session: Math.floor(Math.random() * 8000) + 1000 },
+      { user: "khans12", pass: "Asdf1234", siteKey: "2", session: Math.floor(Math.random() * 8000) + 1000 },
+      { user: "warsa12", pass: "Asdf1234", siteKey: "2", session: Math.floor(Math.random() * 8000) + 1000 },
+      ...(process.env.CBTF_USER4 ? [{ user: process.env.CBTF_USER4, pass: process.env.CBTF_PASS4 || "Asdf1234", siteKey: "2", session: Math.floor(Math.random() * 8000) + 1000 }] : []),
     ],
   },
   startexch: {
@@ -496,30 +495,32 @@ const PROVIDERS = {
     base: "https://startexch99.com",
     casinoBase: "https://casino.startexch99.com",
     accounts: [
-      { user: "smdemo", pass: "Asdf12345" },
-      { user: "suraj01s", pass: "Asdf12345" },
-      { user: "santosh01s", pass: "Asdf12345" },
+      { user: "smdemo", pass: "Asdf12345", session: Math.floor(Math.random() * 8000) + 1000 },
+      { user: "suraj01s", pass: "Asdf12345", session: Math.floor(Math.random() * 8000) + 1000 },
+      { user: "santosh01s", pass: "Asdf12345", session: Math.floor(Math.random() * 8000) + 1000 },
     ],
   },
   asstarplay: {
     name: "Asstarplay",
     base: "https://asstarplay.com",
     casinoBase: "https://casino.asstarplay.com",
-    accounts: [{ user: "zak1984", pass: "Asdf123" }],
+    accounts: [{ user: "zak1984", pass: "Asdf123", session: Math.floor(Math.random() * 8000) + 1000 }],
   },
   nice444: {
     name: "Nice444",
     base: "https://nice444.com",
     casinoBase: "https://casino.nice444.com",
     accounts: [
-      { user: "demo52", pass: "Asdf1234" },
-      { user: "rio001", pass: "Asdf1234" },
+      { user: "demo52", pass: "Asdf1234", session: Math.floor(Math.random() * 8000) + 1000 },
+      { user: "rio001", pass: "Asdf1234", session: Math.floor(Math.random() * 8000) + 1000 },
     ],
   },
 };
 
-// Sharding & Dynamic Human Rotation: Deterministically map each table to an account (~4 tables per user)
+// Sharding & Dynamic Human Rotation: Deterministically map each table to an account (~5-6 tables per user)
 // Every 30 minutes, table assignments rotate naturally so no single account stays locked to the same tables forever (mimics real human casino floor browsing!)
+const _tableAccountOffsets = new Map();
+
 function getAccountForTable(tableId, provKey = "cbtf", attemptOffset = 0) {
   const provider = PROVIDERS[provKey] || PROVIDERS.cbtf;
   const accounts = provider.accounts;
@@ -531,10 +532,17 @@ function getAccountForTable(tableId, provKey = "cbtf", attemptOffset = 0) {
   // Dynamic 30-minute rotation epoch
   const ROTATION_EPOCH_MS = 30 * 60 * 1000;
   const epoch = Math.floor(Date.now() / ROTATION_EPOCH_MS);
+  const storedOffset = _tableAccountOffsets.get(String(tableId)) || 0;
 
-  // Offset rotates by epoch and attemptOffset for instant smart failover
-  const accountIdx = (baseIdx + epoch + attemptOffset) % accounts.length;
+  // Offset rotates by epoch, stored failure offset, and attemptOffset for instant smart failover
+  const accountIdx = (baseIdx + epoch + storedOffset + attemptOffset) % accounts.length;
   return accounts[accountIdx];
+}
+
+function rotateTableAccount(tableId) {
+  const current = _tableAccountOffsets.get(String(tableId)) || 0;
+  _tableAccountOffsets.set(String(tableId), current + 1);
+  console.log(`[Smart Brain] Rotated account offset for table ${tableId} -> +${current + 1}`);
 }
 
 // Failover State Machine & Master Observability
@@ -1444,12 +1452,13 @@ async function getWatchUrl(eventId, options = {}) {
                   ) {
                     const oldSession = tableSession;
                     const oldUser = targetAcc?.user;
-                    const nextSession = Math.floor(Math.random() * 450) + 20;
+                    const nextSession = Math.floor(Math.random() * 8000) + 1000;
                     if (targetAcc) targetAcc.session = nextSession;
                     _accountTokenCache.delete(`${provKey}:${oldUser}`);
                     await redisClient.del(`auth:${provKey}:${oldUser}`).catch(() => {});
 
-                    // Smart Brain: Instant Account Failover
+                    // Smart Brain: Instant Account Failover & Offset Rotation
+                    rotateTableAccount(eventId);
                     attemptOffset++;
                     const nextAcc = getAccountForTable(eventId, provKey, attemptOffset);
                     if (nextAcc && nextAcc.user !== oldUser) {
@@ -1925,6 +1934,7 @@ module.exports = {
   getSessionForTable,
   rotateTableSession,
   getAccountForTable,
+  rotateTableAccount,
   getSportsWatchUrl,
   getLiveSportsEvents,
   GAME_MAP,

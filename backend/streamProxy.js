@@ -12,6 +12,7 @@ const {
   getWatchUrl,
   invalidateWatchUrl,
   rotateTableSession,
+  rotateTableAccount,
   getSportsWatchUrl,
   getLiveSportsEvents,
   GAME_MAP,
@@ -295,13 +296,15 @@ async function warmCasinoTable(eventId, forceFresh = false) {
       if (
         html.includes("Access blocked") ||
         html.includes("copied player") ||
+        html.includes("Stream unavailable") ||
         !html.includes("cfg")
       ) {
         console.warn(
-          `[Stream Warmer] Upstream rejected WatchLink ticket for ${eventId}. Rotating session...`,
+          `[Stream Warmer] Upstream rejected WatchLink ticket for ${eventId}. Rotating session & account...`,
         );
         await invalidateWatchUrl(eventId);
         rotateTableSession(eventId, "Warmer ticket rejected");
+        rotateTableAccount(eventId);
         return false;
       }
 
@@ -344,6 +347,7 @@ async function warmCasinoTable(eventId, forceFresh = false) {
               sid: cfg.sid,
               mode: "connecting",
               init: true,
+              token: true,
               page: providerOrigin,
               tz: "Asia/Kolkata",
               tzo: 330,
@@ -867,7 +871,7 @@ router.get("/player/:eventId", async (req, res) => {
   }
 
   const fetchTask = (async () => {
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         console.log(
           `[Casino Player] Fetching player for ${eventId} (attempt ${attempt})`,
@@ -903,17 +907,18 @@ router.get("/player/:eventId", async (req, res) => {
           timeout: 8000,
         }).catch(() => null);
 
-        if (!pageRes.ok) {
+        if (!pageRes || !pageRes.ok) {
           console.warn(
-            `[Casino Player] Upstream returned status ${pageRes.status} for ${eventId}`,
+            `[Casino Player] Upstream returned status ${pageRes?.status} for ${eventId}`,
           );
           await invalidateWatchUrl(eventId);
-          rotateTableSession(eventId, `Upstream status ${pageRes.status}`);
-          if (attempt === 1) {
-            await new Promise((r) => setTimeout(r, 300));
+          rotateTableSession(eventId, `Upstream status ${pageRes?.status}`);
+          rotateTableAccount(eventId);
+          if (attempt < 3) {
+            await new Promise((r) => setTimeout(r, 250));
             continue;
           }
-          throw new Error(`Upstream stream service returned ${pageRes.status}`);
+          throw new Error(`Upstream stream service returned ${pageRes?.status || "ERR"}`);
         }
 
         let html = await pageRes.text();
@@ -922,15 +927,17 @@ router.get("/player/:eventId", async (req, res) => {
         if (
           html.includes("Access blocked") ||
           html.includes("copied player") ||
+          html.includes("Stream unavailable") ||
           !html.includes("cfg")
         ) {
           console.warn(
-            `[Casino Player] Upstream returned blocked/invalid player for ${eventId}`,
+            `[Casino Player] Upstream returned blocked/invalid player for ${eventId} on attempt ${attempt}. Rotating session & account...`,
           );
           await invalidateWatchUrl(eventId);
           rotateTableSession(eventId, "Upstream ticket rejected");
-          if (attempt === 1) {
-            await new Promise((r) => setTimeout(r, 300));
+          rotateTableAccount(eventId);
+          if (attempt < 3) {
+            await new Promise((r) => setTimeout(r, 250));
             continue;
           }
           throw new Error("Upstream rejected player ticket");
@@ -974,6 +981,7 @@ router.get("/player/:eventId", async (req, res) => {
                 sid: cfg.sid,
                 mode: "connecting",
                 init: true,
+                token: true,
                 page: referer,
                 tz: "Asia/Kolkata",
                 tzo: 330,
@@ -1590,6 +1598,8 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
 
     const payload = {
       ...req.body,
+      init: isInit,
+      token: true,
       page: pageOrigin,
       tz: req.body?.tz || "Asia/Kolkata",
       tzo: req.body?.tzo !== undefined ? req.body.tzo : 330,
@@ -1821,5 +1831,9 @@ router.get("/sports/hls/chunk.ts", async (req, res) => {
     res.status(500).send("Error fetching HLS chunk");
   }
 });
+
+router.warmCasinoTable = warmCasinoTable;
+router.tableTokenCache = tableTokenCache;
+router.playerCache = playerCache;
 
 module.exports = router;
