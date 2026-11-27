@@ -34,28 +34,14 @@ const CONFIG = {
 let _cachedAgent = null;
 let _cachedProxyUrl = null;
 const _sessionAgentPool = new Map(); // effectiveProxyUrl -> https.Agent with persistent Keep-Alive
-let _currentStickySession = Math.floor(Math.random() * 10) + 1; // Strict 1 to 10 pool of Webshare Indian Residential sessions
-const _tableSessionMap = new Map();
+let _currentStickySession = Math.floor(Math.random() * 450) + 20;
 
 function getSessionForTable(tableId) {
-  if (!tableId) return _currentStickySession;
-  if (!_tableSessionMap.has(tableId)) {
-    const hash = String(tableId)
-      .split("")
-      .reduce((acc, c) => acc + c.charCodeAt(0), 0);
-    _tableSessionMap.set(tableId, (hash % 10) + 1);
-  }
-  return _tableSessionMap.get(tableId);
+  return _currentStickySession;
 }
 
 function rotateTableSession(tableId, reason = "") {
-  const current = getSessionForTable(tableId);
-  const next = Math.floor(Math.random() * 500) + 1;
-  _tableSessionMap.set(tableId, next);
-  console.log(
-    `[StreamCore] Rotated proxy session for table ${tableId} (#${current} -> #${next}) Reason: ${reason || "unspecified"}`,
-  );
-  return next;
+  return rotateStickySession(reason);
 }
 
 function getEffectiveProxyUrl(proxyUrlStr, sessionOverride = null) {
@@ -107,10 +93,14 @@ function rotateStickySession(reason = "") {
   }
   _lastRotateTime = now;
   const oldSession = _currentStickySession;
-  _currentStickySession = Math.floor(Math.random() * 500) + 1;
+  _currentStickySession = Math.floor(Math.random() * 450) + 20;
   resetProxyAgent();
+  for (const k of Object.keys(sessionState)) {
+    sessionState[k].token = null;
+    redisClient.del(`auth:${k}`).catch(() => {});
+  }
   console.log(
-    `[StreamCore] Rotated sticky residential proxy session from #${oldSession} -> #${_currentStickySession} (Reason: ${reason || "unspecified"})`,
+    `[StreamCore] 🔄 Rotated sticky residential proxy session from #${oldSession} -> #${_currentStickySession} (Reason: ${reason || "unspecified"})`,
   );
   return _currentStickySession;
 }
@@ -692,6 +682,7 @@ async function getAuthToken(providerKey = "nice444", forceRefresh = false) {
 
           const res = await proxyFetch(`${provider.base}/app/users/userLogin`, {
             method: "POST",
+            session: _currentStickySession,
             headers: {
               "Content-Type": "application/json",
               Origin: provider.base,
@@ -1443,44 +1434,27 @@ async function getWatchUrl(eventId, options = {}) {
                     );
                   }
 
-                  // 3. IP Blocked: viewer_ip_blocked (Immediate <0.1s fast failover)
+                  // 3. IP Blocked: viewer_ip_blocked - Immediately rotate session and re-login on clean IP!
                   if (
                     data?.meta?.message === "viewer_ip_blocked" ||
                     res?.status === 422 ||
                     (res?.status === 403 &&
                       JSON.stringify(data || "").includes("blocked"))
                   ) {
-                    const errMsg =
-                      data?.meta?.message ||
-                      `HTTP ${res?.status || 422} (viewer_ip_blocked)`;
-                    providerHealth[provKey].status = "ERROR";
-                    providerHealth[provKey].lastError = errMsg;
-                    providerHealth[provKey].failureCount =
-                      (providerHealth[provKey].failureCount || 0) + 1;
-                    providerManager.tripCooldown(provKey, 30000, errMsg);
-
-                    if (provKey === _activePrimaryProvider) {
-                      const nextProv =
-                        fallbackKeys.find((k) =>
-                          providerManager.isAvailable(k),
-                        ) || fallbackKeys[0];
-                      if (nextProv) {
-                        _lastFailoverEvent = {
-                          from: provKey,
-                          to: nextProv,
-                          at: new Date().toISOString(),
-                          reason: errMsg,
-                          tableId: eventId,
-                        };
-                        _activePrimaryProvider = nextProv;
-                        console.warn(
-                          `[Failover Brain] ⚡ Switched active primary: ${provKey} -> ${nextProv} (Reason: ${errMsg})`,
-                        );
-                      }
+                    const oldSession = tableSession;
+                    tableSession = rotateTableSession(eventId, `viewer_ip_blocked on session #${oldSession}`);
+                    console.warn(`[StreamCore] ⚡ IP on session #${oldSession} flagged as viewer_ip_blocked for table ${eventId}. Rotated to fresh session #${tableSession}. Retrying...`);
+                    // Clear cached token so next attempt logs in fresh on the new session
+                    sessionState[provKey].token = null;
+                    await redisClient.del(`auth:${provKey}`).catch(() => {});
+                    token = await getAuthToken(provKey, true);
+                    if (attempt < maxRetries) {
+                      await new Promise((r) => setTimeout(r, 200));
+                      continue;
                     }
-                    throw new Error(
-                      `Provider ${provider.name} blocked viewer IP: ${errMsg}`,
-                    );
+                    const errMsg = data?.meta?.message || `HTTP ${res?.status || 422} (viewer_ip_blocked across sessions)`;
+                    providerHealth[provKey].lastError = errMsg;
+                    throw new Error(`Provider ${provider.name} blocked viewer IP across sessions: ${errMsg}`);
                   }
 
                   // 4. HTTP 401: Authentication expired
