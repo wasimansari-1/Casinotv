@@ -38,16 +38,16 @@ function getSessionForTable(tableId) {
   if (!tableId) return _currentStickySession;
   if (!_tableSessionMap.has(tableId)) {
     const hash = String(tableId).split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
-    _tableSessionMap.set(tableId, (hash % 10) + 1);
+    _tableSessionMap.set(tableId, ((hash * 17) % 450) + 20); // Distributed across 450 residential sessions (20-470)
   }
   return _tableSessionMap.get(tableId);
 }
 
 function rotateTableSession(tableId, reason = '') {
   const current = getSessionForTable(tableId);
-  const next = Math.floor(Math.random() * 500) + 1;
+  const next = Math.floor(Math.random() * 450) + 20;
   _tableSessionMap.set(tableId, next);
-  console.log(`[StreamCore] Rotated proxy session for table ${tableId} (#${current} -> #${next}) Reason: ${reason || 'unspecified'}`);
+  console.log(`[StreamCore] 🔄 Rotated proxy session for table ${tableId} (#${current} -> #${next}) Reason: ${reason || 'unspecified'}`);
   return next;
 }
 
@@ -1172,29 +1172,18 @@ async function getWatchUrl(eventId, options = {}) {
                   throw new Error(`Provider ${provider.name} rate-limited (HTTP 429)`);
                 }
 
-                // 3. IP Blocked: viewer_ip_blocked (Immediate <0.1s fast failover)
+                // 3. IP Blocked: viewer_ip_blocked - Immediately rotate sticky session and retry on clean IP!
                 if (data?.meta?.message === 'viewer_ip_blocked' || res?.status === 422 || (res?.status === 403 && JSON.stringify(data || '').includes('blocked'))) {
-                  const errMsg = data?.meta?.message || `HTTP ${res?.status || 422} (viewer_ip_blocked)`;
-                  providerHealth[provKey].status = 'ERROR';
-                  providerHealth[provKey].lastError = errMsg;
-                  providerHealth[provKey].failureCount = (providerHealth[provKey].failureCount || 0) + 1;
-                  providerManager.tripCooldown(provKey, 30000, errMsg);
-
-                  if (provKey === _activePrimaryProvider) {
-                    const nextProv = fallbackKeys.find(k => providerManager.isAvailable(k)) || fallbackKeys[0];
-                    if (nextProv) {
-                      _lastFailoverEvent = {
-                        from: provKey,
-                        to: nextProv,
-                        at: new Date().toISOString(),
-                        reason: errMsg,
-                        tableId: eventId
-                      };
-                      _activePrimaryProvider = nextProv;
-                      console.warn(`[Failover Brain] ⚡ Switched active primary: ${provKey} -> ${nextProv} (Reason: ${errMsg})`);
-                    }
+                  const oldSession = tableSession;
+                  tableSession = rotateTableSession(eventId, `viewer_ip_blocked on session #${oldSession}`);
+                  console.warn(`[StreamCore] ⚡ IP on session #${oldSession} flagged as viewer_ip_blocked for table ${eventId}. Rotated to fresh session #${tableSession}. Retrying...`);
+                  if (attempt < maxRetries) {
+                    await new Promise(r => setTimeout(r, 200));
+                    continue; // Auto-retry with clean residential session
                   }
-                  throw new Error(`Provider ${provider.name} blocked viewer IP: ${errMsg}`);
+                  const errMsg = data?.meta?.message || `HTTP ${res?.status || 422} (viewer_ip_blocked across sessions)`;
+                  providerHealth[provKey].lastError = errMsg;
+                  throw new Error(`Provider ${provider.name} blocked viewer IP across sessions: ${errMsg}`);
                 }
 
                 // 4. HTTP 401: Authentication expired
