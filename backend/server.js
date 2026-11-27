@@ -62,6 +62,9 @@ const PORT = process.env.PORT || 5050;
 app.use(cors());
 app.use(express.json());
 
+// Attach real-time Traffic & Telemetry Inspector Middleware (Tracks all incoming VPS requests)
+app.use(securityEngine.trafficMiddleware);
+
 // Mount the Master Security & Whitelist Engine (/master dashboard & /api/master/*)
 app.use(securityEngine.router);
 

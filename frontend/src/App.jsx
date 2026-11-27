@@ -19,6 +19,7 @@ import {
   Shield
 } from 'lucide-react';
 import MasterAdmin from './MasterAdmin';
+import MasterStatusDashboard from './MasterStatusDashboard';
 
 const CATEGORIES = [
   'ALL', 
@@ -37,6 +38,7 @@ export default function App() {
   const [mainHub, setMainHub] = useState(() => {
     if (typeof window !== 'undefined') {
       const p = (window.location.pathname + window.location.hash).toLowerCase();
+      if (p.includes('status')) return 'status';
       if (p.includes('master')) return 'master';
       if (p.includes('sports')) return 'sports';
     }
@@ -46,7 +48,8 @@ export default function App() {
   useEffect(() => {
     const handlePopState = () => {
       const p = (window.location.pathname + window.location.hash).toLowerCase();
-      if (p.includes('master')) setMainHub('master');
+      if (p.includes('status')) setMainHub('status');
+      else if (p.includes('master')) setMainHub('master');
       else if (p.includes('sports')) setMainHub('sports');
       else setMainHub('casino');
     };
@@ -158,12 +161,31 @@ export default function App() {
     }
   };
 
+  if (mainHub === 'status') {
+    return (
+      <MasterStatusDashboard
+        onBack={() => {
+          setMainHub('casino');
+          if (window.location.pathname !== '/') window.history.pushState(null, '', '/');
+        }}
+        onNavigateWhitelist={() => {
+          setMainHub('master');
+          window.history.pushState(null, '', '/master');
+        }}
+      />
+    );
+  }
+
   if (mainHub === 'master') {
     return (
       <MasterAdmin
         onBack={() => {
           setMainHub('casino');
           if (window.location.pathname !== '/') window.history.pushState(null, '', '/');
+        }}
+        onNavigateStatus={() => {
+          setMainHub('status');
+          window.history.pushState(null, '', '/status');
         }}
       />
     );
@@ -226,6 +248,18 @@ export default function App() {
             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-black/20 text-black font-bold">
               {sportsEvents.length}
             </span>
+          </button>
+
+          <button
+            onClick={() => {
+              setMainHub('status');
+              if (window.location.pathname !== '/status') window.history.pushState(null, '', '/status');
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-emerald-400 transition-all hover:bg-emerald-500/10"
+            title="Master Live Status & VPS Traffic Inspector"
+          >
+            <Activity className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+            <span className="hidden md:inline">Status</span>
           </button>
         </div>
 

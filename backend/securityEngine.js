@@ -9,6 +9,7 @@ const router = express.Router();
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { redisClient, getFailoverStatus } = require('./streamCore');
 
 // Admin Credentials
@@ -37,13 +38,57 @@ const auditLogs = [];
 let enforceWhitelist = true;
 let allowDirectAccess = false; // Strict Anti-Theft: Direct address bar / New tab / Postman blocked by default
 
+// Custom Countermeasure Messages (Domain -> { domain, heading, message, active, updatedAt })
+const customMessagesMap = new Map();
+let globalCustomMessage = {
+  heading: 'Protected CSTV Broadcast Notice',
+  message: 'This live broadcast is protected by CSTV Master Guard. Unauthorized broadcasting on this domain is strictly prohibited. Contact WhatsApp: +63 945 146 9623',
+  active: false,
+  updatedAt: new Date().toISOString()
+};
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function getCustomMessageForDomain(domain) {
+  if (!domain) return globalCustomMessage.active ? globalCustomMessage : null;
+  const clean = String(domain).toLowerCase().trim();
+
+  // 1. Exact match
+  if (customMessagesMap.has(clean)) {
+    const m = customMessagesMap.get(clean);
+    if (m && m.active) return m;
+  }
+
+  // 2. Wildcard or root domain match
+  for (const [key, val] of customMessagesMap.entries()) {
+    if (val && val.active) {
+      if (clean === key || clean.endsWith('.' + key)) return val;
+      if (key.startsWith('*.') && clean.endsWith(key.slice(2))) return val;
+    }
+  }
+
+  if (globalCustomMessage.active) return globalCustomMessage;
+  return null;
+}
+
 // 1. Save Permanently to Local Disk Database (whitelist_database.json)
 function saveToDisk() {
   try {
     const list = Array.from(whitelistMap.values());
+    const customList = Array.from(customMessagesMap.values());
     const payload = {
       settings: { enforceWhitelist, allowDirectAccess },
       domains: list,
+      customMessages: customList,
+      globalCustomMessage,
       updatedAt: new Date().toISOString()
     };
     fs.writeFileSync(DB_FILE, JSON.stringify(payload, null, 2), 'utf8');
@@ -67,9 +112,23 @@ function loadFromDisk() {
         for (const item of data.domains) {
           whitelistMap.set(item.domain.toLowerCase(), item);
         }
-        console.log(`[SecurityEngine] Successfully loaded ${whitelistMap.size} entities from permanent disk database (${DB_FILE})`);
-        return true;
       }
+      if (Array.isArray(data.customMessages)) {
+        customMessagesMap.clear();
+        for (const item of data.customMessages) {
+          if (item && item.domain) {
+            customMessagesMap.set(item.domain.toLowerCase(), item);
+          }
+        }
+      }
+      if (data.globalCustomMessage && typeof data.globalCustomMessage === 'object') {
+        globalCustomMessage = {
+          ...globalCustomMessage,
+          ...data.globalCustomMessage
+        };
+      }
+      console.log(`[SecurityEngine] Successfully loaded ${whitelistMap.size} entities & ${customMessagesMap.size} custom messages from permanent disk database (${DB_FILE})`);
+      return true;
     }
   } catch (err) {
     console.warn('[SecurityEngine] Could not read disk database:', err.message);
@@ -92,14 +151,13 @@ if (!loadFromDisk()) {
 
 // 3. Synchronize Whitelist to Both Disk and Redis (NO EXPIRY / NO TTL)
 async function syncToRedis() {
-  // Always save to disk immediately
   saveToDisk();
-
-  // Save to Redis permanently (NO TTL expiry!)
   try {
     const list = Array.from(whitelistMap.values());
+    const customList = Array.from(customMessagesMap.values());
     await redisClient.set('cstv:security:domains', JSON.stringify(list));
     await redisClient.set('cstv:security:settings', JSON.stringify({ enforceWhitelist, allowDirectAccess }));
+    await redisClient.set('cstv:security:custom_messages', JSON.stringify({ customList, globalCustomMessage }));
   } catch (e) {
     console.warn('[SecurityEngine] Redis sync warning:', e.message);
   }
@@ -108,7 +166,6 @@ async function syncToRedis() {
 // 4. Initialize Whitelist from Storage (Disk + Redis Reconciliation)
 async function initWhitelist() {
   try {
-    // Check if Redis has newer list
     const redisDomains = await redisClient.get('cstv:security:domains');
     if (redisDomains) {
       const list = typeof redisDomains === 'string' ? JSON.parse(redisDomains) : redisDomains;
@@ -126,7 +183,19 @@ async function initWhitelist() {
       if (parsed.allowDirectAccess !== undefined) allowDirectAccess = Boolean(parsed.allowDirectAccess);
     }
 
-    // Save final reconciled state to disk & Redis
+    const rawCustom = await redisClient.get('cstv:security:custom_messages');
+    if (rawCustom) {
+      const parsed = typeof rawCustom === 'string' ? JSON.parse(rawCustom) : rawCustom;
+      if (Array.isArray(parsed?.customList)) {
+        for (const item of parsed.customList) {
+          if (item?.domain) customMessagesMap.set(item.domain.toLowerCase(), item);
+        }
+      }
+      if (parsed?.globalCustomMessage) {
+        globalCustomMessage = { ...globalCustomMessage, ...parsed.globalCustomMessage };
+      }
+    }
+
     await syncToRedis();
   } catch (err) {
     console.warn('[SecurityEngine] Redis initialization note:', err.message);
@@ -408,7 +477,8 @@ async function verifyAccess(req, streamType = 'casino') {
 // PROFESSIONAL ACCESS DENIED HTML SCREEN (No AI patterns, real icons)
 // -------------------------------------------------------------
 function renderUnauthorizedScreen(domain, streamType, reason, customHeading) {
-  const heading = customHeading || `Domain Not Whitelisted for ${streamType} TV`;
+  const customNotice = getCustomMessageForDomain(domain);
+  const heading = customNotice?.heading || customHeading || `Domain Not Whitelisted for ${streamType} TV`;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -431,7 +501,7 @@ function renderUnauthorizedScreen(domain, streamType, reason, customHeading) {
       background: #0f172a;
       border: 1px solid #1e293b;
       border-radius: 16px;
-      max-width: 440px;
+      max-width: 460px;
       width: 100%;
       padding: 32px 28px;
       text-align: center;
@@ -478,6 +548,47 @@ function renderUnauthorizedScreen(domain, streamType, reason, customHeading) {
       padding: 3px 10px;
       border-radius: 20px;
       margin-bottom: 16px;
+    }
+    .custom-takeover-box {
+      background: rgba(239, 68, 68, 0.14);
+      border: 1px solid rgba(239, 68, 68, 0.45);
+      border-radius: 12px;
+      padding: 18px 16px;
+      margin-bottom: 20px;
+      text-align: left;
+      box-shadow: 0 0 30px rgba(239, 68, 68, 0.22);
+      animation: alertPulse 3s infinite ease-in-out;
+    }
+    @keyframes alertPulse {
+      0%, 100% { border-color: rgba(239, 68, 68, 0.45); }
+      50% { border-color: rgba(245, 158, 11, 0.8); }
+    }
+    .custom-takeover-badge {
+      font-size: 10px;
+      font-weight: 800;
+      color: #fca5a5;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .custom-takeover-text {
+      font-size: 14px;
+      font-weight: 600;
+      color: #ffffff;
+      line-height: 1.6;
+      margin-bottom: 10px;
+      white-space: pre-wrap;
+    }
+    .custom-takeover-meta {
+      font-size: 11px;
+      color: #94a3b8;
+      font-family: monospace;
+    }
+    .custom-takeover-meta b {
+      color: #38bdf8;
     }
     .domain-pill {
       background: #1e293b;
@@ -593,8 +704,20 @@ function renderUnauthorizedScreen(domain, streamType, reason, customHeading) {
     </div>
     <div class="badge">${streamType} TV Restricted</div>
     <h1>${String(heading).toUpperCase()}</h1>
+
+    ${customNotice ? `
+    <div class="custom-takeover-box">
+      <div class="custom-takeover-badge">
+        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+        <span>CRITICAL COUNTERMEASURE NOTICE</span>
+      </div>
+      <div class="custom-takeover-text">${escapeHtml(customNotice.message)}</div>
+      <div class="custom-takeover-meta">DETECTED ORIGIN: <b>${escapeHtml(domain || 'Unauthorized')}</b></div>
+    </div>
+    ` : `
     <div class="domain-pill">${domain || 'Unknown Domain'}</div>
     <p>${reason || 'This domain is not whitelisted by the stream administrator.'}</p>
+    `}
 
     <!-- Prominent Contact Details for Whitelisting -->
     <div class="contact-box">
@@ -669,6 +792,170 @@ function requireMasterAuth(req, res, next) {
 }
 
 // -------------------------------------------------------------
+// REAL-TIME TRAFFIC & TELEMETRY INSPECTOR ENGINE
+// -------------------------------------------------------------
+const telemetryState = {
+  startTime: Date.now(),
+  totalRequests: 0,
+  allowedRequests: 0,
+  blockedRequests: 0,
+  requestsRingBuffer: [], // Last 500 requests
+  bypassAlerts: [], // Last 100 bypass/theft attempts
+  originStatsMap: new Map(), // origin -> stats
+  intentStatsMap: new Map(), // intent -> count
+  rateTracker: {
+    samples: [], // { sec, count }
+    reqPerSec: 0
+  }
+};
+
+function classifyRequestIntent(pathname) {
+  if (!pathname || typeof pathname !== 'string') return 'Unknown';
+  if (pathname.startsWith('/api/stream/sports/player/')) return 'Sports TV Stream';
+  if (pathname.startsWith('/api/stream/player/')) return 'Casino TV Stream';
+  if (pathname.startsWith('/api/stream/sports/events')) return 'Sports Match List';
+  if (pathname.startsWith('/api/stream/tables')) return 'Casino Tables List';
+  if (pathname.includes('/ping') || pathname.includes('/proxy-ping')) return 'Token Pre-Warm & Ping';
+  if (pathname.startsWith('/api/stream/ws') || pathname.startsWith('/ws')) return 'WebSocket Tunnel';
+  if (pathname.startsWith('/api/stream/sports/hls/')) return 'Sports HLS Chunk';
+  if (pathname.startsWith('/api/master/')) return 'Master Guard Admin API';
+  if (pathname === '/master' || pathname === '/status' || pathname === '/master/status') return 'Master Dashboard';
+  if (pathname === '/' || pathname.endsWith('.html') || pathname.endsWith('.js') || pathname.endsWith('.css')) return 'Frontend Web UI';
+  if (pathname.startsWith('/api/stream/')) return 'Stream API Engine';
+  return 'Other API Request';
+}
+
+function recordRequestTelemetry(req, res, durationMs) {
+  telemetryState.totalRequests++;
+
+  const now = Date.now();
+  const statusCode = res.statusCode || 200;
+  const isBlocked = statusCode === 403 || statusCode === 401;
+
+  if (isBlocked) {
+    telemetryState.blockedRequests++;
+  } else {
+    telemetryState.allowedRequests++;
+  }
+
+  // Update rolling req/sec rate tracker (last 60s window)
+  const sec = Math.floor(now / 1000);
+  const samples = telemetryState.rateTracker.samples;
+  if (samples.length > 0 && samples[samples.length - 1].sec === sec) {
+    samples[samples.length - 1].count++;
+  } else {
+    samples.push({ sec, count: 1 });
+    while (samples.length > 60) samples.shift();
+  }
+  const totalInWindow = samples.reduce((acc, s) => acc + s.count, 0);
+  const windowSecs = Math.max(1, samples.length);
+  telemetryState.rateTracker.reqPerSec = Math.round((totalInWindow / windowSecs) * 10) / 10;
+
+  const urlObj = new URL(req.originalUrl || req.url, 'http://localhost');
+  const pathname = urlObj.pathname;
+  const intent = classifyRequestIntent(pathname);
+
+  // Intent aggregation
+  const currentIntentCount = telemetryState.intentStatsMap.get(intent) || 0;
+  telemetryState.intentStatsMap.set(intent, currentIntentCount + 1);
+
+  // Extract client IP & Domain / Origin
+  let clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket?.remoteAddress || req.ip || '';
+  if (clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
+  const domain = extractDomain(req);
+  const rawOrigin = req.headers['origin'] || req.headers['referer'] || '';
+
+  // Origin aggregation
+  const originCleanKey = domain || (clientIp === '127.0.0.1' ? 'localhost' : 'direct_no_origin');
+  const entry = whitelistMap.get(originCleanKey);
+  let oStat = telemetryState.originStatsMap.get(originCleanKey);
+  if (!oStat) {
+    oStat = {
+      origin: domain || (clientIp === '127.0.0.1' ? 'localhost' : 'Direct (No Referer)'),
+      rawKey: originCleanKey,
+      count: 0,
+      allowed: 0,
+      blocked: 0,
+      lastSeen: new Date().toISOString(),
+      isWhitelisted: Boolean(entry && entry.status === 'active'),
+      isBlocked: Boolean(entry && entry.status === 'blocked'),
+      hasCustomMessage: Boolean(getCustomMessageForDomain(domain))
+    };
+    telemetryState.originStatsMap.set(originCleanKey, oStat);
+  }
+  oStat.count++;
+  if (isBlocked) oStat.blocked++;
+  else oStat.allowed++;
+  oStat.lastSeen = new Date().toISOString();
+  oStat.isWhitelisted = Boolean(entry && entry.status === 'active');
+  oStat.isBlocked = Boolean(entry && entry.status === 'blocked');
+  oStat.hasCustomMessage = Boolean(getCustomMessageForDomain(domain));
+
+  // Determine bypass/theft attempt
+  const ua = req.headers['user-agent'] || '';
+  const isPostmanOrCurl = ua.includes('Postman') || ua.includes('curl/') || ua.includes('python-requests') || ua.includes('Go-http-client');
+  const isCompetitor = (domain && (domain.includes('series444') || domain.includes('baji8dot') || domain.includes('oddsdata')));
+  const isDirectStreamBypass = !domain && clientIp !== '127.0.0.1' && (pathname.startsWith('/api/stream/player/') || pathname.startsWith('/api/stream/sports/player/'));
+
+  let bypassReason = '';
+  if (isCompetitor) bypassReason = 'Hostile competitor scraper blocked';
+  else if (isPostmanOrCurl) bypassReason = 'Automated scraping bot / Postman bypass attempt';
+  else if (isDirectStreamBypass && !allowDirectAccess) bypassReason = 'Direct address bar / new tab stream bypass attempt';
+  else if (isBlocked && domain) bypassReason = `Unauthorized domain "${domain}" framing attempt`;
+  else if (isBlocked) bypassReason = 'Unauthorized request blocked by whitelist guard';
+
+  const record = {
+    id: `req_${now}_${Math.random().toString(36).substr(2, 6)}`,
+    timestamp: new Date().toISOString(),
+    ip: clientIp || 'Unknown',
+    origin: domain || (clientIp === '127.0.0.1' ? 'localhost' : 'Direct (No Referer)'),
+    referer: req.headers['referer'] || req.headers['origin'] || '-',
+    path: pathname,
+    method: req.method,
+    status: statusCode,
+    intent,
+    durationMs,
+    action: isBlocked ? 'BLOCKED' : 'ALLOWED',
+    isBypassAttempt: Boolean(bypassReason),
+    reason: bypassReason
+  };
+
+  telemetryState.requestsRingBuffer.unshift(record);
+  if (telemetryState.requestsRingBuffer.length > 500) {
+    telemetryState.requestsRingBuffer.pop();
+  }
+
+  // If bypass attempt, push to dedicated alert queue
+  if (bypassReason) {
+    const alert = {
+      id: `alert_${now}_${Math.random().toString(36).substr(2, 6)}`,
+      timestamp: new Date().toISOString(),
+      origin: domain || 'Direct (No Referer)',
+      ip: clientIp || 'Unknown',
+      path: pathname,
+      intent,
+      reason: bypassReason,
+      ua: ua.slice(0, 90),
+      action: 'BLOCKED_BY_GUARD'
+    };
+    telemetryState.bypassAlerts.unshift(alert);
+    if (telemetryState.bypassAlerts.length > 100) {
+      telemetryState.bypassAlerts.pop();
+    }
+  }
+}
+
+function trafficMiddleware(req, res, next) {
+  const start = Date.now();
+  res.on('finish', () => {
+    try {
+      recordRequestTelemetry(req, res, Date.now() - start);
+    } catch (_) {}
+  });
+  next();
+}
+
+// -------------------------------------------------------------
 // MASTER API ROUTES
 // -------------------------------------------------------------
 
@@ -718,13 +1005,180 @@ router.get('/api/master/failover-status', requireMasterAuth, (req, res) => {
   });
 });
 
-// 3. Get Whitelisted Domains
+// 3. Complete VPS Telemetry, Origin Breakdown & Threat Inspector Endpoint (/status)
+router.get('/api/master/telemetry', requireMasterAuth, (req, res) => {
+  const totalMem = Math.round(os.totalmem() / (1024 * 1024));
+  const freeMem = Math.round(os.freemem() / (1024 * 1024));
+  const usedMem = totalMem - freeMem;
+  const nodeMem = process.memoryUsage();
+
+  let casinoActiveTables = 17;
+  let sportsActiveStreams = 0;
+  try {
+    const streamProxy = require('./streamProxy');
+    if (streamProxy.tableTokenCache) casinoActiveTables = streamProxy.tableTokenCache.size || 17;
+  } catch (_) {}
+
+  // Origins list formatted with stats and percentages
+  const origins = Array.from(telemetryState.originStatsMap.values()).map(o => ({
+    ...o,
+    percent: telemetryState.totalRequests > 0 ? Math.round((o.count / telemetryState.totalRequests) * 1000) / 10 : 0
+  })).sort((a, b) => b.count - a.count);
+
+  // Intents list formatted
+  const intents = Array.from(telemetryState.intentStatsMap.entries()).map(([intent, count]) => ({
+    intent,
+    count,
+    percent: telemetryState.totalRequests > 0 ? Math.round((count / telemetryState.totalRequests) * 1000) / 10 : 0
+  })).sort((a, b) => b.count - a.count);
+
+  // Filter requests if requested
+  let filteredRequests = telemetryState.requestsRingBuffer;
+  const { domain, intent, action, limit } = req.query;
+  if (domain) {
+    const qDomain = domain.toLowerCase().trim();
+    filteredRequests = filteredRequests.filter(r => r.origin.toLowerCase().includes(qDomain) || r.ip.includes(qDomain));
+  }
+  if (intent && intent !== 'ALL') {
+    filteredRequests = filteredRequests.filter(r => r.intent === intent);
+  }
+  if (action && action !== 'ALL') {
+    filteredRequests = filteredRequests.filter(r => r.action === action);
+  }
+  const maxLimit = limit ? parseInt(limit, 10) : 150;
+  filteredRequests = filteredRequests.slice(0, maxLimit);
+
+  res.json({
+    success: true,
+    vps: {
+      uptime: os.uptime(),
+      loadavg: os.loadavg(),
+      cpuCount: os.cpus().length,
+      cpuModel: os.cpus()[0]?.model || 'VPS Virtual CPU',
+      totalMemMb: totalMem,
+      usedMemMb: usedMem,
+      freeMemMb: freeMem,
+      memUsagePercent: Math.round((usedMem / totalMem) * 100),
+      nodeRssMb: Math.round(nodeMem.rss / (1024 * 1024)),
+      nodeHeapUsedMb: Math.round(nodeMem.heapUsed / (1024 * 1024)),
+      activeStreams: {
+        casino: casinoActiveTables,
+        sports: sportsActiveStreams
+      },
+      reqPerSec: telemetryState.rateTracker.reqPerSec
+    },
+    summary: {
+      totalRequests: telemetryState.totalRequests,
+      allowedRequests: telemetryState.allowedRequests,
+      blockedRequests: telemetryState.blockedRequests,
+      totalOrigins: telemetryState.originStatsMap.size,
+      totalBypassAlerts: telemetryState.bypassAlerts.length,
+      enforceWhitelist,
+      allowDirectAccess
+    },
+    origins,
+    intents,
+    recentRequests: filteredRequests,
+    bypassAlerts: telemetryState.bypassAlerts.slice(0, 60),
+    customMessages: Array.from(customMessagesMap.values()),
+    globalCustomMessage
+  });
+});
+
+// 4. Custom Countermeasure Messages Endpoints
+router.get('/api/master/custom-messages', requireMasterAuth, (req, res) => {
+  res.json({
+    success: true,
+    customMessages: Array.from(customMessagesMap.values()),
+    globalCustomMessage
+  });
+});
+
+router.post('/api/master/custom-messages', requireMasterAuth, async (req, res) => {
+  const { domain, heading, message, active, isGlobal } = req.body;
+
+  if (isGlobal || domain === '*' || !domain) {
+    globalCustomMessage = {
+      heading: heading || 'Protected CSTV Broadcast Notice',
+      message: message || '',
+      active: active !== undefined ? Boolean(active) : true,
+      updatedAt: new Date().toISOString()
+    };
+    await syncToRedis();
+    return res.json({ success: true, globalCustomMessage });
+  }
+
+  const clean = domain.toLowerCase().trim().replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
+  const entry = {
+    domain: clean,
+    heading: heading || 'Unauthorized Broadcast Warning',
+    message: message || '',
+    active: active !== undefined ? Boolean(active) : true,
+    updatedAt: new Date().toISOString()
+  };
+
+  customMessagesMap.set(clean, entry);
+  await syncToRedis();
+  res.json({ success: true, customMessage: entry });
+});
+
+router.delete('/api/master/custom-messages/:domain', requireMasterAuth, async (req, res) => {
+  const clean = req.params.domain.toLowerCase().trim();
+  const deleted = customMessagesMap.delete(clean);
+  await syncToRedis();
+  res.json({ success: true, deleted });
+});
+
+// 5. 1-Click Toggle Block/Unlock for Any Origin
+router.post('/api/master/domains/:domain/toggle-block', requireMasterAuth, async (req, res) => {
+  const clean = req.params.domain.toLowerCase().trim();
+  let entry = whitelistMap.get(clean);
+
+  if (!entry) {
+    const isIp = /^(\d{1,3}\.){3}\d{1,3}$/.test(clean) || clean.includes(':');
+    entry = {
+      domain: clean,
+      entryType: isIp ? 'ip' : 'domain',
+      casino: false,
+      sports: false,
+      status: 'blocked',
+      note: 'Auto-blocked from status inspector',
+      hitCount: 0,
+      lastAccess: new Date().toISOString(),
+      createdAt: new Date().toISOString()
+    };
+    whitelistMap.set(clean, entry);
+  } else {
+    entry.status = entry.status === 'blocked' ? 'active' : 'blocked';
+    if (entry.status === 'active') {
+      entry.casino = true;
+      entry.sports = true;
+    }
+  }
+
+  await syncToRedis();
+  res.json({ success: true, domain: entry });
+});
+
+// 6. Reset Telemetry Counters
+router.post('/api/master/clear-telemetry', requireMasterAuth, (req, res) => {
+  telemetryState.requestsRingBuffer = [];
+  telemetryState.bypassAlerts = [];
+  telemetryState.totalRequests = 0;
+  telemetryState.allowedRequests = 0;
+  telemetryState.blockedRequests = 0;
+  telemetryState.originStatsMap.clear();
+  telemetryState.intentStatsMap.clear();
+  res.json({ success: true });
+});
+
+// 7. Get Whitelisted Domains
 router.get('/api/master/domains', requireMasterAuth, (req, res) => {
   const list = Array.from(whitelistMap.values()).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
   res.json({ success: true, count: list.length, domains: list });
 });
 
-// 4. Add Whitelist Domain
+// 8. Add Whitelist Domain
 router.post('/api/master/domains', requireMasterAuth, async (req, res) => {
   let { domain, casino, sports, note } = req.body;
   if (!domain) return res.status(400).json({ success: false, error: 'Domain is required' });
@@ -750,7 +1204,7 @@ router.post('/api/master/domains', requireMasterAuth, async (req, res) => {
   res.json({ success: true, domain: entry });
 });
 
-// 5. Update / Toggle Domain Permissions
+// 9. Update / Toggle Domain Permissions
 router.patch('/api/master/domains/:domain', requireMasterAuth, async (req, res) => {
   const clean = req.params.domain.toLowerCase().trim();
   const entry = whitelistMap.get(clean);
@@ -765,7 +1219,7 @@ router.patch('/api/master/domains/:domain', requireMasterAuth, async (req, res) 
   res.json({ success: true, domain: entry });
 });
 
-// 6. Delete Whitelist Domain
+// 10. Delete Whitelist Domain
 router.delete('/api/master/domains/:domain', requireMasterAuth, async (req, res) => {
   const clean = req.params.domain.toLowerCase().trim();
   const deleted = whitelistMap.delete(clean);
@@ -773,17 +1227,29 @@ router.delete('/api/master/domains/:domain', requireMasterAuth, async (req, res)
   res.json({ success: true, deleted });
 });
 
-// 7. Get Recent Security & Audit Logs
+// 11. Get Recent Security & Audit Logs
 router.get('/api/master/logs', requireMasterAuth, (req, res) => {
   res.json({ success: true, count: auditLogs.length, logs: auditLogs });
 });
 
-// 8. Toggle Settings (Strict Enforce / Direct Access)
+// 12. Toggle Settings (Strict Enforce / Direct Access)
 router.post('/api/master/settings', requireMasterAuth, async (req, res) => {
   if (req.body.enforceWhitelist !== undefined) enforceWhitelist = Boolean(req.body.enforceWhitelist);
   if (req.body.allowDirectAccess !== undefined) allowDirectAccess = Boolean(req.body.allowDirectAccess);
   await syncToRedis();
   res.json({ success: true, enforceWhitelist, allowDirectAccess });
+});
+
+// 13. Route Handlers for /status and /master/status
+router.get(['/status', '/master/status'], (req, res) => {
+  const distHtml = path.join(__dirname, '../frontend/dist/index.html');
+  if (fs.existsSync(distHtml)) {
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    return res.sendFile(distHtml);
+  }
+  return res.redirect('/master#status');
 });
 
 // -------------------------------------------------------------
@@ -1472,5 +1938,9 @@ module.exports = {
   getAllowedDomainsList,
   verifyWebSocketAccess,
   isEnforceWhitelist,
-  extractDomain
+  extractDomain,
+  trafficMiddleware,
+  recordRequestTelemetry,
+  getCustomMessageForDomain,
+  telemetryState
 };

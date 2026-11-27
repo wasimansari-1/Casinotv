@@ -25,7 +25,7 @@ import {
   Sliders
 } from 'lucide-react';
 
-export default function MasterAdmin({ onBack }) {
+export default function MasterAdmin({ onBack, onNavigateStatus }) {
   const [token, setToken] = useState(() => localStorage.getItem('cstv_master_token') || '');
   const [loginId, setLoginId] = useState('');
   const [loginPass, setLoginPass] = useState('');
@@ -405,6 +405,16 @@ export default function MasterAdmin({ onBack }) {
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3">
+            {onNavigateStatus && (
+              <button
+                onClick={onNavigateStatus}
+                className="p-2 text-emerald-300 hover:text-white bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded-lg transition text-xs flex items-center gap-1.5 px-3 font-semibold shadow-sm"
+              >
+                <Activity className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+                <span>Live Status (/status)</span>
+              </button>
+            )}
+
             {onBack && (
               <button
                 onClick={onBack}
