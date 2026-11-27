@@ -506,53 +506,9 @@ async function runContinuousWarmerCycle() {
   }
 }
 
-// Proactive Token Sentinel: Runs every 20s across active tables.
-// If any active table's token has <40s remaining, it auto-renews in the background so viewers NEVER see a drop!
-setInterval(async () => {
-  try {
-    const tableIds = Object.keys(GAME_MAP);
-    for (const id of tableIds) {
-      if (await isTableActive(id)) {
-        let tokenObj = tableTokenCache.get(id);
-        if (!isTokenValid(tokenObj)) {
-          const redisToken = await redisClient.get(`table_token:${id}`).catch(() => null);
-          if (isTokenValid(redisToken)) {
-            tokenObj = redisToken;
-            tableTokenCache.set(id, tokenObj);
-          }
-        }
-
-        const expiresAt = Number(tokenObj?.expiresAt) || 0;
-        const remainingMs = expiresAt - Date.now();
-        if (remainingMs < 40000) {
-          console.log(
-            `[Token Sentinel] ⚡ Proactively auto-renewing token for active table ${id} (${Math.round(remainingMs / 1000)}s remaining)...`,
-          );
-          await warmCasinoTable(id, true).catch(() => {});
-        }
-      }
-    }
-  } catch (err) {
-    console.warn("[Token Sentinel] Warning:", err.message);
-  }
-}, 20000);
-
-// On boot: Pre-warm top flagship tables sequentially so first hits are instantaneous (<1s)
-setTimeout(async () => {
-  const topTables = ["99.0010", "99.0013", "99.0018", "99.0030"];
-  console.log(`[Stream Warmer] Pre-warming top flagship tables: [${topTables.join(", ")}]...`);
-  for (const id of topTables) {
-    recordTableTouch(id);
-    await warmCasinoTable(id).catch(() => {});
-    await new Promise((r) => setTimeout(r, 1200));
-  }
-  console.log("[Stream Warmer] Flagship tables pre-warmed & ready in Redis.");
-}, 1000);
-
-// Schedule autonomous demand warmer to run every 4 minutes across cluster
-setInterval(() => {
-  runContinuousWarmerCycle().catch(() => {});
-}, 240000);
+// Pure On-Demand Architecture: Background warmer crons disabled to preserve 100% of proxy bandwidth.
+// Tables are cached in Redis for 15-30 minutes upon user request and served in 0ms without background hammering.
+// (Crons removed to eliminate proxy quota drain and prevent provider rate-limits)
 
 // Health Check & Monitoring API (Real-Time Provider Observability)
 router.get("/health", async (req, res) => {
@@ -1408,6 +1364,22 @@ router.get("/player-assets/:asset", async (req, res) => {
         return res.sendFile(gifPath);
       }
     }
+    if (asset === "player.js") {
+      const jsPath = path.join(__dirname, "player.js");
+      if (fs.existsSync(jsPath)) {
+        res.setHeader("Content-Type", "application/javascript");
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        return res.sendFile(jsPath);
+      }
+    }
+    if (asset === "sports-player.js") {
+      const jsPath = path.join(__dirname, "sports_player_raw.js");
+      if (fs.existsSync(jsPath)) {
+        res.setHeader("Content-Type", "application/javascript");
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        return res.sendFile(jsPath);
+      }
+    }
 
     const upstreamAssetUrl = `https://live.livecdnplatin.com/player/${asset}`;
 
@@ -1524,12 +1496,21 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
   const fallbackStreamId =
     eventId && GAME_MAP[eventId] ? GAME_MAP[eventId].streamId : "GAME10";
   const isInit = Boolean(req.body?.init);
-
-  // 1. FAST ZERO-PROXY PATH FOR ROUTINE HEARTBEATS & TOKEN DELIVERY:
-  // When a player is running, it pings every 3-10 seconds.
-  // Replying locally in 0ms saves 99% of proxy requests and stops proxy quota drain!
   const isTokenReq = Boolean(req.body?.token);
 
+  // 1. FAST ZERO-PROXY PATH FOR ROUTINE HEARTBEATS:
+  // When player is running, it pings every 3-10s to report telemetry.
+  // Replying locally in 0ms saves 99% of proxy requests and stops proxy quota drain & stream drops!
+  if (!isInit && !isTokenReq) {
+    return res.status(200).json({
+      ok: true,
+      state: "live",
+      stop: false,
+      maintenance: null,
+    });
+  }
+
+  // 2. FOR INITIAL HANDSHAKE (isInit: true) or explicit token renewal:
   let cachedObj = tableTokenCache.get(eventId);
   if (!cachedObj || !cachedObj.token) {
     try {
@@ -1541,37 +1522,14 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
     } catch (_) {}
   }
 
-  // If token is missing or expired and client explicitly needs one, auto-renew
-  if ((!cachedObj || !cachedObj.token || (isTokenReq && !isTokenValid(cachedObj))) && eventId) {
-    console.log(`[Proxy-Ping] Refreshing token for table ${eventId} (isInit: ${isInit}, isTokenReq: ${isTokenReq})...`);
-    await warmCasinoTable(eventId, true).catch(() => {});
-    cachedObj = tableTokenCache.get(eventId);
-    if (!cachedObj || !cachedObj.token) {
-      try {
-        const redisData = await redisClient.get(`table_token:${eventId}`);
-        if (redisData && redisData.token) {
-          cachedObj = redisData;
-          tableTokenCache.set(eventId, cachedObj);
-        }
-      } catch (_) {}
-    }
-  }
-
-  const token = cachedObj?.token || "";
-  const ws = cachedObj?.wsUrl || fallbackWsUrl;
-  const streamId =
-    cachedObj?.streamId ||
-    (eventId && GAME_MAP[eventId]?.streamId) ||
-    fallbackStreamId;
-
-  // If we have a cached stream context, return it immediately in 0ms!
-  if (cachedObj && (token || !isInit)) {
+  // If valid token is already in memory or Redis, return immediately in 0ms!
+  if (isTokenValid(cachedObj)) {
     return res.status(200).json({
       ok: true,
       state: "live",
-      streamId: streamId,
-      token: token,
-      wsUrl: getProxiedWsUrl(ws),
+      streamId: cachedObj.streamId || fallbackStreamId,
+      token: cachedObj.token,
+      wsUrl: getProxiedWsUrl(cachedObj.wsUrl || fallbackWsUrl),
       maintenance: null,
       stop: false,
     });
