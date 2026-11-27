@@ -487,7 +487,8 @@ const PROVIDERS = {
       { user: "pridev", pass: "Asdf1234", siteKey: "2", session: 82 },
       { user: "khans12", pass: "Asdf1234", siteKey: "2", session: 83 },
       { user: "8292463648", pass: "Asdf1234", siteKey: "2", session: 84 },
-      ...(process.env.CBTF_USER4 ? [{ user: process.env.CBTF_USER4, pass: process.env.CBTF_PASS4 || "Asdf1234", siteKey: "2", session: 85 }] : []),
+      { user: "warsa12", pass: "Asdf1234", siteKey: "2", session: 85 },
+      ...(process.env.CBTF_USER5 ? [{ user: process.env.CBTF_USER5, pass: process.env.CBTF_PASS5 || "Asdf1234", siteKey: "2", session: 86 }] : []),
     ],
   },
   startexch: {
@@ -517,14 +518,22 @@ const PROVIDERS = {
   },
 };
 
-// Sharding: Deterministically map each table to an account so no single account exceeds 4-5 tables
-function getAccountForTable(tableId, provKey = "cbtf") {
+// Sharding & Dynamic Human Rotation: Deterministically map each table to an account (~4 tables per user)
+// Every 30 minutes, table assignments rotate naturally so no single account stays locked to the same tables forever (mimics real human casino floor browsing!)
+function getAccountForTable(tableId, provKey = "cbtf", attemptOffset = 0) {
   const provider = PROVIDERS[provKey] || PROVIDERS.cbtf;
   const accounts = provider.accounts;
   if (!accounts || accounts.length === 0) return null;
   const tableKeys = Object.keys(GAME_MAP);
   const idx = tableKeys.indexOf(String(tableId));
-  const accountIdx = idx >= 0 ? (idx % accounts.length) : (Math.abs(String(tableId).charCodeAt(0)) % accounts.length);
+  const baseIdx = idx >= 0 ? idx : Math.abs(String(tableId).charCodeAt(0));
+
+  // Dynamic 30-minute rotation epoch
+  const ROTATION_EPOCH_MS = 30 * 60 * 1000;
+  const epoch = Math.floor(Date.now() / ROTATION_EPOCH_MS);
+
+  // Offset rotates by epoch and attemptOffset for instant smart failover
+  const accountIdx = (baseIdx + epoch + attemptOffset) % accounts.length;
   return accounts[accountIdx];
 }
 
@@ -1294,7 +1303,8 @@ async function getWatchUrl(eventId, options = {}) {
             provKey,
             eventId,
             async () => {
-              const targetAcc = getAccountForTable(eventId, provKey);
+              let attemptOffset = 0;
+              let targetAcc = getAccountForTable(eventId, provKey, attemptOffset);
               let token = await getAuthToken(provKey, false, targetAcc);
               let tokenRefreshed = false;
               let tableSession = targetAcc?.session || _currentStickySession;
@@ -1425,7 +1435,7 @@ async function getWatchUrl(eventId, options = {}) {
                     );
                   }
 
-                  // 3. IP Blocked: viewer_ip_blocked - Immediately rotate session for this account and re-login on clean IP!
+                  // 3. IP Blocked: viewer_ip_blocked - Immediately rotate session AND failover to next account in pool!
                   if (
                     data?.meta?.message === "viewer_ip_blocked" ||
                     res?.status === 422 ||
@@ -1433,23 +1443,34 @@ async function getWatchUrl(eventId, options = {}) {
                       JSON.stringify(data || "").includes("blocked"))
                   ) {
                     const oldSession = tableSession;
+                    const oldUser = targetAcc?.user;
                     const nextSession = Math.floor(Math.random() * 450) + 20;
                     if (targetAcc) targetAcc.session = nextSession;
-                    tableSession = nextSession;
-                    console.warn(`[StreamCore] ⚡ IP on session #${oldSession} flagged as viewer_ip_blocked for table ${eventId} (${targetAcc?.user}). Rotated to fresh session #${tableSession}. Retrying...`);
-                    _accountTokenCache.delete(`${provKey}:${targetAcc?.user}`);
-                    await redisClient.del(`auth:${provKey}:${targetAcc?.user}`).catch(() => {});
+                    _accountTokenCache.delete(`${provKey}:${oldUser}`);
+                    await redisClient.del(`auth:${provKey}:${oldUser}`).catch(() => {});
+
+                    // Smart Brain: Instant Account Failover
+                    attemptOffset++;
+                    const nextAcc = getAccountForTable(eventId, provKey, attemptOffset);
+                    if (nextAcc && nextAcc.user !== oldUser) {
+                      console.warn(`[Smart Brain Failover] ⚡ IP/Viewer blocked on ${oldUser} (session #${oldSession}). Instantly switching table ${eventId} to backup account ${nextAcc.user} (Session #${nextAcc.session})!`);
+                      targetAcc = nextAcc;
+                      tableSession = targetAcc?.session || nextSession;
+                    } else {
+                      tableSession = nextSession;
+                    }
+
                     token = await getAuthToken(provKey, true, targetAcc);
                     if (attempt < maxRetries) {
                       await new Promise((r) => setTimeout(r, 200));
                       continue;
                     }
-                    const errMsg = data?.meta?.message || `HTTP ${res?.status || 422} (viewer_ip_blocked across sessions)`;
+                    const errMsg = data?.meta?.message || `HTTP ${res?.status || 422} (viewer_ip_blocked across accounts)`;
                     providerHealth[provKey].lastError = errMsg;
-                    throw new Error(`Provider ${provider.name} blocked viewer IP across sessions: ${errMsg}`);
+                    throw new Error(`Provider ${provider.name} blocked viewer IP: ${errMsg}`);
                   }
 
-                  // 4. HTTP 401: Authentication expired
+                  // 4. HTTP 401: Authentication expired - Refresh or failover
                   if (res.status === 401 || data?.meta?.status_code === 401) {
                     logAudit({
                       provider: provider.name,
@@ -1460,11 +1481,23 @@ async function getWatchUrl(eventId, options = {}) {
                       retries: attempt,
                       circuitState,
                       message:
-                        `Token expired (401) for account ${targetAcc?.user}. Refreshing...`,
+                        `Token expired (401) for account ${targetAcc?.user}. Refreshing / failing over...`,
                     });
                     // Clear cached auth token for this account
                     _accountTokenCache.delete(`${provKey}:${targetAcc?.user}`);
                     await redisClient.del(`auth:${provKey}:${targetAcc?.user}`).catch(() => {});
+
+                    // Instant failover to next account if repeated 401
+                    if (attempt > 0) {
+                      attemptOffset++;
+                      const nextAcc = getAccountForTable(eventId, provKey, attemptOffset);
+                      if (nextAcc && nextAcc.user !== targetAcc?.user) {
+                        console.warn(`[Smart Brain Failover] ⚡ 401 on ${targetAcc?.user}. Switching table ${eventId} to backup account ${nextAcc.user}`);
+                        targetAcc = nextAcc;
+                        tableSession = targetAcc?.session || _currentStickySession;
+                      }
+                    }
+
                     token = await getAuthToken(provKey, true, targetAcc);
                     if (attempt < maxRetries) {
                       await new Promise((r) => setTimeout(r, 200));
@@ -1482,8 +1515,20 @@ async function getWatchUrl(eventId, options = {}) {
                     );
                   }
 
-                  // 5. Non-retryable client errors: 400, 403, 404
+                  // 5. Client errors: 400, 403, 404 - Try failover to next account before giving up!
                   if (res.status >= 400 && res.status < 500) {
+                    if (attempt < maxRetries) {
+                      attemptOffset++;
+                      const nextAcc = getAccountForTable(eventId, provKey, attemptOffset);
+                      if (nextAcc && nextAcc.user !== targetAcc?.user) {
+                        console.warn(`[Smart Brain Failover] ⚡ HTTP ${res.status} on ${targetAcc?.user}. Instant failover table ${eventId} to account ${nextAcc.user}`);
+                        targetAcc = nextAcc;
+                        tableSession = targetAcc?.session || _currentStickySession;
+                        token = await getAuthToken(provKey, false, targetAcc);
+                        await new Promise((r) => setTimeout(r, 200));
+                        continue;
+                      }
+                    }
                     providerManager.trackRequest(
                       provKey,
                       durationMs,
