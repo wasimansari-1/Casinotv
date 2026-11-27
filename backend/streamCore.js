@@ -1879,6 +1879,7 @@ module.exports = {
   providerHealth,
   getSessionForTable,
   rotateTableSession,
+  getAccountForTable,
   getSportsWatchUrl,
   getLiveSportsEvents,
   GAME_MAP,
