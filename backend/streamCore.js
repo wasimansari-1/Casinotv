@@ -483,7 +483,12 @@ const PROVIDERS = {
     name: "CBTFexchange",
     base: "https://cbtfexchange.com",
     casinoBase: "https://casino.cbtfexchange.com",
-    accounts: [{ user: "8292463648", pass: "Asdf1234", siteKey: "2" }],
+    accounts: [
+      { user: "pridev", pass: "Asdf1234", siteKey: "2", session: 82 },
+      { user: "khans12", pass: "Asdf1234", siteKey: "2", session: 83 },
+      { user: "8292463648", pass: "Asdf1234", siteKey: "2", session: 84 },
+      ...(process.env.CBTF_USER4 ? [{ user: process.env.CBTF_USER4, pass: process.env.CBTF_PASS4 || "Asdf1234", siteKey: "2", session: 85 }] : []),
+    ],
   },
   startexch: {
     name: "Startexch99",
@@ -511,6 +516,17 @@ const PROVIDERS = {
     ],
   },
 };
+
+// Sharding: Deterministically map each table to an account so no single account exceeds 4-5 tables
+function getAccountForTable(tableId, provKey = "cbtf") {
+  const provider = PROVIDERS[provKey] || PROVIDERS.cbtf;
+  const accounts = provider.accounts;
+  if (!accounts || accounts.length === 0) return null;
+  const tableKeys = Object.keys(GAME_MAP);
+  const idx = tableKeys.indexOf(String(tableId));
+  const accountIdx = idx >= 0 ? (idx % accounts.length) : (Math.abs(String(tableId).charCodeAt(0)) % accounts.length);
+  return accounts[accountIdx];
+}
 
 // Failover State Machine & Master Observability
 let _activePrimaryProvider = "cbtf";
@@ -614,127 +630,100 @@ async function invalidateAuthToken(providerKey) {
   }
 }
 
-// 80-Year Systems Architecture: Unified Token Sentinel with Dynamic JWT Decoding & Proactive Early Refresh
-async function getAuthToken(providerKey = "nice444", forceRefresh = false) {
-  const provider = PROVIDERS[providerKey] || PROVIDERS.nice444;
-  const state = sessionState[providerKey] || sessionState.nice444;
-  const redisAuthKey = `auth:${providerKey}`;
+const _accountTokenCache = new Map();
+const _accountInFlight = new Map();
 
-  // 1. Check local in-memory cache (proactive boundary: at least 3 minutes before expiration)
-  if (!forceRefresh && state.token && Date.now() < state.expiresAt) {
-    return state.token;
+// 80-Year Systems Architecture: Multi-Account Token Sentinel with Dynamic JWT Decoding & Sharded Session Caching
+async function getAuthToken(providerKey = "cbtf", forceRefresh = false, targetAccount = null) {
+  const provider = PROVIDERS[providerKey] || PROVIDERS.cbtf;
+  const acc = targetAccount || provider.accounts[0];
+  const accUser = acc?.user || "default";
+  const cacheKey = `${providerKey}:${accUser}`;
+  const redisAuthKey = `auth:${providerKey}:${accUser}`;
+  const accountSession = acc?.session || _currentStickySession;
+
+  // 1. Check local in-memory cache
+  const mem = _accountTokenCache.get(cacheKey);
+  if (!forceRefresh && mem && Date.now() < mem.expiresAt) {
+    return mem.token;
   }
 
-  // 2. Check distributed Redis cache (shared across all PM2 cluster workers)
+  // 2. Check distributed Redis cache
   if (!forceRefresh) {
     const cachedToken = await redisClient.get(redisAuthKey);
     if (cachedToken && typeof cachedToken === "string") {
       const expMs = getJwtExpiryMs(cachedToken);
       const remainingMs = expMs - Date.now();
-      // If at least 3 minutes remaining, reuse token and schedule proactive renewal 5m before expiry
       if (remainingMs > 180000) {
-        state.token = cachedToken;
-        state.expiresAt = expMs - 300000; // Early refresh trigger at T - 5 minutes
+        _accountTokenCache.set(cacheKey, { token: cachedToken, expiresAt: expMs - 300000 });
         return cachedToken;
       }
-      console.log(
-        `[Auth Sentinel] Token for ${providerKey} near expiration (${Math.round(remainingMs / 1000)}s left). Proactively refreshing...`,
-      );
     }
   }
 
-  // 3. Mutex / Distributed lock for login (Guarantees only ONE worker executes HTTP login)
-  if (state.inFlight) {
-    return state.inFlight;
+  // 3. Mutex / Distributed lock for login (single-flight per account)
+  if (_accountInFlight.has(cacheKey)) {
+    return _accountInFlight.get(cacheKey);
   }
 
-  state.inFlight = (async () => {
-    // Acquire distributed lock across PM2 cluster
-    const lockAcquired = await redisClient.acquireLock(
-      `auth_lock:${providerKey}`,
-      20,
-    );
-    if (!lockAcquired && !forceRefresh) {
-      await redisClient.waitForLock(`auth_lock:${providerKey}`, 10000, 300);
-      const tokenFromOtherWorker = await redisClient.get(redisAuthKey);
-      if (tokenFromOtherWorker && typeof tokenFromOtherWorker === "string") {
-        const expMs = getJwtExpiryMs(tokenFromOtherWorker);
-        if (expMs - Date.now() > 180000) {
-          state.token = tokenFromOtherWorker;
-          state.expiresAt = expMs - 300000;
-          return tokenFromOtherWorker;
-        }
-      }
-    }
-
+  const task = (async () => {
     try {
-      const accounts = provider.accounts;
-      for (let i = 0; i < accounts.length; i++) {
-        const accIdx = (state.accountIndex + i) % accounts.length;
-        const acc = accounts[accIdx];
-        try {
-          console.log(
-            `[Auth Sentinel] Authenticating with ${provider.name} (${acc.user})...`,
-          );
+      console.log(
+        `[Auth Sentinel] Authenticating with ${provider.name} (${acc.user}) on session #${accountSession}...`,
+      );
 
-          const bodyPayload = { userName: acc.user, password: acc.pass };
-          if (acc.siteKey) bodyPayload.siteKey = acc.siteKey;
+      const bodyPayload = { userName: acc.user, password: acc.pass };
+      if (acc.siteKey) bodyPayload.siteKey = acc.siteKey;
 
-          const res = await proxyFetch(`${provider.base}/app/users/userLogin`, {
-            method: "POST",
-            session: _currentStickySession,
-            headers: {
-              "Content-Type": "application/json",
-              Origin: provider.base,
-              Referer: `${provider.base}/`,
-              "User-Agent": UA,
-              ...MOBILE_HEADERS,
-            },
-            body: JSON.stringify(bodyPayload),
-          });
+      const res = await proxyFetch(`${provider.base}/app/users/userLogin`, {
+        method: "POST",
+        session: accountSession,
+        headers: {
+          "Content-Type": "application/json",
+          Origin: provider.base,
+          Referer: `${provider.base}/`,
+          "User-Agent": UA,
+          ...MOBILE_HEADERS,
+        },
+        body: JSON.stringify(bodyPayload),
+      });
 
-          const data = await res.json();
-          if (data?.data?.accessToken) {
-            const rawToken = data.data.accessToken;
-            const expMs = getJwtExpiryMs(rawToken);
-            // Proactive early refresh: Cache TTL expires in Redis 5 minutes before actual upstream token expiry
-            const ttlSec = Math.max(
-              120,
-              Math.floor((expMs - Date.now() - 300000) / 1000),
-            );
-            state.token = rawToken;
-            state.expiresAt = expMs - 300000;
-            state.accountIndex = accIdx;
+      const data = await res.json().catch(() => null);
+      if (data?.data?.accessToken) {
+        const rawToken = data.data.accessToken;
+        const expMs = getJwtExpiryMs(rawToken);
+        const ttlSec = Math.max(
+          120,
+          Math.floor((expMs - Date.now() - 300000) / 1000),
+        );
+        _accountTokenCache.set(cacheKey, { token: rawToken, expiresAt: expMs - 300000 });
+        await redisClient.set(redisAuthKey, rawToken, ttlSec);
 
-            const remainingMin = Math.round((expMs - Date.now()) / 60000);
-            console.log(
-              `[Auth Sentinel] 🎯 Dynamic JWT token obtained for ${provider.name} (${acc.user}) - Expiry: in ${remainingMin}m (Redis TTL: ${ttlSec}s)`,
-            );
+        const remainingMin = Math.round((expMs - Date.now()) / 60000);
+        console.log(
+          `[Auth Sentinel] 🎯 Dynamic JWT token obtained for ${provider.name} (${acc.user}) on session #${accountSession} - Expiry: in ${remainingMin}m`,
+        );
 
-            // Share auth token across all PM2 workers in Redis
-            await redisClient.set(redisAuthKey, state.token, ttlSec);
-
-            return state.token;
-          }
-          console.warn(
-            `[Auth Sentinel] Login rejected for ${provider.name} (${acc.user}):`,
-            data?.meta?.message || data,
-          );
-        } catch (err) {
-          console.warn(
-            `[Auth Sentinel] Connection error for ${provider.name} (${acc.user}):`,
-            err.message,
-          );
-        }
+        return rawToken;
       }
-      throw new Error(`All accounts failed for provider ${provider.name}`);
+      console.warn(
+        `[Auth Sentinel] Login rejected for ${provider.name} (${acc.user}):`,
+        data?.meta?.message || data,
+      );
+      return null;
+    } catch (err) {
+      console.warn(
+        `[Auth Sentinel] Connection error for ${provider.name} (${acc.user}):`,
+        err.message,
+      );
+      return null;
     } finally {
-      state.inFlight = null;
-      await redisClient.releaseLock(`auth_lock:${providerKey}`).catch(() => {});
+      _accountInFlight.delete(cacheKey);
     }
   })();
 
-  return state.inFlight;
+  _accountInFlight.set(cacheKey, task);
+  return task;
 }
 
 // Map of eventId to Game metadata (All 17 Active Live Dealer Tables)
@@ -1305,9 +1294,10 @@ async function getWatchUrl(eventId, options = {}) {
             provKey,
             eventId,
             async () => {
-              let token = await getAuthToken(provKey);
+              const targetAcc = getAccountForTable(eventId, provKey);
+              let token = await getAuthToken(provKey, false, targetAcc);
               let tokenRefreshed = false;
-              let tableSession = getSessionForTable(eventId);
+              let tableSession = targetAcc?.session || _currentStickySession;
 
               for (let attempt = 0; attempt <= maxRetries; attempt++) {
                 const startTime = Date.now();
@@ -1377,6 +1367,7 @@ async function getWatchUrl(eventId, options = {}) {
                       provKey: provKey,
                       origin: provider.base,
                       session: tableSession,
+                      account: targetAcc?.user,
                       expiresAt: Date.now() + ttlSec * 1000,
                     };
 
@@ -1392,7 +1383,7 @@ async function getWatchUrl(eventId, options = {}) {
                       durationMs,
                       retries: attempt,
                       circuitState,
-                      message: `WatchLink acquired successfully (TTL: ${Math.round(ttlSec / 60)} min): ${data.data.url.slice(0, 45)}...`,
+                      message: `WatchLink acquired successfully (TTL: ${Math.round(ttlSec / 60)} min, account: ${targetAcc?.user}): ${data.data.url.slice(0, 45)}...`,
                     });
                     return watchData;
                   }
@@ -1434,7 +1425,7 @@ async function getWatchUrl(eventId, options = {}) {
                     );
                   }
 
-                  // 3. IP Blocked: viewer_ip_blocked - Immediately rotate session and re-login on clean IP!
+                  // 3. IP Blocked: viewer_ip_blocked - Immediately rotate session for this account and re-login on clean IP!
                   if (
                     data?.meta?.message === "viewer_ip_blocked" ||
                     res?.status === 422 ||
@@ -1442,12 +1433,13 @@ async function getWatchUrl(eventId, options = {}) {
                       JSON.stringify(data || "").includes("blocked"))
                   ) {
                     const oldSession = tableSession;
-                    tableSession = rotateTableSession(eventId, `viewer_ip_blocked on session #${oldSession}`);
-                    console.warn(`[StreamCore] ⚡ IP on session #${oldSession} flagged as viewer_ip_blocked for table ${eventId}. Rotated to fresh session #${tableSession}. Retrying...`);
-                    // Clear cached token so next attempt logs in fresh on the new session
-                    sessionState[provKey].token = null;
-                    await redisClient.del(`auth:${provKey}`).catch(() => {});
-                    token = await getAuthToken(provKey, true);
+                    const nextSession = Math.floor(Math.random() * 450) + 20;
+                    if (targetAcc) targetAcc.session = nextSession;
+                    tableSession = nextSession;
+                    console.warn(`[StreamCore] ⚡ IP on session #${oldSession} flagged as viewer_ip_blocked for table ${eventId} (${targetAcc?.user}). Rotated to fresh session #${tableSession}. Retrying...`);
+                    _accountTokenCache.delete(`${provKey}:${targetAcc?.user}`);
+                    await redisClient.del(`auth:${provKey}:${targetAcc?.user}`).catch(() => {});
+                    token = await getAuthToken(provKey, true, targetAcc);
                     if (attempt < maxRetries) {
                       await new Promise((r) => setTimeout(r, 200));
                       continue;
@@ -1468,16 +1460,15 @@ async function getWatchUrl(eventId, options = {}) {
                       retries: attempt,
                       circuitState,
                       message:
-                        "Token expired (401). Invalidating cache and refreshing unified token...",
+                        `Token expired (401) for account ${targetAcc?.user}. Refreshing...`,
                     });
-                    // Clear cached auth token in Redis and memory
-                    await redisClient.del(`auth:${provKey}`);
-                    sessionState[provKey].token = null;
-
-                    if (!tokenRefreshed) {
-                      tokenRefreshed = true;
-                      token = await getAuthToken(provKey, true);
-                      continue; // Retry once with fresh token
+                    // Clear cached auth token for this account
+                    _accountTokenCache.delete(`${provKey}:${targetAcc?.user}`);
+                    await redisClient.del(`auth:${provKey}:${targetAcc?.user}`).catch(() => {});
+                    token = await getAuthToken(provKey, true, targetAcc);
+                    if (attempt < maxRetries) {
+                      await new Promise((r) => setTimeout(r, 200));
+                      continue;
                     }
                     providerManager.trackRequest(
                       provKey,

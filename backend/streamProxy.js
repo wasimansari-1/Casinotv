@@ -798,20 +798,18 @@ router.get("/player/:eventId", async (req, res) => {
       !cached.html.includes("Access blocked") &&
       cached.html.includes("cfg")
     ) {
+      // Fast path: Synchronize active table token if present in Redis
       let tokenObj = tableTokenCache.get(eventId);
-      if (!isTokenValid(tokenObj)) {
+      if (!tokenObj || !tokenObj.token) {
         const redisToken = await redisClient
           .get(`table_token:${eventId}`)
           .catch(() => null);
-        if (isTokenValid(redisToken)) {
+        if (redisToken && redisToken.token) {
           tokenObj = redisToken;
           tableTokenCache.set(eventId, tokenObj);
         }
       }
-      if (!isTokenValid(tokenObj)) {
-        await warmCasinoTable(eventId, true).catch(() => {});
-      }
-      const finalHtml = injectLiveTokenIntoHtml(cached.html, eventId);
+      const finalHtml = tokenObj?.token ? injectLiveTokenIntoHtml(cached.html, eventId) : cached.html;
 
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
@@ -837,24 +835,20 @@ router.get("/player/:eventId", async (req, res) => {
         expiresAt: Date.now() + CASINO_CACHE_TTL,
       });
 
-      // Synchronize in-memory table token if present in Redis
+      // Fast path: Synchronize active table token if present in Redis
       let tokenObj = tableTokenCache.get(eventId);
-      if (!isTokenValid(tokenObj)) {
+      if (!tokenObj || !tokenObj.token) {
         const redisToken = await redisClient
           .get(`table_token:${eventId}`)
           .catch(() => null);
-        if (isTokenValid(redisToken)) {
+        if (redisToken && redisToken.token) {
           tokenObj = redisToken;
           tableTokenCache.set(eventId, tokenObj);
         }
       }
 
-      // If token is missing or expired, auto-renew on the fly before sending HTML!
-      if (!isTokenValid(tokenObj)) {
-        await warmCasinoTable(eventId, true).catch(() => {});
-      }
-
-      const finalHtml = injectLiveTokenIntoHtml(redisHtml, eventId);
+      // Pure Redis-First Serving: Never block or hammer upstream if HTML is already cached!
+      const finalHtml = tokenObj?.token ? injectLiveTokenIntoHtml(redisHtml, eventId) : redisHtml;
 
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
