@@ -58,108 +58,77 @@ const inFlightSportsPlayers = new Map(); // deduplicate concurrent requests for 
 
 const SPORTS_HTML_TTL = 30000; // 30 seconds fresh HTML cache in RAM & Redis for live sports feeds
 
-// --- Raw Upstream Live TV Engine (Aura / Trubets RTS WebRTC Relay) ---
-const AURA_XOR_KEY = "damru-taala-2026";
-
-function decryptAuraPayload(t) {
-  if (!t || t.e !== 1 || typeof t.d !== "string") return t;
+// Resolve accurate JWT expiry for LTVE play tokens (usually 60-120s)
+function resolveSportsTokenExpiry(token, fallbackMs = 50000) {
   try {
-    const s = Uint8Array.from(Buffer.from(t.d, "base64"));
-    const a = Buffer.from(AURA_XOR_KEY, "utf8");
-    for (let n = 0; n < s.length; n += 1) s[n] ^= a[n % a.length];
-    return JSON.parse(Buffer.from(s).toString("utf8"));
-  } catch (err) {
-    console.warn("[SportsEngine] Failed to decrypt Aura payload:", err.message);
-    return t;
-  }
-}
-
-function getAuraFormattedId(eventId) {
-  let s = String(eventId || "").trim();
-  const digits = s.replace(/\D/g, "");
-  if (!digits) return s;
-  if (digits.length >= 13 && digits.startsWith("8")) return digits;
-  // Pad to 12 digits and prefix with 8 (Standard Aura 13-digit format: 8 + 12-digit padded Betfair ID)
-  return "8" + digits.padStart(12, "0");
-}
-
-async function getAuraTvStream(eventId) {
-  const fid = getAuraFormattedId(eventId);
-  const cacheKey = `aura_tv_${fid}`;
-  const cached = sportsWatchLinkCache.get(cacheKey);
-  if (cached && Date.now() < cached.expiresAt && cached.url) {
-    return cached.url;
-  }
-
-  try {
-    const res = await directFetch(`https://api.baji8dot.live/api/public/aura-tv/${fid}`, {
-      method: "POST",
-      headers: {
-        Origin: "https://api.baji8dot.live",
-        Referer: "https://api.baji8dot.live/",
-        "User-Agent": UA,
-        Accept: "application/json, text/plain, */*",
-      },
-      timeout: 4500,
-    });
-
-    if (!res || !res.ok) return null;
-    const encrypted = await res.json().catch(() => null);
-    if (!encrypted) return null;
-    const decrypted = decryptAuraPayload(encrypted);
-    if (decrypted && decrypted.success && decrypted.url) {
-      sportsWatchLinkCache.set(cacheKey, {
-        url: decrypted.url,
-        expiresAt: Date.now() + 180000, // 3 minutes cache
-      });
-      return decrypted.url;
+    if (token && typeof token === "string" && token.includes(".")) {
+      const parts = token.split(".");
+      if (parts.length === 3) {
+        const payload = JSON.parse(
+          Buffer.from(parts[1], "base64").toString("utf8"),
+        );
+        if (payload && payload.exp && typeof payload.exp === "number") {
+          return payload.exp * 1000;
+        }
+      }
     }
-  } catch (err) {
-    console.warn(`[SportsEngine] Aura TV stream lookup failed for ${fid}:`, err.message);
-  }
-  return null;
+  } catch (_) {}
+  return Date.now() + fallbackMs;
 }
 
-function transformAuraPlayerHtml(html, streamUrl, eventId) {
-  let transformed = html;
+function isSportsTokenValid(tokenObj) {
+  if (!tokenObj || !tokenObj.token) return false;
+  const expiresAt = Number(tokenObj.expiresAt) || 0;
+  return Date.now() < expiresAt - 5000; // 5s safety margin before JWT exp
+}
 
-  const auraSportsStyle = `
-    <style>
-      html, body {
-        margin: 0 !important;
-        padding: 0 !important;
-        width: 100% !important;
-        height: 100% !important;
-        overflow: hidden !important;
-        background: #000 !important;
-      }
-      #player, .prism-player, video {
-        width: 100% !important;
-        height: 100% !important;
-        object-fit: contain !important;
-        background: #000 !important;
-      }
-      .watermark, #watermark, #wm {
-        display: none !important;
-      }
-    </style>
-  `;
-
-  if (transformed.includes("</head>")) {
-    transformed = transformed.replace("</head>", `${auraSportsStyle}\n</head>`);
+function getSportsProxiedWsUrl(rawWsUrl, baseUrl = "https://tv.ltve.live/") {
+  if (!rawWsUrl) return "";
+  let clean = String(rawWsUrl).trim();
+  if (clean.startsWith("/api/stream/ws")) {
+    // Migrate legacy ?target= to ?upstream= so AntMedia SDK never overwrites it with ?target=edge
+    if (clean.includes("?target=")) {
+      return clean.replace("?target=", "?upstream=");
+    }
+    return clean;
   }
+  if (clean.startsWith("//")) clean = `wss:${clean}`;
+  else if (clean.startsWith("/")) {
+    const host = new URL(baseUrl).host;
+    clean = `wss://${host}${clean}`;
+  } else if (!clean.startsWith("ws://") && !clean.startsWith("wss://")) {
+    clean = `wss://${clean}`;
+  }
+  return `/api/stream/ws?upstream=${encodeURIComponent(clean)}`;
+}
 
-  // 1. Rewrite WebRTC / RTS source directly to play.trubets365.com
-  transformed = transformed.replace(/artc:\/\/\$\{location\.host\}\/relay-tv\//g, "artc://play.trubets365.com/relay-tv/");
+function buildSportsHlsProxyUrl(rawHlsUrl, eventId, token) {
+  if (!rawHlsUrl) return "";
+  if (rawHlsUrl.startsWith("/api/stream/sports/hls/")) return rawHlsUrl;
+  return `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(rawHlsUrl)}&eventId=${encodeURIComponent(eventId || "")}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
+}
 
-  // 2. Rewrite all relative /relay-tv/ paths to full absolute https://play.trubets365.com/relay-tv/
-  transformed = transformed.replace(/(["'`])\/relay-tv\//g, "$1https://play.trubets365.com/relay-tv/");
-
-  // 3. Disable competitor debugger & devtools traps
-  transformed = transformed.replace(/const guardEnabled = true;/g, "const guardEnabled = false;");
-  transformed = transformed.replace(/debugger;/g, "/* disabled */");
-
-  return transformed;
+function injectSportsTokenIntoHtml(html, tokenObj, eventId) {
+  if (!html || !tokenObj || !tokenObj.token) return html;
+  try {
+    const m = html.match(
+      /<script type="application\/json" id="cfg">([^<]+)<\/script>/,
+    );
+    if (!m) return html;
+    const cfg = JSON.parse(m[1]);
+    cfg.token = tokenObj.token;
+    if (tokenObj.streamId) cfg.streamId = tokenObj.streamId;
+    if (tokenObj.wsUrl) cfg.wsUrl = getSportsProxiedWsUrl(tokenObj.wsUrl);
+    if (tokenObj.hlsUrl) {
+      cfg.hlsUrl = buildSportsHlsProxyUrl(tokenObj.hlsUrl, eventId, tokenObj.token);
+    }
+    return html.replace(
+      /<script type="application\/json" id="cfg">[^<]+<\/script>/,
+      `<script type="application/json" id="cfg">${JSON.stringify(cfg)}</script>`,
+    );
+  } catch (_) {
+    return html;
+  }
 }
 
 // 1. Pre-patch and cache the raw LTVE sports player JavaScript in RAM memory
@@ -177,16 +146,22 @@ function getPatchedSportsPlayerJs() {
   }
 
   // High-performance stream optimizations
-  // 1. HLS Buffer & Gap Bridging: 40s lookahead, 0.5s hole auto-skip, 0.1s instant nudge, multi-threaded worker
+  // 1. HLS Buffer & Gap Bridging: low-latency lookahead, 0.5s hole auto-skip, 0.1s instant nudge, multi-threaded worker
   js = js.replace(
     /liveSyncDurationCount:4,liveMaxLatencyDurationCount:10,maxBufferLength:20,backBufferLength:10/g,
-    "liveSyncDurationCount:4,liveMaxLatencyDurationCount:12,maxBufferLength:40,maxMaxBufferLength:80,backBufferLength:20,maxBufferHole:0.5,nudgeOffset:0.1,nudgeMaxRetry:5,highBufferWatchdogPeriod:1,enableWorker:!0,lowLatencyMode:!1",
+    "liveSyncDurationCount:3,liveMaxLatencyDurationCount:10,maxBufferLength:25,maxMaxBufferLength:60,backBufferLength:10,maxBufferHole:0.5,nudgeOffset:0.1,nudgeMaxRetry:5,highBufferWatchdogPeriod:1,enableWorker:!0,lowLatencyMode:!1",
   );
 
-  // 2. Debounced Buffering Indicator & Instant 0.1s Auto-Unsticker (Eliminates flashing Buffering... text)
+  // 2. Keep Connecting status hidden only once video actually plays (never hide on empty manifest!)
+  js = js.replace(
+    /xp\.on\(mp\.Events\.MANIFEST_PARSED,\(\)=>\{Tp\(``\),\$\.play\(\)\.catch\(\(\)=>\{\}\)\}\)/g,
+    "xp.on(mp.Events.MANIFEST_PARSED,()=>{$.play().catch(()=>{})}),xp.on(mp.Events.FRAG_BUFFERED,()=>{if($.readyState>=2)Tp(``)})",
+  );
+
+  // 2b. Debounced Buffering Indicator & Instant 0.1s Auto-Unsticker (Eliminates flashing Buffering... text)
   js = js.replace(
     /\$\.addEventListener\(`waiting`,\(\)=>\{vp===`hls`&&Tp\(`Buffering…`\)\}\)/g,
-    "(()=>{var _b, _l=-1, _s=0; $.addEventListener(`waiting`,()=>{clearTimeout(_b);_b=setTimeout(()=>{if(vp===`hls`&&($.paused||$.readyState<3)){Tp(`Buffering…`)}},1200)}); $.addEventListener(`playing`,()=>{clearTimeout(_b);Tp(``)}); $.addEventListener(`timeupdate`,()=>{if($.currentTime>0&&!$.paused){clearTimeout(_b);if(gp&&gp.textContent===`Buffering…`)Tp(``)}}); setInterval(()=>{if(vp===`hls`&&!$.paused&&!$.ended&&$.readyState>=2){if($.currentTime===_l){_s++;if(_s>=2){try{$.currentTime+=0.08}catch(_){}_s=0}}else{_s=0;_l=$.currentTime}}},500)})()",
+    "(()=>{var _b, _l=-1, _s=0; $.addEventListener(`waiting`,()=>{clearTimeout(_b);_b=setTimeout(()=>{if(vp===`hls`&&($.paused||$.readyState<3)){Tp(`Buffering…`)}},1800)}); $.addEventListener(`playing`,()=>{clearTimeout(_b);Tp(``)}); $.addEventListener(`timeupdate`,()=>{if($.currentTime>0&&!$.paused){clearTimeout(_b);if(gp)Tp(``)}}); setInterval(()=>{if(vp===`hls`&&!$.paused&&!$.ended&&$.readyState>=2){if($.currentTime===_l){_s++;if(_s>=2){try{$.currentTime+=0.08}catch(_){}_s=0}}else{_s=0;_l=$.currentTime}}},500)})()",
   );
 
   // 3. WebRTC Multi-Cloud STUN Redundancy: Google STUN 1 + 2 + Cloudflare STUN for instant 0ms ICE
@@ -201,33 +176,51 @@ function getPatchedSportsPlayerJs() {
     "[`failed`,`closed`].includes(i?.state)",
   );
 
-  // 5. Freeze detector: increase freeze threshold to 120s (stops false reload loops)
+  // 5. CRITICAL FIX: Prevent AntMedia SDK from overwriting ?target=... / ?upstream=... with ?target=edge
+  js = js.replace(
+    /\[`origin`,`edge`\]\.includes\(t\.searchParams\.get\(`target`\)\)\|\|\(t\.searchParams\.set\(`target`,this\.webrtcadaptor\.isPlayMode\?`edge`:`origin`\),this\.websocketURL=t\.toString\(\)\)/g,
+    "void 0",
+  );
+
+  // 6. Auto-renew play token via Op(!1,!0) if _p is empty instead of failing with 'no play token'
+  js = js.replace(
+    /async function kp\(e=\(\)=>!0\)\{if\(!Q\.oneTimeToken\)return _p;/g,
+    "async function kp(e=()=>!0){if(!Q.oneTimeToken&&_p)return _p;",
+  );
+
+  // 7. Freeze detector: increase freeze threshold to 120s (stops false reload loops)
   js = js.replace(/Q\.freezeSeconds/g, "120");
   js = js.replace(/Vp>=Q\.freezeSeconds/g, "Vp>=120");
 
-  // 6. Devtools detector: neutralize debugger loops and docking traps
+  // 8. Devtools detector: neutralize debugger loops and docking traps
   js = js.replace(/Q\.devtoolsGuard/g, "false");
   js = js.replace(/devtoolsGuard:!0/g, "devtoolsGuard:!1");
 
-  // 7. Suppress window redirect traps cleanly with void 0 (keeps valid JS syntax - no SyntaxError!)
+  // 9. Suppress window redirect traps cleanly with void 0 (keeps valid JS syntax - no SyntaxError!)
   js = js.replace(
     /location\.replace\(window\.top===window\?Q\.devtoolsRedirect:Q\.blockedUrl\)/g,
     "void 0",
   );
 
-  // 8. Prevent false session kill on transient ping 403 or error
+  // 10. Prevent false session kill on transient ping 403 or error
   js = js.replace(
     /if\(n\.status===403\)return Ap\(`This session has ended\.`\);/g,
     "if(n.status===403){console.warn('Ping 403 ignored');return true;}",
   );
 
-  // 9. Fix TypeError: Invalid URL in HLS player when Q.hlsUrl is a relative path
+  // 11. Fix TypeError: Invalid URL in HLS player when Q.hlsUrl is a relative path
   js = js.replace(/new URL\(e,Q\.hlsUrl\)/g, "new URL(e,window.location.href)");
 
-  // 10. Fix WebSocket relative URL resolution for proxied WebRTC tunnels
+  // 12. Fix WebSocket relative URL resolution for proxied WebRTC tunnels
   js = js.replace(
     /websocket_url:Q\.wsUrl/g,
     'websocket_url:(Q.wsUrl && Q.wsUrl.startsWith("/") ? (location.protocol === "https:" ? "wss://" : "ws://") + location.host + Q.wsUrl : Q.wsUrl)',
+  );
+
+  // 13. Fast 500ms WebRTC retry instead of long multi-second backoff
+  js = js.replace(
+    /Math\.min\(1e3\*Mp,4e3\)/g,
+    "500",
   );
 
   _cachedSportsPlayerJs = js;
@@ -476,7 +469,7 @@ async function getSportsWatchUrl(
 
 // 4. Transform Sports Player HTML for Zero-Latency Local Playback
 function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, prewarmedData = null) {
-  // YouTube-style buffer spinner & video styling
+  // Clean 3-4s Loader Spinner + Video Styling + Watermark Purge
   const sportsStyle = `
     <style>
       html, body {
@@ -494,6 +487,32 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, p
         object-fit: contain !important;
         background: #000 !important;
       }
+      #status {
+        display: flex !important;
+        flex-direction: column !important;
+        align-items: center !important;
+        justify-content: center !important;
+        gap: 10px !important;
+        background: rgba(0,0,0,0.85) !important;
+        color: #cbd5e1 !important;
+        font-size: 13px !important;
+        font-weight: 500 !important;
+      }
+      #status[hidden] {
+        display: none !important;
+      }
+      #status::before {
+        content: "" !important;
+        width: 28px !important;
+        height: 28px !important;
+        border: 3px solid rgba(16, 185, 129, 0.25) !important;
+        border-top-color: #10b981 !important;
+        border-radius: 50% !important;
+        animation: cstv-spin 0.8s linear infinite !important;
+      }
+      @keyframes cstv-spin {
+        to { transform: rotate(360deg); }
+      }
       #wm, [id="wm"], .watermark, #watermark, #blockImg, [id="blockImg"] {
         display: none !important;
         opacity: 0 !important;
@@ -505,14 +524,12 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, p
     </style>
   `;
 
-  // 80-Year Systems Architecture: Client-Side Canary Watchdog for Sports Live Feeds
-  // If video buffer stalls, encounters an error, or token expires, signals backend /api/stream/sports/evict
-  // to silently rotate tokens across providers without page reload.
+  // Smart Canary Watchdog: Only monitors AFTER stream has actually started playing (never interrupts initial 3-4s load)
   const sportsCanaryScript = `
     <script id="sportsCanary">
       (function() {
-        var _eventId = "${eventId}";
-        var _stalledTimer = null;
+        var _eventId = ${JSON.stringify(String(eventId || ""))};
+        var _everPlayed = false;
         var _lastTime = -1;
         var _freezeCounter = 0;
         var _isEvicting = false;
@@ -527,26 +544,33 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, p
             body: JSON.stringify({ eventId: _eventId, reason: reason })
           }).then(function(r) { return r.json(); }).then(function(d) {
             if (d && d.ok) {
-              console.log('[Sports Canary] Failover primed. Resuming match stream in 300ms...');
-              setTimeout(function() { window.location.reload(); }, 300);
+              setTimeout(function() { window.location.reload(); }, 400);
             } else { _isEvicting = false; }
           }).catch(function() { _isEvicting = false; });
         }
 
         function checkSportsHeartbeat() {
           var v = document.querySelector('video');
-          if (!v) return;
-          if (!v.paused && !v.ended) {
-            if (v.currentTime === _lastTime && v.readyState >= 2) {
-              _freezeCounter++;
-              if (_freezeCounter >= 4) {
-                _freezeCounter = 0;
-                notifySportsEvict('sports_video_frozen');
-              }
-            } else {
-              _freezeCounter = 0;
-              _lastTime = v.currentTime;
+          if (!v || document.hidden) return;
+          if (v.readyState >= 2 && (v.currentTime > 0 || v.srcObject)) {
+            if (!_everPlayed) {
+              _everPlayed = true;
+              var st = document.getElementById('status');
+              if (st) st.hidden = true;
             }
+          }
+          if (!_everPlayed || v.paused || v.ended) return;
+
+          var frameMetric = (v.getVideoPlaybackQuality && v.getVideoPlaybackQuality().totalVideoFrames) || v.currentTime;
+          if (frameMetric === _lastTime) {
+            _freezeCounter++;
+            if (_freezeCounter >= 25) {
+              _freezeCounter = 0;
+              notifySportsEvict('sports_video_frozen_25s');
+            }
+          } else {
+            _freezeCounter = 0;
+            _lastTime = frameMetric;
           }
         }
 
@@ -554,14 +578,11 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, p
           setInterval(checkSportsHeartbeat, 1000);
           var v = document.querySelector('video');
           if (v) {
-            v.addEventListener('error', function() { notifySportsEvict('sports_video_error'); });
-            v.addEventListener('stalled', function() {
-              clearTimeout(_stalledTimer);
-              _stalledTimer = setTimeout(function() { notifySportsEvict('sports_video_stalled'); }, 4000);
-            });
             v.addEventListener('playing', function() {
-              clearTimeout(_stalledTimer);
+              _everPlayed = true;
               _freezeCounter = 0;
+              var st = document.getElementById('status');
+              if (st) st.hidden = true;
             });
           }
         });
@@ -589,7 +610,7 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, p
 
       const modifiedCfg = {
         ...originalCfg,
-        streamId: originalCfg.streamId || eventId || "SPORTS",
+        streamId: (prewarmedData && prewarmedData.streamId) || originalCfg.streamId || eventId || "SPORTS",
         pingUrl: proxiedPingUrl,
         flagUrl: "/api/stream/sports/dummy-flag",
         byeUrl: "/api/stream/sports/dummy-bye",
@@ -598,9 +619,12 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, p
         blockedUrl: "",
         home: "",
         freezeSeconds: 120, // 2 minutes freeze tolerance (prevents buffering reload loops)
-        oneTimeToken: false, // Keep token alive (prevents loader freeze)
-        offlineRetry: 5,
-        webrtcTimeout: 30, // Full WebRTC handshake window (Casino TV zero-latency parity)
+        oneTimeToken: false, // Keep token alive (prevents loader freeze & allows HLS fallback)
+        offlineRetry: 3,
+        forceHls: false, // Native zero-latency WebRTC primary (just like Casino TV!)
+        startMode: "webrtc",
+        webrtcRetries: 3,
+        webrtcTimeout: 10, // Clean 10s WebRTC handshake before HLS fallback
         frameAllow: {
           enforce: false,
           outer: { apps: false, hosts: [], sites: [] },
@@ -611,14 +635,14 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, p
       if (prewarmedData) {
         if (prewarmedData.token) modifiedCfg.token = prewarmedData.token;
         if (prewarmedData.wsUrl) {
-          let cleanWs = String(prewarmedData.wsUrl).trim();
-          if (cleanWs.startsWith("//")) cleanWs = `wss:${cleanWs}`;
-          else if (cleanWs.startsWith("/")) cleanWs = `wss://${new URL(watchUrl).host}${cleanWs}`;
-          else if (!cleanWs.startsWith("ws://") && !cleanWs.startsWith("wss://")) cleanWs = `wss://${cleanWs}`;
-          modifiedCfg.wsUrl = cleanWs; // Direct zero-latency WebRTC connection
+          modifiedCfg.wsUrl = getSportsProxiedWsUrl(prewarmedData.wsUrl, watchUrl);
         }
         if (prewarmedData.hlsUrl) {
-          modifiedCfg.hlsUrl = prewarmedData.hlsUrl;
+          modifiedCfg.hlsUrl = buildSportsHlsProxyUrl(
+            prewarmedData.hlsUrl,
+            eventId,
+            prewarmedData.token,
+          );
         }
         if (prewarmedData.streamId) {
           modifiedCfg.streamId = prewarmedData.streamId;
@@ -681,30 +705,6 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, p
             configurable: true
           });
         } catch(e) {}
-      })();
-    </script>
-    <script>
-      (function() {
-        var v = document.getElementById('video') || document.querySelector('video');
-        if (!v) return;
-        var lastTime = -1;
-        var stallCount = 0;
-        setInterval(function() {
-          if (document.hidden || v.paused || v.ended) return;
-          if (v.currentTime > 0 && Math.abs(v.currentTime - lastTime) < 0.05) {
-            stallCount++;
-            if (stallCount >= 6) {
-              console.warn('[Sports Watchdog] Stream frozen for 12s, triggering auto-evict and reload...');
-              try {
-                fetch('/api/stream/sports/evict?eventId=${encodeURIComponent(eventId)}', { method: 'POST' }).catch(function(){});
-              } catch(_) {}
-              setTimeout(function() { window.location.reload(); }, 600);
-            }
-          } else {
-            stallCount = 0;
-            lastTime = v.currentTime;
-          }
-        }, 2000);
       })();
     </script>
   `;
@@ -928,70 +928,10 @@ router.get("/events", async (req, res) => {
       7: "Horse Racing",
     };
 
-    const result = [];
-    const seenEventNames = new Set();
-    const seenEventIds = new Set();
-
-    // 1. Ultra-fast direct fetch from Aura Sports Engine (250ms latency, zero proxy bandwidth)
-    try {
-      const auraRes = await directFetch(
-        "https://api.baji8dot.live/api/public/sports?x=1",
-        {
-          headers: {
-            Origin: "https://api.baji8dot.live",
-            Referer: "https://api.baji8dot.live/",
-            "User-Agent": UA,
-          },
-          timeout: 3500,
-        },
-      ).catch(() => null);
-
-      if (auraRes && auraRes.ok) {
-        const auraEnc = await auraRes.json().catch(() => null);
-        const auraDec = decryptAuraPayload(auraEnc);
-        if (auraDec && Array.isArray(auraDec.data)) {
-          for (const sp of auraDec.data) {
-            const sId = String(sp.eventTypeId || "4");
-            const sName = sp.eventTypeName || sportNames[sId] || "Other Sport";
-            if (Array.isArray(sp.events)) {
-              for (const ev of sp.events) {
-                const eid = String(ev.eventId || "");
-                const name = (ev.eventName || "").trim();
-                if (!eid || !name) continue;
-
-                seenEventIds.add(eid);
-                seenEventNames.add(name.toLowerCase());
-
-                const digits = eid.replace(/\D/g, "");
-                if (digits) {
-                  const bId = digits.startsWith("8") && digits.length >= 13 ? digits.slice(5) : digits;
-                  betfairIdCache.set(eid, bId);
-                }
-
-                result.push({
-                  id: eid,
-                  name: name,
-                  sportId: sId,
-                  sportName: sName,
-                  tournament: ev.competitionName || "",
-                  inPlay: Boolean(ev.inplay),
-                  isStreaming: true,
-                  eventTime: ev.openDate || "",
-                  tv: true,
-                });
-              }
-            }
-          }
-        }
-      }
-    } catch (e) {
-      console.warn("[SportsEngine] Notice fetching Aura sports list:", e.message);
-    }
-
-    // 2. Secondary fetch: Merge additional matches from CBTF / Startexch
     for (const provKey of providerList) {
       try {
         const provider = PROVIDERS[provKey];
+        // 1. Ultra-fast direct fetch without proxy (Zero proxy bandwidth, <800ms load time)
         let upstreamRes = await directFetch(
           `${provider.base}/api/exchange/market/matchodds/allEventsList`,
           {
@@ -1004,10 +944,11 @@ router.get("/events", async (req, res) => {
               ...MOBILE_HEADERS,
             },
             body: JSON.stringify({}),
-            timeout: 3000,
+            timeout: 3500,
           },
         ).catch(() => null);
 
+        // Fallback to proxyFetch only if direct fails
         if (!upstreamRes || !upstreamRes.ok) {
           const token = await getAuthToken(provKey);
           upstreamRes = await proxyFetch(
@@ -1023,12 +964,14 @@ router.get("/events", async (req, res) => {
                 ...MOBILE_HEADERS,
               },
               body: JSON.stringify({}),
-              timeout: 4000,
+              timeout: 6000,
             },
           );
         }
 
         const d = await upstreamRes.json();
+        const result = [];
+
         if (d?.data) {
           for (const [sId, list] of Object.entries(d.data)) {
             if (Array.isArray(list)) {
@@ -1036,13 +979,6 @@ router.get("/events", async (req, res) => {
                 const eid = String(ev.exEventId || ev._id || "");
                 const name = (ev.eventName || "").trim();
                 if (!eid || !name) continue;
-
-                // Deduplicate with matches already present from Aura
-                if (seenEventIds.has(eid) || seenEventNames.has(name.toLowerCase())) {
-                  continue;
-                }
-                seenEventIds.add(eid);
-                seenEventNames.add(name.toLowerCase());
 
                 const isInPlay = Boolean(
                   ev?.oddsData?.inPlay ?? ev?.inPlay ?? false,
@@ -1064,31 +1000,29 @@ router.get("/events", async (req, res) => {
           }
         }
 
-        if (result.length > 0) break;
+        if (result.length > 0) {
+          // Prioritize in-play and streaming matches at the top
+          result.sort((a, b) => {
+            if (a.inPlay && !b.inPlay) return -1;
+            if (!a.inPlay && b.inPlay) return 1;
+            if (a.isStreaming && !b.isStreaming) return -1;
+            if (!a.isStreaming && b.isStreaming) return 1;
+            return 0;
+          });
+
+          sportsEventsCache.data = result;
+          sportsEventsCache.expiresAt = Date.now() + 60000; // 60s cache
+          await redisClient
+            .set("sports:events_list", result, 60)
+            .catch(() => {});
+          return result;
+        }
       } catch (err) {
         console.warn(
           `[SportsEngine] Failed to fetch events from ${provKey}:`,
           err.message,
         );
       }
-    }
-
-    if (result.length > 0) {
-      // Prioritize in-play and streaming matches at the top
-      result.sort((a, b) => {
-        if (a.inPlay && !b.inPlay) return -1;
-        if (!a.inPlay && b.inPlay) return 1;
-        if (a.isStreaming && !b.isStreaming) return -1;
-        if (!a.isStreaming && b.isStreaming) return 1;
-        return 0;
-      });
-
-      sportsEventsCache.data = result;
-      sportsEventsCache.expiresAt = Date.now() + 60000; // 60s cache
-      await redisClient
-        .set("sports:events_list", result, 60)
-        .catch(() => {});
-      return result;
     }
     return sportsEventsCache.data || [];
   })();
@@ -1161,28 +1095,32 @@ router.get("/player/:eventId", async (req, res) => {
   // Dedicated Multi-Provider Sports TV Stream Relay Engine
   const cacheKey = `sports_player_${eventId}`;
 
-  // 1. Check local RAM cache (serves in 0ms)
+  // Resolve active cached play token if available
+  let activeTokenObj = sportsTokenCache.get(eventId);
+  if (!isSportsTokenValid(activeTokenObj)) {
+    try {
+      const rTok = await redisClient.get(`table_token:sports:${eventId}`);
+      if (isSportsTokenValid(rTok)) {
+        activeTokenObj = rTok;
+        sportsTokenCache.set(eventId, rTok);
+      } else {
+        activeTokenObj = null;
+      }
+    } catch (_) {
+      activeTokenObj = null;
+    }
+  }
+
+  // 1. Check local RAM cache (serves in 0ms ONLY if we also have a fresh non-expired token!)
   const cached = sportsPlayerCache.get(cacheKey);
   if (
     cached &&
     Date.now() < cached.expiresAt &&
     cached.html &&
-    !cached.html.includes("Live TV Feed Not Available")
+    !cached.html.includes("Live TV Feed Not Available") &&
+    isSportsTokenValid(activeTokenObj)
   ) {
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Permissions-Policy", "unload=*");
-    return res.send(cached.html);
-  }
-
-  // 2. Check distributed Redis cache
-  const redisHtml = await redisClient.get(`html:sports:${eventId}`);
-  if (redisHtml && typeof redisHtml === "string" && redisHtml.includes("cfg")) {
-    sportsPlayerCache.set(cacheKey, {
-      html: redisHtml,
-      expiresAt: Date.now() + SPORTS_HTML_TTL,
-    });
+    const freshHtml = injectSportsTokenIntoHtml(cached.html, activeTokenObj, eventId);
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     res.setHeader("Permissions-Policy", "unload=*");
@@ -1190,7 +1128,27 @@ router.get("/player/:eventId", async (req, res) => {
       "Content-Security-Policy",
       securityEngine.getFrameAncestorsCSP(),
     );
-    return res.send(redisHtml);
+    return res.send(freshHtml);
+  }
+
+  // 2. Check distributed Redis cache (ONLY if valid token exists!)
+  if (isSportsTokenValid(activeTokenObj)) {
+    const redisHtml = await redisClient.get(`html:sports:${eventId}`);
+    if (redisHtml && typeof redisHtml === "string" && redisHtml.includes("cfg")) {
+      const freshHtml = injectSportsTokenIntoHtml(redisHtml, activeTokenObj, eventId);
+      sportsPlayerCache.set(cacheKey, {
+        html: freshHtml,
+        expiresAt: Date.now() + SPORTS_HTML_TTL,
+      });
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+      res.setHeader("Permissions-Policy", "unload=*");
+      res.setHeader(
+        "Content-Security-Policy",
+        securityEngine.getFrameAncestorsCSP(),
+      );
+      return res.send(freshHtml);
+    }
   }
 
   // 3. In-flight single-flight deduplication
@@ -1209,118 +1167,10 @@ router.get("/player/:eventId", async (req, res) => {
   }
 
   const task = (async () => {
-    // === TIER 1: Raw Ultra-Fast WebRTC Stream (Aura / Trubets RTS Relay) ===
-    try {
-      console.log(`[SportsEngine] Resolving Tier 1 Aura raw stream for ${eventId}...`);
-      const auraStreamUrl = await getAuraTvStream(eventId);
-      if (auraStreamUrl) {
-        console.log(`[SportsEngine] Tier 1 Aura stream found: ${auraStreamUrl}. Fetching player HTML...`);
-        const playerRes = await directFetch(auraStreamUrl, {
-          headers: {
-            "User-Agent": UA,
-            Referer: "https://play.trubets365.com/",
-            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          },
-          timeout: 4500,
-        }).catch(() => null);
-
-        if (playerRes && playerRes.ok) {
-          const rawAuraHtml = await playerRes.text();
-          if (
-            rawAuraHtml &&
-            (rawAuraHtml.includes("Aliplayer") ||
-              rawAuraHtml.includes("artc://") ||
-              rawAuraHtml.includes("aliyun-rts-sdk"))
-          ) {
-            const transformedAuraHtml = transformAuraPlayerHtml(
-              rawAuraHtml,
-              auraStreamUrl,
-              eventId,
-            );
-            sportsPlayerCache.set(cacheKey, {
-              html: transformedAuraHtml,
-              expiresAt: Date.now() + SPORTS_HTML_TTL,
-            });
-            await redisClient
-              .set(
-                `html:sports:${eventId}`,
-                transformedAuraHtml,
-                Math.round(SPORTS_HTML_TTL / 1000),
-              )
-              .catch(() => {});
-            console.log(
-              `[SportsEngine] ⚡ Serving Tier 1 Aura raw WebRTC player for ${eventId}`,
-            );
-            return transformedAuraHtml;
-          }
-        }
-      }
-    } catch (auraErr) {
-      console.warn(
-        `[SportsEngine] Tier 1 Aura stream lookup failed for ${eventId}:`,
-        auraErr.message,
-      );
-    }
-
-    // === TIER 2: Betfair LTVE Satellite Broadcast (Fallback via CBTF/Startexch) ===
-    // === TIER 1: Raw Ultra-Fast WebRTC Stream (Aura / Trubets RTS Relay) ===
-    try {
-      console.log(`[SportsEngine] Resolving Tier 1 Aura raw stream for ${eventId}...`);
-      const auraStreamUrl = await getAuraTvStream(eventId);
-      if (auraStreamUrl) {
-        console.log(`[SportsEngine] Tier 1 Aura stream found: ${auraStreamUrl}. Fetching player HTML...`);
-        const playerRes = await directFetch(auraStreamUrl, {
-          headers: {
-            "User-Agent": UA,
-            Referer: "https://play.trubets365.com/",
-            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          },
-          timeout: 4500,
-        }).catch(() => null);
-
-        if (playerRes && playerRes.ok) {
-          const rawAuraHtml = await playerRes.text();
-          if (
-            rawAuraHtml &&
-            (rawAuraHtml.includes("Aliplayer") ||
-              rawAuraHtml.includes("artc://") ||
-              rawAuraHtml.includes("aliyun-rts-sdk"))
-          ) {
-            const transformedAuraHtml = transformAuraPlayerHtml(
-              rawAuraHtml,
-              auraStreamUrl,
-              eventId,
-            );
-            sportsPlayerCache.set(cacheKey, {
-              html: transformedAuraHtml,
-              expiresAt: Date.now() + SPORTS_HTML_TTL,
-            });
-            await redisClient
-              .set(
-                `html:sports:${eventId}`,
-                transformedAuraHtml,
-                Math.round(SPORTS_HTML_TTL / 1000),
-              )
-              .catch(() => {});
-            console.log(
-              `[SportsEngine] ⚡ Serving Tier 1 Aura raw WebRTC player for ${eventId}`,
-            );
-            return transformedAuraHtml;
-          }
-        }
-      }
-    } catch (auraErr) {
-      console.warn(
-        `[SportsEngine] Tier 1 Aura stream lookup failed for ${eventId}:`,
-        auraErr.message,
-      );
-    }
-
-    // === TIER 2: Betfair LTVE Satellite Broadcast (Fallback via CBTF/Startexch) ===
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         console.log(
-          `[SportsEngine] Tier 2 Fallback: Fetching sports player for match ${eventId} (attempt ${attempt})`,
+          `[SportsEngine] Fetching Betfair/LTVE sports player for match ${eventId} (attempt ${attempt})`,
         );
 
         // Use forceFresh on attempt 2
@@ -1422,21 +1272,23 @@ router.get("/player/:eventId", async (req, res) => {
               const pingJson = await pingRes.json().catch(() => null);
               if (pingJson && pingJson.token) {
                 prewarmedData = pingJson;
+                const expMs = resolveSportsTokenExpiry(pingJson.token);
+                const ttlSec = Math.max(20, Math.floor((expMs - Date.now()) / 1000));
                 const tokenEntry = {
                   token: pingJson.token,
                   wsUrl: pingJson.wsUrl,
                   hlsUrl: pingJson.hlsUrl,
-                  streamId: pingJson.streamId || eventId,
+                  streamId: pingJson.streamId || watchData.streamId || eventId,
                   timestamp: Date.now(),
-                  expiresAt: Date.now() + 1800000, // 30 mins
+                  expiresAt: expMs,
                 };
                 sportsTokenCache.set(eventId, tokenEntry);
                 sportsTokenCache.set(targetPingUrl, tokenEntry);
                 await redisClient
-                  .set(`table_token:sports:${eventId}`, tokenEntry, 1800)
+                  .set(`table_token:sports:${eventId}`, tokenEntry, ttlSec)
                   .catch(() => {});
                 console.log(
-                  `[SportsEngine] Pre-warm ping successful! Injected valid token into sports player for ${eventId}`,
+                  `[SportsEngine] Pre-warm ping successful! Injected valid token into sports player for ${eventId} (TTL: ${ttlSec}s)`,
                 );
               }
             }
@@ -1511,57 +1363,32 @@ router.get("/player/:eventId", async (req, res) => {
   }
 });
 
-// 4b. Sports Stream Eviction / Self-Healing Trigger
-router.all("/evict", async (req, res) => {
-  const eventId = req.query.eventId || req.body?.eventId;
-  if (!eventId)
-    return res.status(400).json({ ok: false, error: "Missing eventId" });
-
-  try {
-    sportsWatchLinkCache.delete(`sports_watchlink:${eventId}`);
-    sportsPlayerCache.delete(`sports_player_${eventId}`);
-    sportsTokenCache.delete(eventId);
-    await redisClient.del(`sports_watchlink:${eventId}`).catch(() => {});
-    await redisClient.del(`html:sports:${eventId}`).catch(() => {});
-    await redisClient.del(`table_token:sports:${eventId}`).catch(() => {});
-    console.log(`[SportsEngine] Evicted cache for sports event ${eventId}`);
-    return res.json({
-      ok: true,
-      message: `Sports cache evicted for ${eventId}`,
-    });
-  } catch (err) {
-    return res.status(500).json({ ok: false, error: err.message });
-  }
-});
-
-// ============================================================================
-// 80-Year Systems Architecture: Sports Stream Eviction & Autonomous Re-Harvesting
-// ============================================================================
-router.post("/evict", express.json(), async (req, res) => {
+// 4b. Unified Sports Stream Eviction & Autonomous Re-Harvesting Trigger
+router.all("/evict", express.json(), async (req, res) => {
   const eventId = String(req.body?.eventId || req.query?.eventId || "").trim();
-  const reason = String(req.body?.reason || "sports_canary_stalled").trim();
-  if (!eventId)
-    return res.status(400).json({ ok: false, error: "eventId is required" });
+  const reason = String(req.body?.reason || "sports_canary_evict").trim();
+  if (!eventId) {
+    return res.status(400).json({ ok: false, error: "Missing eventId" });
+  }
 
   console.warn(
-    `[Sports Evict] ⚡ Match ${eventId} evicted by canary watchdog (Reason: ${reason})`,
+    `[Sports Evict] ⚡ Evicting cache for ${eventId} (Reason: ${reason})`,
   );
   try {
     const betfairId = betfairIdCache.get(eventId) || eventId;
-    const cacheKey = `watchlink:${betfairId}`;
-
-    sportsPlayerCache.delete(`sports_${eventId}`);
-    sportsWatchLinkCache.delete(cacheKey);
+    sportsWatchLinkCache.delete(`sports_watchlink:${eventId}`);
+    sportsWatchLinkCache.delete(`sports_watchlink:${betfairId}`);
+    sportsPlayerCache.delete(`sports_player_${eventId}`);
+    sportsTokenCache.delete(eventId);
     inFlightSportsPlayers.delete(eventId);
 
-    await redisClient.del(`sports_html:${eventId}`).catch(() => {});
-    await redisClient.del(`sports:watchlink:${betfairId}`).catch(() => {});
-    await redisClient.del(cacheKey).catch(() => {});
+    await redisClient.del(`sports_watchlink:${eventId}`).catch(() => {});
+    await redisClient.del(`sports_watchlink:${betfairId}`).catch(() => {});
+    await redisClient.del(`html:sports:${eventId}`).catch(() => {});
+    await redisClient.del(`table_token:sports:${eventId}`).catch(() => {});
 
-    rotateTableSession(betfairId, `Sports canary eviction: ${reason}`);
-    getSportsWatchUrl(eventId, "4", true).catch(() => {});
-
-    return res.status(200).json({
+    rotateTableSession(betfairId, `Sports eviction: ${reason}`);
+    return res.json({
       ok: true,
       eventId,
       betfairId,
@@ -1573,7 +1400,84 @@ router.post("/evict", express.json(), async (req, res) => {
   }
 });
 
-// 5. Dedicated Sports Proxy-Ping
+// Helper: Freshly harvest watchlink + ping token for a sports event on demand
+async function refreshSportsPingSession(eventId, sportId = "4") {
+  const watchData = await getSportsWatchUrl(eventId, sportId, true);
+  const watchUrl = watchData.url;
+  const referer = watchData.origin ? `${watchData.origin}/` : "https://cbtfexchange.com/";
+  const session = watchData.session || getSessionForTable(eventId);
+
+  const pageRes = await proxyFetch(watchUrl, {
+    session,
+    headers: {
+      "User-Agent": UA,
+      Referer: referer,
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
+    timeout: 7000,
+  });
+  if (!pageRes || !pageRes.ok) {
+    throw new Error(`WatchUrl HTTP ${pageRes?.status || "error"}`);
+  }
+  const rawHtml = await pageRes.text();
+  const cfgMatch = rawHtml.match(
+    /<script type="application\/json" id="cfg">([^<]+)<\/script>/,
+  );
+  if (!cfgMatch) {
+    throw new Error("No cfg in watchUrl HTML");
+  }
+  const rawCfg = JSON.parse(cfgMatch[1]);
+  const targetPingUrl = rawCfg.pingUrl.startsWith("http")
+    ? rawCfg.pingUrl
+    : new URL(rawCfg.pingUrl, watchUrl).href;
+
+  const pingRes = await proxyFetch(targetPingUrl, {
+    method: "POST",
+    session,
+    headers: {
+      "Content-Type": "application/json",
+      Origin: new URL(targetPingUrl).origin,
+      Referer: watchUrl,
+      "User-Agent": UA,
+      Accept: "*/*",
+      "Sec-Fetch-Dest": "empty",
+      "Sec-Fetch-Mode": "cors",
+      "Sec-Fetch-Site": "same-origin",
+    },
+    body: JSON.stringify({
+      sid: rawCfg.sid,
+      mode: "connecting",
+      init: true,
+      token: true,
+      page: referer,
+      tz: "Asia/Kolkata",
+      tzo: 330,
+    }),
+    timeout: 6000,
+  });
+
+  const pingJson = await pingRes.json().catch(() => null);
+  if (pingJson && pingJson.token) {
+    const expMs = resolveSportsTokenExpiry(pingJson.token);
+    const ttlSec = Math.max(20, Math.floor((expMs - Date.now()) / 1000));
+    const entry = {
+      streamId: pingJson.streamId || watchData.streamId || eventId,
+      token: pingJson.token,
+      wsUrl: getSportsProxiedWsUrl(pingJson.wsUrl, watchUrl),
+      hlsUrl: buildSportsHlsProxyUrl(pingJson.hlsUrl, eventId, pingJson.token),
+      rawHlsUrl: pingJson.hlsUrl,
+      rawWsUrl: pingJson.wsUrl,
+      expiresAt: expMs,
+    };
+    sportsTokenCache.set(eventId, entry);
+    sportsTokenCache.set(targetPingUrl, entry);
+    await redisClient.set(`table_token:sports:${eventId}`, entry, ttlSec).catch(() => {});
+    return entry;
+  }
+  return null;
+}
+
+// 5. Dedicated Sports Proxy-Ping (0ms Pre-Warmed Token Serving & Auto-Healing)
 router.post("/proxy-ping", async (req, res) => {
   const access = await securityEngine.verifyAccess(req, "sports");
   if (!access.allowed) {
@@ -1591,24 +1495,41 @@ router.post("/proxy-ping", async (req, res) => {
   const isInit = Boolean(req.body && req.body.init);
   const isTokenRequest = Boolean(req.body && req.body.token);
 
-  // 1. FAST ZERO-PROXY RESPONDER FOR ROUTINE HEARTBEATS (!isInit && !isTokenRequest):
-  // When stream is running, player pings every 10s. Responding in 0ms locally eliminates 99% of outbound requests and stops disconnects!
-  if (!isInit && !isTokenRequest) {
-    let cachedToken = sportsTokenCache.get(eventId || target);
-    if (!cachedToken && eventId) {
-      try {
-        const rData = await redisClient.get(`table_token:sports:${eventId}`);
-        if (rData && rData.token) cachedToken = rData;
-      } catch (_) {}
-    }
+  // Resolve active token from RAM or Redis
+  let cachedToken = sportsTokenCache.get(eventId || target);
+  if (!cachedToken && eventId) {
+    try {
+      const rData = await redisClient.get(`table_token:sports:${eventId}`);
+      if (rData && rData.token) {
+        cachedToken = rData;
+        sportsTokenCache.set(eventId, rData);
+      }
+    } catch (_) {}
+  }
 
+  // 1. FAST ZERO-PROXY RESPONDER FOR ROUTINE HEARTBEATS (!isInit && !isTokenRequest):
+  if (!isInit && !isTokenRequest) {
     return res.status(200).json({
       ok: true,
       state: "live",
       streamId: cachedToken?.streamId || eventId || "SPORTS",
       token: cachedToken?.token || "",
-      wsUrl: cachedToken?.wsUrl || "",
-      hlsUrl: cachedToken?.hlsUrl || "",
+      wsUrl: getSportsProxiedWsUrl(cachedToken?.wsUrl || ""),
+      hlsUrl: buildSportsHlsProxyUrl(cachedToken?.hlsUrl || "", eventId, cachedToken?.token),
+      stop: false,
+    });
+  }
+
+  // 2. FAST ZERO-PROXY RESPONDER FOR INITIAL BOOT (isInit) OR TOKEN REQUEST WHEN VALID PRE-WARMED TOKEN EXISTS:
+  // Eliminates duplicate init:true ping to tv.ltve.live (which can trigger 403/stop:true and wipe out streamId/wsUrl!)
+  if (isSportsTokenValid(cachedToken) && cachedToken.streamId && (cachedToken.wsUrl || cachedToken.hlsUrl)) {
+    return res.status(200).json({
+      ok: true,
+      state: "live",
+      streamId: cachedToken.streamId,
+      token: cachedToken.token,
+      wsUrl: getSportsProxiedWsUrl(cachedToken.wsUrl),
+      hlsUrl: buildSportsHlsProxyUrl(cachedToken.hlsUrl, eventId, cachedToken.token),
       stop: false,
     });
   }
@@ -1627,21 +1548,11 @@ router.post("/proxy-ping", async (req, res) => {
     ? parseInt(req.query.session, 10)
     : getSessionForTable(eventId || targetUrl);
 
-  // Throttling: If an identical ping was forwarded less than 2.5 seconds ago, return cached response
-  const lastCached = sportsPingCache.get(targetUrl);
-  if (
-    lastCached &&
-    lastCached.data &&
-    !isInit &&
-    !isTokenRequest &&
-    Date.now() - lastCached.timestamp < 2500
-  ) {
-    return res.status(200).json(lastCached.data);
-  }
-
   try {
     const payload = {
       ...req.body,
+      init: isInit,
+      token: true, // Always request active play token!
       page: pageOrigin,
       tz: req.body?.tz || "Asia/Kolkata",
       tzo: req.body?.tzo !== undefined ? req.body.tzo : 330,
@@ -1662,142 +1573,178 @@ router.post("/proxy-ping", async (req, res) => {
         "Sec-Fetch-Site": "same-origin",
       },
       body: JSON.stringify(payload),
-      timeout: 8000,
+      timeout: 6000,
+    }).catch(() => null);
+
+    const data = upstreamRes ? await upstreamRes.json().catch(() => null) : null;
+
+    if (data && typeof data === "object" && data.token && !data.stop) {
+      const resolvedWs = getSportsProxiedWsUrl(data.wsUrl, decodedWatchUrl);
+      const resolvedHls = buildSportsHlsProxyUrl(data.hlsUrl, eventId, data.token);
+      const expMs = resolveSportsTokenExpiry(data.token);
+      const ttlSec = Math.max(20, Math.floor((expMs - Date.now()) / 1000));
+
+      const tokenEntry = {
+        streamId: data.streamId || cachedToken?.streamId || eventId,
+        token: data.token,
+        wsUrl: resolvedWs,
+        hlsUrl: resolvedHls,
+        rawHlsUrl: data.hlsUrl,
+        rawWsUrl: data.wsUrl,
+        expiresAt: expMs,
+      };
+      if (eventId) {
+        sportsTokenCache.set(eventId, tokenEntry);
+        await redisClient
+          .set(`table_token:sports:${eventId}`, tokenEntry, ttlSec)
+          .catch(() => {});
+      }
+      sportsTokenCache.set(targetUrl, tokenEntry);
+      sportsPingCache.set(targetUrl, { data: { ...data, wsUrl: resolvedWs, hlsUrl: resolvedHls }, timestamp: Date.now() });
+
+      return res.status(200).json({
+        ok: true,
+        state: data.state || "live",
+        streamId: tokenEntry.streamId,
+        token: tokenEntry.token,
+        wsUrl: resolvedWs,
+        hlsUrl: resolvedHls,
+        stop: false,
+      });
+    }
+
+    // 3. Auto-Heal on the fly if old watchUrl/sid expired or rejected:
+    if (eventId) {
+      console.warn(`[SportsEngine] Ping rejected/expired for ${eventId}, auto-refreshing session...`);
+      const freshEntry = await refreshSportsPingSession(eventId, "4").catch(() => null);
+      if (freshEntry && freshEntry.token) {
+        return res.status(200).json({
+          ok: true,
+          state: "live",
+          streamId: freshEntry.streamId,
+          token: freshEntry.token,
+          wsUrl: freshEntry.wsUrl,
+          hlsUrl: freshEntry.hlsUrl,
+          stop: false,
+        });
+      }
+    }
+
+    return res.status(200).json({
+      ok: true,
+      state: "live",
+      streamId: cachedToken?.streamId || eventId || "SPORTS",
+      token: cachedToken?.token || "",
+      wsUrl: getSportsProxiedWsUrl(cachedToken?.wsUrl || ""),
+      hlsUrl: buildSportsHlsProxyUrl(cachedToken?.hlsUrl || "", eventId, cachedToken?.token),
+      stop: false,
     });
-
-    const data = await upstreamRes.json().catch(() => null);
-
-    if (data && typeof data === "object") {
-      if (data.stop) data.stop = false;
-
-      // Rewrite HLS URL if present to dedicated sports HLS proxy with clean relative URL (zero mixed content HTTP/HTTPS block)
-      if (data.hlsUrl && !data.hlsUrl.startsWith("/api/stream/sports/hls/")) {
-        data.hlsUrl = `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(data.hlsUrl)}`;
-      }
-
-      // Rewrite wsUrl to WebSocket tunnel proxy to bypass Origin 403 blocks
-      if (data.wsUrl && !data.wsUrl.startsWith("/api/stream/ws")) {
-        let cleanWs = String(data.wsUrl).trim();
-        if (cleanWs.startsWith("//")) {
-          cleanWs = `wss:${cleanWs}`;
-        } else if (cleanWs.startsWith("/")) {
-          const wsHost = targetOrigin.replace(/^https?:\/\//, "");
-          cleanWs = `wss://${wsHost}${cleanWs}`;
-        } else if (
-          !cleanWs.startsWith("ws://") &&
-          !cleanWs.startsWith("wss://")
-        ) {
-          cleanWs = `wss://${cleanWs}`;
-        }
-        data.wsUrl = `/api/stream/ws?target=${encodeURIComponent(cleanWs)}`;
-      }
-
-      if (!data.streamId) {
-        data.streamId = eventId || lastCached?.data?.streamId || "SPORTS";
-      }
-
-      // Cache token in memory and Redis for 0ms heartbeats
-      if (data.token) {
-        const tokenEntry = {
-          streamId: data.streamId,
-          token: data.token,
-          wsUrl: data.wsUrl,
-          hlsUrl: data.hlsUrl,
-          expiresAt: Date.now() + 3600 * 1000,
-        };
-        if (eventId) {
-          sportsTokenCache.set(eventId, tokenEntry);
-          await redisClient
-            .set(`table_token:sports:${eventId}`, tokenEntry, 3600)
-            .catch(() => {});
-        }
-        sportsTokenCache.set(targetUrl, tokenEntry);
-      }
-
-      // Save fresh data & timestamp in memory cache
-      sportsPingCache.set(targetUrl, { data, timestamp: Date.now() });
-
-      return res.status(200).json(data);
-    }
-
-    // Resilient fallback: For routine heartbeats, NEVER fail or return 403!
-    // Return { ok: true } so the playing video continues uninterrupted!
-    if (!isInit && !isTokenRequest) {
-      return res
-        .status(200)
-        .json(lastCached?.data || { ok: true, state: "live", stop: false });
-    }
-
-    return res
-      .status(upstreamRes.status || 200)
-      .json(lastCached?.data || { ok: true, state: "live", stop: false });
   } catch (err) {
     console.error("[SportsEngine] Proxy ping error:", err.message);
-    if (!isInit && !isTokenRequest) {
-      return res
-        .status(200)
-        .json(lastCached?.data || { ok: true, state: "live", stop: false });
-    }
-    return res.status(200).json({ ok: true, state: "live", stop: false });
+    return res.status(200).json({
+      ok: true,
+      state: "live",
+      streamId: cachedToken?.streamId || eventId || "SPORTS",
+      token: cachedToken?.token || "",
+      wsUrl: getSportsProxiedWsUrl(cachedToken?.wsUrl || ""),
+      hlsUrl: buildSportsHlsProxyUrl(cachedToken?.hlsUrl || "", eventId, cachedToken?.token),
+      stop: false,
+    });
   }
 });
 
-// 6. Sports Dedicated HLS Playlist Proxy (Zero-Proxy Direct First with Token Propagation)
+// 6. Sports Dedicated HLS Playlist Proxy (Direct First + Auto-Token Propagation)
 router.get("/hls/live.m3u8", async (req, res) => {
   try {
-    const { url, token } = req.query;
+    const { url, eventId } = req.query;
+    let token = req.query.token;
     if (!url) return res.status(400).send("Missing url param");
     let upstreamUrl = decodeURIComponent(url);
 
-    // Propagate authentication token if provided
+    // Always resolve latest active play token if missing or stale
+    if (eventId) {
+      const cachedTok = sportsTokenCache.get(String(eventId));
+      if (isSportsTokenValid(cachedTok)) {
+        token = cachedTok.token;
+      }
+    }
+
+    // Propagate authentication token into upstreamUrl
     if (token) {
       try {
         const u = new URL(upstreamUrl);
-        if (!u.searchParams.has("token")) {
-          u.searchParams.set("token", token);
-          upstreamUrl = u.toString();
-        }
+        u.searchParams.set("token", token);
+        upstreamUrl = u.toString();
       } catch (_) {}
     }
 
-    let text = "";
-    // 1. Direct fetch first from VPS (Zero proxy bandwidth!)
-    try {
-      const directRes = await directFetch(upstreamUrl, {
-        headers: { "User-Agent": UA, Referer: "https://tv.ltve.live/" },
-        timeout: 6000,
-      });
-      if (directRes.ok) {
-        text = await directRes.text();
-      }
-    } catch (_) {}
+    const fetchM3u8 = async (targetU) => {
+      let body = "";
+      try {
+        const directRes = await directFetch(targetU, {
+          headers: {
+            "User-Agent": UA,
+            Origin: "https://tv.ltve.live",
+            Referer: "https://tv.ltve.live/",
+          },
+          timeout: 5000,
+        });
+        if (directRes.ok) {
+          body = await directRes.text();
+        }
+      } catch (_) {}
 
-    // 2. Fallback to proxy only if direct fails or was blocked
-    if (
-      !text ||
-      text.includes("403 Forbidden") ||
-      text.includes("Access Denied")
-    ) {
-      const m3u8Res = await proxyFetch(upstreamUrl, {
-        headers: { "User-Agent": UA, Referer: "https://tv.ltve.live/" },
-        timeout: 8000,
-      });
-      text = await m3u8Res.text();
+      if (
+        !body ||
+        body.includes("403 Forbidden") ||
+        body.includes("Access Denied")
+      ) {
+        const m3u8Res = await proxyFetch(targetU, {
+          headers: {
+            "User-Agent": UA,
+            Origin: "https://tv.ltve.live",
+            Referer: "https://tv.ltve.live/",
+          },
+          timeout: 7000,
+        }).catch(() => null);
+        if (m3u8Res && m3u8Res.ok) {
+          body = await m3u8Res.text();
+        }
+      }
+      return body;
+    };
+
+    let text = await fetchM3u8(upstreamUrl);
+
+    // If playlist came back empty/403 (expired token), refresh token on the fly once
+    if ((!text || !text.includes("#EXTM3U")) && eventId) {
+      const freshEntry = await refreshSportsPingSession(String(eventId), "4").catch(() => null);
+      if (freshEntry && freshEntry.token) {
+        token = freshEntry.token;
+        const u = new URL(upstreamUrl);
+        u.searchParams.set("token", token);
+        upstreamUrl = u.toString();
+        text = await fetchM3u8(upstreamUrl);
+      }
     }
 
-    const rewritten = text
+    const rewritten = (text || "")
       .split("\n")
       .map((line) => {
         const trimmed = line.trim();
+        if (!trimmed) return line;
+        if (trimmed.startsWith("#")) {
+          // Rewrite #EXT-X-MAP:URI="..." or #EXT-X-KEY:URI="..."
+          return line.replace(/URI="([^"]+)"/g, (_, uri) => {
+            const fullUri = new URL(uri, upstreamUrl).href;
+            return `URI="/api/stream/sports/hls/chunk.ts?url=${encodeURIComponent(fullUri)}${token ? `&token=${encodeURIComponent(token)}` : ""}"`;
+          });
+        }
+        const fullUrl = new URL(trimmed, upstreamUrl).href;
         if (trimmed.endsWith(".m3u8") || trimmed.includes(".m3u8?")) {
-          const fullVariantUrl = new URL(trimmed, upstreamUrl).href;
-          return `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(fullVariantUrl)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
+          return `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(fullUrl)}${eventId ? `&eventId=${encodeURIComponent(eventId)}` : ""}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
         }
-        if (trimmed.endsWith(".ts") || trimmed.includes(".ts?")) {
-          const fullSegUrl = new URL(trimmed, upstreamUrl).href;
-          return `/api/stream/sports/hls/chunk.ts?url=${encodeURIComponent(fullSegUrl)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
-        }
-        return line;
+        return `/api/stream/sports/hls/chunk.ts?url=${encodeURIComponent(fullUrl)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
       })
       .join("\n");
 
@@ -1862,7 +1809,11 @@ router.get("/hls/chunk.ts", async (req, res) => {
           targetUrl,
           {
             agent,
-            headers: { "User-Agent": UA, Referer: "https://tv.ltve.live/" },
+            headers: {
+              "User-Agent": UA,
+              Origin: "https://tv.ltve.live",
+              Referer: "https://tv.ltve.live/",
+            },
             timeout: 12000,
             rejectUnauthorized: false,
           },
@@ -1872,7 +1823,13 @@ router.get("/hls/chunk.ts", async (req, res) => {
               chunkRes.statusCode < 400 &&
               chunkRes.headers.location
             ) {
-              return resolve({ redirect: chunkRes.headers.location });
+              return resolve({
+                redirect: new URL(chunkRes.headers.location, targetUrl).href,
+              });
+            }
+            if (chunkRes.statusCode >= 400) {
+              chunkRes.resume();
+              return reject(new Error(`Upstream chunk HTTP ${chunkRes.statusCode}`));
             }
 
             const contentType =

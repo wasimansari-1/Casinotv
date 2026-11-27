@@ -106,7 +106,7 @@ app.use((err, req, res, next) => {
 function handleWebSocketProxy(clientReq, clientSocket, clientHead) {
   try {
     const reqUrl = new URL(clientReq.url, 'http://localhost');
-    const rawTarget = reqUrl.searchParams.get('target');
+    const rawTarget = reqUrl.searchParams.get('upstream') || reqUrl.searchParams.get('target');
     let targetWsUrl = rawTarget ? decodeURIComponent(rawTarget) : 'wss://livecdnplatin.com/UNIVERSE-GE/websocket';
 
     // Normalize targetWsUrl: Handle relative paths and protocol-less URLs safely
