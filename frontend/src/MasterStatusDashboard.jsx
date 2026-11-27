@@ -45,10 +45,17 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
   const [autoRefreshInterval, setAutoRefreshInterval] = useState(5000); // 5s smooth non-fluctuating default
   const [lastUpdated, setLastUpdated] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeTab, setActiveTab] = useState('origins'); // 'origins' is primary focus!
+  const [activeTab, setActiveTab] = useState('whitelisted'); // 'whitelisted' | 'unauthorized' | 'traffic' | 'all_origins' | 'countermeasures'
+  const [whitelistFilterType, setWhitelistFilterType] = useState('ALL'); // 'ALL' | 'DOMAIN' | 'IP' | 'ACTIVE'
+  const [unauthorizedFilterType, setUnauthorizedFilterType] = useState('ALL'); // 'ALL' | 'BYPASS_ONLY' | 'BLOCKED_ONLY'
   const [intentFilter, setIntentFilter] = useState('ALL');
   const [actionFilter, setActionFilter] = useState('ALL');
   const [projectFilter, setProjectFilter] = useState('ALL');
+
+  // Quick Inline Whitelist Add State
+  const [quickAddInput, setQuickAddInput] = useState('');
+  const [quickAddNote, setQuickAddNote] = useState('');
+  const [addingWhitelist, setAddingWhitelist] = useState(false);
 
   // Custom Message Modal / State
   const [msgModalOpen, setMsgModalOpen] = useState(false);
@@ -189,7 +196,7 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
           domain: target,
           casino: true,
           sports: true,
-          comment: 'Quick Whitelist from Origin Matrix'
+          note: 'Quick Whitelist from Status Threat Matrix'
         })
       });
       const data = await res.json();
@@ -199,6 +206,41 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
       }
     } catch (_) {
       showActionStatus('error', 'Failed to whitelist target');
+    }
+  };
+
+  // Quick Add Whitelist Domain or IP from Inline Bar
+  const handleQuickAddWhitelist = async (e) => {
+    e?.preventDefault();
+    if (!quickAddInput.trim()) return;
+    setAddingWhitelist(true);
+    try {
+      const res = await fetch('/api/master/whitelist', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          domain: quickAddInput.trim(),
+          casino: true,
+          sports: true,
+          note: quickAddNote.trim() || 'Whitelisted via Status Dashboard'
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        showActionStatus('success', `"${quickAddInput.trim()}" added to Whitelist! ✅`);
+        setQuickAddInput('');
+        setQuickAddNote('');
+        fetchTelemetry();
+      } else {
+        showActionStatus('error', data.error || 'Failed to add to whitelist');
+      }
+    } catch (_) {
+      showActionStatus('error', 'Error adding to whitelist');
+    } finally {
+      setAddingWhitelist(false);
     }
   };
 
@@ -382,12 +424,45 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
   const vps = telemetry?.vps || {};
   const summary = telemetry?.summary || {};
   const origins = telemetry?.origins || [];
+  const whitelistedList = telemetry?.whitelistedList || [];
+  const whitelistedOrigins = telemetry?.whitelistedOrigins || origins.filter((o) => o.isWhitelisted);
+  const unauthorizedOrigins =
+    telemetry?.unauthorizedOrigins ||
+    origins.filter((o) => !o.isWhitelisted || o.bypassAttempts > 0 || o.isBlocked);
   const intents = telemetry?.intents || [];
   const vpsProjects = telemetry?.vpsProjects || [];
   const projectDistribution = telemetry?.projectDistribution || [];
   const bypassAlerts = telemetry?.bypassAlerts || [];
   const customMessages = telemetry?.customMessages || [];
   const recentRequests = telemetry?.recentRequests || [];
+
+  // Source list for Whitelisted view (prefers full DB with live stats, fallbacks to active whitelisted origins)
+  const sourceWhitelisted = whitelistedList.length > 0 ? whitelistedList : whitelistedOrigins;
+
+  const filteredWhitelisted = sourceWhitelisted.filter((w) => {
+    if (whitelistFilterType === 'DOMAIN' && w.entryType !== 'domain') return false;
+    if (whitelistFilterType === 'IP' && w.entryType !== 'ip') return false;
+    if (whitelistFilterType === 'ACTIVE' && !(w.liveHits > 0 || w.count > 0)) return false;
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      const name = (w.domain || w.origin || '').toLowerCase();
+      const note = (w.note || '').toLowerCase();
+      return name.includes(q) || note.includes(q);
+    }
+    return true;
+  });
+
+  const filteredUnauthorized = unauthorizedOrigins.filter((u) => {
+    if (unauthorizedFilterType === 'BYPASS_ONLY' && !(u.bypassAttempts > 0)) return false;
+    if (unauthorizedFilterType === 'BLOCKED_ONLY' && !u.isBlocked) return false;
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      const originStr = (u.origin || '').toLowerCase();
+      const ipStr = (u.primaryIp || '').toLowerCase();
+      return originStr.includes(q) || ipStr.includes(q);
+    }
+    return true;
+  });
 
   // Filtered requests based on UI selections (Universal VPS Filter)
   const filteredRequests = recentRequests.filter((r) => {
@@ -722,18 +797,22 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
 
             <div className="space-y-1.5 text-xs font-mono">
               <div className="flex justify-between items-center text-slate-400">
-                <span>Total Intrusions Blocked:</span>
-                <span className="text-rose-400 font-bold">
-                  {summary.totalBypassAlerts || 0}
+                <span>Whitelisted Entities:</span>
+                <span className="text-emerald-400 font-bold">
+                  {sourceWhitelisted.length} Approved ({summary.allowedRequests?.toLocaleString() || 0} hits)
                 </span>
               </div>
               <div className="flex justify-between items-center text-slate-400">
-                <span>Direct URL Hits:</span>
-                <span className="text-amber-400 font-semibold">Blocked by Default</span>
+                <span>Non-Whitelisted Callers:</span>
+                <span className="text-rose-400 font-bold">
+                  {unauthorizedOrigins.length} Flagged
+                </span>
               </div>
               <div className="flex justify-between items-center text-slate-400">
-                <span>Postman / Scrapers:</span>
-                <span className="text-rose-400 font-semibold">Auto-Killed</span>
+                <span>Total Intrusions Blocked:</span>
+                <span className="text-rose-400 font-semibold">
+                  {summary.totalBypassAlerts || 0}
+                </span>
               </div>
               <div className="flex justify-between items-center text-slate-400">
                 <span>Custom Warning Takeovers:</span>
@@ -751,22 +830,36 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between border-b border-slate-800 p-2 sm:px-4 bg-[#090C14]">
             <div className="flex items-center gap-1 overflow-x-auto custom-scroll pb-1 sm:pb-0">
               <button
-                onClick={() => setActiveTab('origins')}
+                onClick={() => setActiveTab('whitelisted')}
                 className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition whitespace-nowrap ${
-                  activeTab === 'origins'
+                  activeTab === 'whitelisted'
                     ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
                     : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
                 }`}
               >
-                <Globe className="w-3.5 h-3.5" />
-                <span>Origin Intelligence Matrix ({origins.length})</span>
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-300" />
+                <span>Whitelisted Domains & IPs ({sourceWhitelisted.length})</span>
+              </button>
+
+              <button
+                onClick={() => setActiveTab('unauthorized')}
+                className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition whitespace-nowrap ${
+                  activeTab === 'unauthorized'
+                    ? 'bg-rose-600 text-white shadow-md shadow-rose-900/40'
+                    : unauthorizedOrigins.length > 0
+                    ? 'text-rose-400 hover:text-white hover:bg-rose-950/40 border border-rose-900/60'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+                }`}
+              >
+                <AlertOctagon className={`w-3.5 h-3.5 ${unauthorizedOrigins.length > 0 ? 'text-rose-300 animate-pulse' : 'text-slate-400'}`} />
+                <span>Non-Whitelisted & Bypassers ({unauthorizedOrigins.length})</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('traffic')}
                 className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition whitespace-nowrap ${
                   activeTab === 'traffic'
-                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
+                    ? 'bg-cyan-600 text-white shadow-md shadow-cyan-900/30'
                     : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
                 }`}
               >
@@ -775,27 +868,27 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
               </button>
 
               <button
-                onClick={() => setActiveTab('bypass')}
+                onClick={() => setActiveTab('all_origins')}
                 className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition whitespace-nowrap ${
-                  activeTab === 'bypass'
-                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
+                  activeTab === 'all_origins'
+                    ? 'bg-slate-700 text-white shadow-md'
                     : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
                 }`}
               >
-                <AlertOctagon className="w-3.5 h-3.5" />
-                <span>Theft & Bypass Alerts ({bypassAlerts.length})</span>
+                <Globe className="w-3.5 h-3.5" />
+                <span>All Callers Matrix ({origins.length})</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('countermeasures')}
                 className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition whitespace-nowrap ${
                   activeTab === 'countermeasures'
-                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
+                    ? 'bg-purple-600 text-white shadow-md shadow-purple-900/30'
                     : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
                 }`}
               >
                 <MessageSquare className="w-3.5 h-3.5" />
-                <span>Custom Hijack Messages ({customMessages.length})</span>
+                <span>Screen Takeovers ({customMessages.length})</span>
               </button>
             </div>
 
@@ -811,6 +904,31 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
                   className="pl-8 pr-3 py-1.5 bg-[#07090E] border border-slate-700/80 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 w-44 sm:w-56 font-mono"
                 />
               </div>
+
+              {activeTab === 'whitelisted' && (
+                <select
+                  value={whitelistFilterType}
+                  onChange={(e) => setWhitelistFilterType(e.target.value)}
+                  className="px-2.5 py-1.5 bg-[#07090E] border border-slate-700/80 rounded-lg text-xs text-slate-300 font-mono focus:outline-none focus:border-emerald-500"
+                >
+                  <option value="ALL">All Whitelisted ({sourceWhitelisted.length})</option>
+                  <option value="DOMAIN">Domains Only</option>
+                  <option value="IP">IP Addresses Only</option>
+                  <option value="ACTIVE">Active Traffic Only</option>
+                </select>
+              )}
+
+              {activeTab === 'unauthorized' && (
+                <select
+                  value={unauthorizedFilterType}
+                  onChange={(e) => setUnauthorizedFilterType(e.target.value)}
+                  className="px-2.5 py-1.5 bg-[#07090E] border border-slate-700/80 rounded-lg text-xs text-slate-300 font-mono focus:outline-none focus:border-rose-500"
+                >
+                  <option value="ALL">All Non-Whitelisted ({unauthorizedOrigins.length})</option>
+                  <option value="BYPASS_ONLY">Active Bypass Threats Only</option>
+                  <option value="BLOCKED_ONLY">Blocked Targets Only</option>
+                </select>
+              )}
 
               {activeTab === 'traffic' && (
                 <>
@@ -980,20 +1098,451 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
             </div>
           )}
 
-          {/* TAB 1: ORIGIN & THREAT INTELLIGENCE MATRIX (PRIMARY VIEW) */}
-          {activeTab === 'origins' && (
+          {/* TAB 1: WHITELISTED DOMAINS & AUTHORIZED IPS (ALAG SECTION) */}
+          {activeTab === 'whitelisted' && (
+            <div className="p-4 flex-1 flex flex-col gap-4 overflow-y-auto">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
+                <div>
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                    <span>Whitelisted Domains & Authorized IPs</span>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                      {filteredWhitelisted.length} Authorized
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Official authorized partner domains & whitelisted client IPs allowed to embed streams and access VPS APIs.
+                  </p>
+                </div>
+
+                <button
+                  onClick={onNavigateWhitelist}
+                  className="px-3 py-1.5 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 text-xs font-semibold flex items-center gap-1.5 transition whitespace-nowrap self-start sm:self-auto"
+                >
+                  <Sliders className="w-3.5 h-3.5" />
+                  <span>Open Full Whitelist Desk</span>
+                </button>
+              </div>
+
+              {/* Quick Inline Whitelist Add Box */}
+              <form
+                onSubmit={handleQuickAddWhitelist}
+                className="bg-[#090C14] border border-emerald-800/40 rounded-xl p-3 flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5"
+              >
+                <div className="flex items-center gap-1.5 text-xs font-bold text-emerald-400 whitespace-nowrap px-1 font-mono">
+                  <Plus className="w-4 h-4" />
+                  <span>Quick Add to Whitelist:</span>
+                </div>
+                <input
+                  type="text"
+                  value={quickAddInput}
+                  onChange={(e) => setQuickAddInput(e.target.value)}
+                  placeholder="Domain or IP (e.g. aura.igambli.com or 23.111.15.175)..."
+                  className="flex-1 px-3 py-1.5 bg-[#06080E] border border-slate-700/80 rounded-lg text-xs text-white placeholder-slate-500 font-mono focus:outline-none focus:border-emerald-500"
+                />
+                <input
+                  type="text"
+                  value={quickAddNote}
+                  onChange={(e) => setQuickAddNote(e.target.value)}
+                  placeholder="Partner Name / Note (e.g. Aura Client)..."
+                  className="w-full sm:w-56 px-3 py-1.5 bg-[#06080E] border border-slate-700/80 rounded-lg text-xs text-white placeholder-slate-500 font-mono focus:outline-none focus:border-emerald-500"
+                />
+                <button
+                  type="submit"
+                  disabled={addingWhitelist || !quickAddInput.trim()}
+                  className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition shadow-md shadow-emerald-900/30 whitespace-nowrap"
+                >
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>{addingWhitelist ? 'Adding...' : '+ Whitelist'}</span>
+                </button>
+              </form>
+
+              {/* Whitelisted Cards Grid */}
+              {filteredWhitelisted.length === 0 ? (
+                <div className="py-16 text-center text-slate-500 font-sans">
+                  No whitelisted entities matching active filter. Use the Quick Add bar above to whitelist a domain or IP.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3.5">
+                  {filteredWhitelisted.map((w, idx) => {
+                    const isBlocked = w.status === 'blocked';
+                    const hits = w.liveHits || w.count || 0;
+                    const displayKey = w.domain || w.origin;
+                    const isIp = w.entryType === 'ip' || /^(\d{1,3}\.){3}\d{1,3}$/.test(displayKey);
+
+                    return (
+                      <div
+                        key={w.domain || w.rawKey || idx}
+                        className={`rounded-xl border p-4 transition-all duration-200 ${
+                          isBlocked
+                            ? 'bg-rose-950/20 border-rose-800/60 shadow-lg shadow-rose-950/20'
+                            : 'bg-[#0B101D] border-emerald-800/40 shadow-lg shadow-emerald-950/10'
+                        }`}
+                      >
+                        {/* Top Line: Origin Name, Badges, Total Hits & % Load */}
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 pb-3 border-b border-slate-800/80">
+                          <div className="flex items-center gap-2.5 flex-wrap">
+                            <span className="font-bold text-white text-base font-mono tracking-tight flex items-center gap-1.5">
+                              {isIp ? (
+                                <Server className="w-4 h-4 text-emerald-400" />
+                              ) : (
+                                <Globe className="w-4 h-4 text-cyan-400" />
+                              )}
+                              <span>{displayKey}</span>
+                            </span>
+
+                            <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-800 text-slate-300 border border-slate-700">
+                              {isIp ? 'IP ADDRESS' : 'DOMAIN'}
+                            </span>
+
+                            {/* Guard Status Badge */}
+                            {isBlocked ? (
+                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                                ⛔ ACCESS BLOCKED
+                              </span>
+                            ) : (
+                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                                ✅ WHITELISTED PARTNER
+                              </span>
+                            )}
+
+                            {/* Service Permissions */}
+                            <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-cyan-950/40 text-cyan-300 border border-cyan-800/60">
+                              {w.casino ? '🎰 Casino TV' : ''} {w.casino && w.sports ? '• ' : ''} {w.sports ? '⚽ Sports TV' : ''}
+                            </span>
+
+                            {w.note && (
+                              <span className="text-xs text-slate-400 font-mono italic">
+                                ({w.note})
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Hit Volume & Traffic Share */}
+                          <div className="flex items-center gap-3">
+                            <div className="text-right">
+                              <div className="text-sm font-bold font-mono text-white">
+                                {hits.toLocaleString()} <span className="text-xs font-normal text-slate-400">Total Hits</span>
+                              </div>
+                              <div className="text-[11px] font-mono text-emerald-400">
+                                {hits > 0 ? `${w.percent || 0}% of VPS Server Load` : 'Standby / Registered'}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Middle Line: Resource Intents & VPS Projects */}
+                        <div className="mt-3 pt-1 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                          {/* Left: Resource Intents */}
+                          <div className="bg-[#07090E] p-2.5 rounded-lg border border-slate-800/80">
+                            <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5 font-mono">
+                              <Activity className="w-3.5 h-3.5 text-emerald-400" />
+                              <span>Requested Resources & APIs:</span>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {w.intentsBreakdown && w.intentsBreakdown.length > 0 ? (
+                                w.intentsBreakdown.map((item, i) => (
+                                  <span
+                                    key={i}
+                                    className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-slate-800/90 text-slate-200 border border-slate-700/80 flex items-center gap-1.5"
+                                  >
+                                    <span className="text-emerald-400 font-bold">⚡ {item.name}:</span>
+                                    <span className="text-white font-bold">{item.count}</span>
+                                  </span>
+                                ))
+                              ) : (
+                                <span className="text-slate-500 font-mono text-[11px]">
+                                  {hits > 0 ? 'Standard API Access' : 'No active traffic in current buffer'}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Right: Target VPS Sites */}
+                          <div className="bg-[#07090E] p-2.5 rounded-lg border border-slate-800/80 flex flex-col justify-between">
+                            <div>
+                              <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5 font-mono">
+                                <Cpu className="w-3.5 h-3.5 text-cyan-400" />
+                                <span>Target VPS Site(s) Monitored:</span>
+                              </div>
+                              <div className="flex flex-wrap gap-1.5 mb-1.5">
+                                {w.projectsBreakdown && w.projectsBreakdown.length > 0 ? (
+                                  w.projectsBreakdown.map((item, i) => (
+                                    <span
+                                      key={i}
+                                      className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-cyan-950/30 text-cyan-300 border border-cyan-800/50 flex items-center gap-1.5"
+                                    >
+                                      <span>🎯 {item.name}:</span>
+                                      <span className="font-bold text-white">{item.count}</span>
+                                    </span>
+                                  ))
+                                ) : (
+                                  <span className="text-slate-500 font-mono text-[11px]">cstv.chimneysolutions.info</span>
+                                )}
+                              </div>
+                            </div>
+
+                            {w.ips && w.ips.length > 0 && (
+                              <div className="text-[11px] font-mono text-slate-400 flex items-center gap-1.5 pt-1.5 border-t border-slate-800/60 truncate">
+                                <span className="text-slate-500 font-bold">Caller IPs:</span>
+                                <span className="text-slate-300 truncate">{w.ips.join(', ')}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Bottom Line: 1-Click Action Bar */}
+                        <div className="mt-3 pt-2.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2">
+                          <div className="text-[11px] font-mono text-slate-400 flex items-center gap-2">
+                            <span>Last Seen:</span>
+                            <span className="text-white font-bold">
+                              {w.lastSeen ? (w.lastSeen.includes('T') ? w.lastSeen.split('T')[1].slice(0, 8) : w.lastSeen) : 'Standby'}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => handleToggleBlock(displayKey)}
+                              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition ${
+                                isBlocked
+                                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-md shadow-emerald-950/40'
+                                  : 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                              }`}
+                            >
+                              <Ban className="w-3.5 h-3.5" />
+                              <span>{isBlocked ? 'Unlock & Allow Partner' : 'Block Target'}</span>
+                            </button>
+
+                            <button
+                              onClick={() => openCustomMsgModal(displayKey)}
+                              className="px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs font-semibold flex items-center gap-1.5 transition"
+                            >
+                              <MessageSquare className="w-3.5 h-3.5" />
+                              <span>Set Screen Takeover</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB 2: NON-WHITELISTED CALLERS & BYPASS INTRUDERS (ALAG SECTION) */}
+          {activeTab === 'unauthorized' && (
+            <div className="p-4 flex-1 flex flex-col gap-4 overflow-y-auto">
+              {/* Alert Header Banner */}
+              <div className="bg-rose-950/30 border border-rose-800/80 rounded-xl p-3.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-9 h-9 rounded-lg bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400 shrink-0">
+                    <AlertOctagon className="w-5 h-5 animate-pulse" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white flex items-center gap-2 font-mono">
+                      <span>🚨 NON-WHITELISTED CALLERS & BYPASS THREATS</span>
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                        {filteredUnauthorized.length} Flagged
+                      </span>
+                    </h3>
+                    <p className="text-xs text-rose-200/80 mt-0.5 font-sans">
+                      Ye wo caller origins, scrapers aur direct IPs hain jo whitelist me nahi hain. Yahan se aap unhe 1-click me whitelist kar sakte hain ya permanently block kar sakte hain.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Unauthorized Cards Grid */}
+              {filteredUnauthorized.length === 0 ? (
+                <div className="py-16 text-center text-slate-500 font-sans">
+                  Zero non-whitelisted callers detected! All traffic is coming from authorized whitelisted partners.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3.5">
+                  {filteredUnauthorized.map((o) => {
+                    const hasBypass = o.bypassAttempts > 0;
+                    return (
+                      <div
+                        key={o.rawKey}
+                        className={`rounded-xl border p-4 transition-all duration-200 ${
+                          o.isBlocked
+                            ? 'bg-rose-950/30 border-rose-800 shadow-lg shadow-rose-950/30'
+                            : hasBypass
+                            ? 'bg-rose-950/20 border-rose-700/70 shadow-lg shadow-rose-950/20'
+                            : 'bg-amber-950/15 border-amber-800/60'
+                        }`}
+                      >
+                        {/* Top Line: Origin Name, Badges, Total Hits & % Load */}
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 pb-3 border-b border-slate-800/80">
+                          <div className="flex items-center gap-2.5 flex-wrap">
+                            <span className="font-bold text-white text-base font-mono tracking-tight flex items-center gap-1.5">
+                              {o.origin.startsWith('Direct') ? (
+                                <Server className="w-4 h-4 text-amber-400" />
+                              ) : (
+                                <Globe className="w-4 h-4 text-rose-400" />
+                              )}
+                              <span>{o.origin}</span>
+                            </span>
+
+                            {/* Unauthorized Warning Badge */}
+                            <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                              ⚠️ NOT WHITELISTED (UNAUTHORIZED HIT)
+                            </span>
+
+                            {/* Bypass Alert Badge */}
+                            {hasBypass ? (
+                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-rose-900/60 text-rose-200 border border-rose-600 animate-pulse flex items-center gap-1">
+                                <AlertOctagon className="w-3 h-3 text-rose-400" />
+                                <span>🚨 {o.bypassAttempts} BYPASS ATTEMPTS ({o.lastBypassReason || 'Direct API/Bot Hit'})</span>
+                              </span>
+                            ) : null}
+
+                            {o.isBlocked && (
+                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-rose-500/30 text-rose-200 border border-rose-500">
+                                ⛔ CURRENTLY BLOCKED
+                              </span>
+                            )}
+
+                            {o.hasCustomMessage && (
+                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 flex items-center gap-1">
+                                <MessageSquare className="w-3 h-3 text-purple-400" />
+                                <span>💬 SCREEN TAKEOVER ACTIVE</span>
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Hit Volume & Traffic Share */}
+                          <div className="flex items-center gap-3">
+                            <div className="text-right">
+                              <div className="text-sm font-bold font-mono text-white">
+                                {o.count.toLocaleString()} <span className="text-xs font-normal text-slate-400">Total Hits</span>
+                              </div>
+                              <div className="text-[11px] font-mono text-rose-400 font-bold">
+                                {o.percent}% of VPS Server Load
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Middle Line: "Bina Whitelist Ke Kya Hit Kar Raha Hai" */}
+                        <div className="mt-3 pt-1 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                          {/* Left: Resource Intents */}
+                          <div className="bg-[#07090E] p-2.5 rounded-lg border border-slate-800/80">
+                            <div className="text-[11px] font-bold text-rose-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5 font-mono">
+                              <AlertTriangle className="w-3.5 h-3.5 text-rose-400" />
+                              <span>Bina Whitelist Ke Kya Access Kar Raha Hai:</span>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {o.intentsBreakdown && o.intentsBreakdown.length > 0 ? (
+                                o.intentsBreakdown.map((item, idx) => (
+                                  <span
+                                    key={idx}
+                                    className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-rose-950/40 text-rose-200 border border-rose-800/50 flex items-center gap-1.5"
+                                  >
+                                    <span className="text-rose-400 font-bold">⚠️ {item.name}:</span>
+                                    <span className="text-white font-bold">{item.count}</span>
+                                  </span>
+                                ))
+                              ) : (
+                                <span className="text-slate-500 font-mono text-[11px]">API / Stream Requests</span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Right: Target VPS Sites & Caller IPs */}
+                          <div className="bg-[#07090E] p-2.5 rounded-lg border border-slate-800/80 flex flex-col justify-between">
+                            <div>
+                              <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5 font-mono">
+                                <Cpu className="w-3.5 h-3.5 text-cyan-400" />
+                                <span>Target VPS Site(s) Hit:</span>
+                              </div>
+                              <div className="flex flex-wrap gap-1.5 mb-2">
+                                {o.projectsBreakdown && o.projectsBreakdown.length > 0 ? (
+                                  o.projectsBreakdown.map((item, idx) => (
+                                    <span
+                                      key={idx}
+                                      className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-cyan-950/30 text-cyan-300 border border-cyan-800/50 flex items-center gap-1.5"
+                                    >
+                                      <span>🎯 {item.name}:</span>
+                                      <span className="font-bold text-white">{item.count}</span>
+                                    </span>
+                                  ))
+                                ) : (
+                                  <span className="text-slate-500 font-mono text-[11px]">cstv.chimneysolutions.info</span>
+                                )}
+                              </div>
+                            </div>
+
+                            {o.ips && o.ips.length > 0 && (
+                              <div className="text-[11px] font-mono text-slate-400 flex items-center gap-1.5 pt-1.5 border-t border-slate-800/60 truncate">
+                                <span className="text-slate-500 font-bold">Caller IPs:</span>
+                                <span className="text-slate-300 truncate">{o.ips.join(', ')}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Bottom Line: 1-Click Action Bar */}
+                        <div className="mt-3 pt-2.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2">
+                          <div className="text-[11px] font-mono text-slate-400 flex items-center gap-2">
+                            <span>Last Active:</span>
+                            <span className="text-white font-bold">
+                              {o.lastSeen ? o.lastSeen.split('T')[1].slice(0, 8) : 'Live Now'}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            {/* 1-Click Whitelist Button */}
+                            <button
+                              onClick={() => handleQuickWhitelist(o.origin)}
+                              className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 transition shadow-md shadow-emerald-950/40"
+                            >
+                              <ShieldCheck className="w-3.5 h-3.5" />
+                              <span>✅ Whitelist This Origin</span>
+                            </button>
+
+                            {/* Block / Unlock Toggle Button */}
+                            <button
+                              onClick={() => handleToggleBlock(o.origin)}
+                              className="px-3 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs font-semibold flex items-center gap-1.5 transition"
+                            >
+                              <Ban className="w-3.5 h-3.5" />
+                              <span>{o.isBlocked ? 'Unlock Target' : '⛔ Block Target'}</span>
+                            </button>
+
+                            {/* Set Custom Screen Takeover Message Button */}
+                            <button
+                              onClick={() => openCustomMsgModal(o.origin)}
+                              className="px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs font-semibold flex items-center gap-1.5 transition"
+                            >
+                              <MessageSquare className="w-3.5 h-3.5" />
+                              <span>💬 Set Screen Takeover</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB 3: ALL CALLERS CONSOLIDATED MATRIX */}
+          {activeTab === 'all_origins' && (
             <div className="p-4 flex-1 flex flex-col gap-4 overflow-y-auto">
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
                 <div>
                   <h3 className="text-sm font-bold text-white flex items-center gap-2">
                     <Globe className="w-4 h-4 text-emerald-400" />
-                    <span>Origin & Caller Intelligence Matrix</span>
+                    <span>Consolidated Callers Matrix (All Traffic Sources)</span>
                     <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                      {origins.length} Active Origins Detected
+                      {origins.length} Total Callers
                     </span>
                   </h3>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    Live breakdown of all caller domains & direct bot IPs hitting this VPS. Shows exact hits, resource breakdown ("kis kis cheez ka request hai"), bypass detection status, and 1-click countermeasure controls.
+                    Unified view of all whitelisted and non-whitelisted callers recorded in the current server lifecycle.
                   </p>
                 </div>
               </div>
@@ -1086,13 +1635,13 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
                           </div>
                         </div>
 
-                        {/* Middle Line: "Kis Kis Cheez Ka Request Aa Raha Hai" (Resource Intents Breakdown) */}
+                        {/* Middle Line: Resource Intents & VPS Projects */}
                         <div className="mt-3 pt-1 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
                           {/* Left: Resource Intents Breakdown */}
                           <div className="bg-[#07090E] p-2.5 rounded-lg border border-slate-800/80">
                             <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5 font-mono">
                               <Activity className="w-3.5 h-3.5 text-emerald-400" />
-                              <span>Kis Kis Cheez Ka Request Aa Raha Hai (Resource Breakdown):</span>
+                              <span>Kis Kis Cheez Ka Request Aa Raha Hai:</span>
                             </div>
                             <div className="flex flex-wrap gap-1.5">
                               {o.intentsBreakdown && o.intentsBreakdown.length > 0 ? (
@@ -1135,7 +1684,6 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
                               </div>
                             </div>
 
-                            {/* Caller IPs */}
                             {o.ips && o.ips.length > 0 && (
                               <div className="text-[11px] font-mono text-slate-400 flex items-center gap-1.5 pt-1.5 border-t border-slate-800/60 truncate">
                                 <span className="text-slate-500 font-bold">Caller IPs:</span>
@@ -1155,7 +1703,6 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
                           </div>
 
                           <div className="flex items-center gap-2">
-                            {/* Block / Unlock Toggle Button */}
                             <button
                               onClick={() => handleToggleBlock(o.origin)}
                               className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition ${
@@ -1168,7 +1715,6 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
                               <span>{o.isBlocked ? 'Unlock & Allow Origin' : 'Block This Origin'}</span>
                             </button>
 
-                            {/* Set Custom Screen Takeover Message Button */}
                             <button
                               onClick={() => openCustomMsgModal(o.origin)}
                               className="px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs font-semibold flex items-center gap-1.5 transition"
@@ -1177,7 +1723,6 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
                               <span>Set Screen Takeover Message</span>
                             </button>
 
-                            {/* Whitelist Origin Button */}
                             {!o.isWhitelisted && !o.isBlocked && (
                               <button
                                 onClick={() => handleQuickWhitelist(o.origin)}

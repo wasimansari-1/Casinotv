@@ -1000,7 +1000,13 @@ function processTelemetryRecord({
     originLabel = clientIp !== '127.0.0.1' && clientIp !== 'Unknown' ? `Direct: ${clientIp}` : 'Direct (No Referer)';
   }
 
-  const entry = whitelistMap.get(domain || originCleanKey);
+  // Exact Whitelist & Bypass check using domain and IP matching
+  const domainMatched = domain ? findMatchedEntry(domain) : null;
+  const ipMatched = (clientIp && clientIp !== '127.0.0.1' && clientIp !== 'Unknown') ? findMatchedEntry(clientIp) : null;
+  const matchedEntry = domainMatched || ipMatched;
+  const isEntityWhitelisted = Boolean(matchedEntry && matchedEntry.status === 'active');
+  const isEntityBlocked = Boolean(matchedEntry && matchedEntry.status === 'blocked') || isCompetitor;
+
   let oStat = telemetryState.originStatsMap.get(originCleanKey);
   if (!oStat) {
     oStat = {
@@ -1017,8 +1023,16 @@ function processTelemetryRecord({
       bypassAttempts: 0,
       lastBypassReason: '',
       lastSeen: new Date().toISOString(),
-      isWhitelisted: Boolean(entry && entry.status === 'active'),
-      isBlocked: Boolean(entry && entry.status === 'blocked'),
+      isWhitelisted: isEntityWhitelisted,
+      isBlocked: isEntityBlocked,
+      whitelistedEntry: matchedEntry ? {
+        domain: matchedEntry.domain,
+        entryType: matchedEntry.entryType || (matchedEntry.domain.match(/^(\d{1,3}\.){3}\d{1,3}$/) ? 'ip' : 'domain'),
+        casino: matchedEntry.casino,
+        sports: matchedEntry.sports,
+        note: matchedEntry.note || '',
+        status: matchedEntry.status
+      } : null,
       hasCustomMessage: Boolean(getCustomMessageForDomain(domain))
     };
     telemetryState.originStatsMap.set(originCleanKey, oStat);
@@ -1035,8 +1049,18 @@ function processTelemetryRecord({
     oStat.lastBypassReason = bypassReason;
   }
   oStat.lastSeen = new Date().toISOString();
-  oStat.isWhitelisted = Boolean(entry && entry.status === 'active');
-  oStat.isBlocked = Boolean(entry && entry.status === 'blocked');
+  oStat.isWhitelisted = isEntityWhitelisted;
+  oStat.isBlocked = isEntityBlocked;
+  if (matchedEntry) {
+    oStat.whitelistedEntry = {
+      domain: matchedEntry.domain,
+      entryType: matchedEntry.entryType || (matchedEntry.domain.match(/^(\d{1,3}\.){3}\d{1,3}$/) ? 'ip' : 'domain'),
+      casino: matchedEntry.casino,
+      sports: matchedEntry.sports,
+      note: matchedEntry.note || '',
+      status: matchedEntry.status
+    };
+  }
   oStat.hasCustomMessage = Boolean(getCustomMessageForDomain(domain));
 
   // Intent aggregation
@@ -1279,6 +1303,36 @@ router.get('/api/master/telemetry', requireMasterAuth, async (req, res) => {
     percent: telemetryState.totalRequests > 0 ? Math.round((o.count / telemetryState.totalRequests) * 1000) / 10 : 0
   })).sort((a, b) => b.count - a.count);
 
+  // 1. All Whitelisted Entities (Domains and Whitelisted IPs from DB + Live Stats)
+  const allWhitelistDb = Array.from(whitelistMap.values()).map(w => {
+    const cleanKey = (w.domain || '').toLowerCase().trim();
+    const liveStat = origins.find(o => 
+      o.origin.toLowerCase().includes(cleanKey) || 
+      (o.domain && o.domain.toLowerCase() === cleanKey) ||
+      (o.rawKey && o.rawKey.toLowerCase().includes(cleanKey)) ||
+      (o.primaryIp && o.primaryIp === cleanKey)
+    );
+    return {
+      ...w,
+      entryType: w.entryType || (w.domain.match(/^(\d{1,3}\.){3}\d{1,3}$/) ? 'ip' : 'domain'),
+      liveHits: liveStat ? liveStat.count : 0,
+      liveAllowed: liveStat ? liveStat.allowed : 0,
+      liveBlocked: liveStat ? liveStat.blocked : 0,
+      percent: liveStat ? liveStat.percent : 0,
+      intentsBreakdown: liveStat?.intentsBreakdown || [],
+      projectsBreakdown: liveStat?.projectsBreakdown || [],
+      ips: liveStat ? liveStat.ips : [w.domain],
+      lastSeen: liveStat ? liveStat.lastSeen : w.lastAccess || null,
+      isActiveCaller: Boolean(liveStat && liveStat.count > 0)
+    };
+  }).sort((a, b) => b.liveHits - a.liveHits);
+
+  // Active callers that are verified whitelisted
+  const whitelistedOrigins = origins.filter(o => o.isWhitelisted);
+
+  // 2. Unauthorized / Non-Whitelisted / Bypassers (Callers hitting WITHOUT being whitelisted, scrapers, bots, bypassers)
+  const unauthorizedOrigins = origins.filter(o => !o.isWhitelisted || o.bypassAttempts > 0 || o.isBlocked);
+
   // Intents list formatted
   const intents = Array.from(telemetryState.intentStatsMap.entries()).map(([intent, count]) => ({
     intent,
@@ -1338,11 +1392,17 @@ router.get('/api/master/telemetry', requireMasterAuth, async (req, res) => {
       allowedRequests: telemetryState.allowedRequests,
       blockedRequests: telemetryState.blockedRequests,
       totalOrigins: telemetryState.originStatsMap.size,
+      whitelistedCount: whitelistedOrigins.length,
+      whitelistedDbCount: allWhitelistDb.length,
+      unauthorizedCount: unauthorizedOrigins.length,
       totalBypassAlerts: telemetryState.bypassAlerts.length,
       enforceWhitelist,
       allowDirectAccess
     },
     origins,
+    whitelistedList: allWhitelistDb,
+    whitelistedOrigins,
+    unauthorizedOrigins,
     intents,
     recentRequests: filteredRequests,
     bypassAlerts: telemetryState.bypassAlerts.slice(0, 60),
@@ -1444,10 +1504,10 @@ router.get('/api/master/domains', requireMasterAuth, (req, res) => {
   res.json({ success: true, count: list.length, domains: list });
 });
 
-// 8. Add Whitelist Domain
+// 8. Add Whitelist Domain / IP
 router.post('/api/master/domains', requireMasterAuth, async (req, res) => {
-  let { domain, casino, sports, note } = req.body;
-  if (!domain) return res.status(400).json({ success: false, error: 'Domain is required' });
+  let { domain, casino, sports, note, comment } = req.body;
+  if (!domain) return res.status(400).json({ success: false, error: 'Domain or IP is required' });
 
   let clean = domain.trim().toLowerCase();
   clean = clean.replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
@@ -1459,7 +1519,32 @@ router.post('/api/master/domains', requireMasterAuth, async (req, res) => {
     casino: casino !== undefined ? Boolean(casino) : true,
     sports: sports !== undefined ? Boolean(sports) : true,
     status: 'active',
-    note: note || '',
+    note: note || comment || '',
+    hitCount: 0,
+    lastAccess: null,
+    createdAt: new Date().toISOString()
+  };
+
+  whitelistMap.set(clean, entry);
+  await syncToRedis();
+  res.json({ success: true, domain: entry });
+});
+
+router.post('/api/master/whitelist', requireMasterAuth, async (req, res) => {
+  let { domain, casino, sports, note, comment } = req.body;
+  if (!domain) return res.status(400).json({ success: false, error: 'Domain or IP is required' });
+
+  let clean = domain.trim().toLowerCase();
+  clean = clean.replace(/^https?:\/\//, '').split('/')[0].split(':')[0];
+  const isIp = /^(\d{1,3}\.){3}\d{1,3}$/.test(clean) || clean.includes(':');
+
+  const entry = {
+    domain: clean,
+    entryType: isIp ? 'ip' : 'domain',
+    casino: casino !== undefined ? Boolean(casino) : true,
+    sports: sports !== undefined ? Boolean(sports) : true,
+    status: 'active',
+    note: note || comment || 'Quick Whitelisted',
     hitCount: 0,
     lastAccess: null,
     createdAt: new Date().toISOString()
