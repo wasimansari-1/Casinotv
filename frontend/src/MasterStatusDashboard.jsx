@@ -42,10 +42,10 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
   // Live Telemetry Data
   const [telemetry, setTelemetry] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [autoRefreshInterval, setAutoRefreshInterval] = useState(3000); // 3s default
+  const [autoRefreshInterval, setAutoRefreshInterval] = useState(5000); // 5s smooth non-fluctuating default
   const [lastUpdated, setLastUpdated] = useState(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeTab, setActiveTab] = useState('traffic'); // 'traffic' | 'origins' | 'bypass' | 'countermeasures'
+  const [activeTab, setActiveTab] = useState('origins'); // 'origins' is primary focus!
   const [intentFilter, setIntentFilter] = useState('ALL');
   const [actionFilter, setActionFilter] = useState('ALL');
   const [projectFilter, setProjectFilter] = useState('ALL');
@@ -144,10 +144,16 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
   }, [token, autoRefreshInterval]);
 
   // 1-Click Toggle Block / Unlock
-  const handleToggleBlock = async (domain) => {
-    if (!domain || domain === 'Direct (No Referer)') return;
+  const handleToggleBlock = async (rawTarget) => {
+    if (!rawTarget) return;
+    let target = rawTarget;
+    if (rawTarget.startsWith('Direct: ')) {
+      target = rawTarget.replace('Direct: ', '').trim();
+    }
+    if (target === 'Direct (No Referer)' || target === 'direct_unknown') return;
+
     try {
-      const res = await fetch(`/api/master/domains/${encodeURIComponent(domain)}/toggle-block`, {
+      const res = await fetch(`/api/master/domains/${encodeURIComponent(target)}/toggle-block`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -157,11 +163,42 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
       const data = await res.json();
       if (data.success) {
         const isBlocked = data.domain?.status === 'blocked';
-        showActionStatus('success', `Origin "${domain}" is now ${isBlocked ? 'BLOCKED ⛔' : 'ACTIVE & UNLOCKED ✅'}`);
+        showActionStatus('success', `Target "${target}" is now ${isBlocked ? 'BLOCKED ⛔' : 'ACTIVE & UNLOCKED ✅'}`);
         fetchTelemetry();
       }
     } catch (err) {
       showActionStatus('error', 'Failed to toggle block status');
+    }
+  };
+
+  // 1-Click Whitelist Domain or IP
+  const handleQuickWhitelist = async (rawTarget) => {
+    if (!rawTarget) return;
+    let target = rawTarget;
+    if (rawTarget.startsWith('Direct: ')) {
+      target = rawTarget.replace('Direct: ', '').trim();
+    }
+    try {
+      const res = await fetch('/api/master/whitelist', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          domain: target,
+          casino: true,
+          sports: true,
+          comment: 'Quick Whitelist from Origin Matrix'
+        })
+      });
+      const data = await res.json();
+      if (data.success) {
+        showActionStatus('success', `"${target}" whitelisted successfully! ✅`);
+        fetchTelemetry();
+      }
+    } catch (_) {
+      showActionStatus('error', 'Failed to whitelist target');
     }
   };
 
@@ -714,6 +751,18 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between border-b border-slate-800 p-2 sm:px-4 bg-[#090C14]">
             <div className="flex items-center gap-1 overflow-x-auto custom-scroll pb-1 sm:pb-0">
               <button
+                onClick={() => setActiveTab('origins')}
+                className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition whitespace-nowrap ${
+                  activeTab === 'origins'
+                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+                }`}
+              >
+                <Globe className="w-3.5 h-3.5" />
+                <span>Origin Intelligence Matrix ({origins.length})</span>
+              </button>
+
+              <button
                 onClick={() => setActiveTab('traffic')}
                 className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition whitespace-nowrap ${
                   activeTab === 'traffic'
@@ -723,18 +772,6 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
               >
                 <Terminal className="w-3.5 h-3.5" />
                 <span>Real-Time Request Stream ({filteredRequests.length})</span>
-              </button>
-
-              <button
-                onClick={() => setActiveTab('origins')}
-                className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition whitespace-nowrap ${
-                  activeTab === 'origins'
-                    ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/30'
-                    : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
-                }`}
-              >
-                <Globe className="w-3.5 h-3.5" />
-                <span>Origin & Domain Intelligence ({origins.length})</span>
               </button>
 
               <button
@@ -819,12 +856,12 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
             </div>
           </div>
 
-          {/* TAB 1: REAL-TIME TRAFFIC INSPECTOR STREAM */}
+          {/* TAB 2: REAL-TIME TRAFFIC INSPECTOR STREAM */}
           {activeTab === 'traffic' && (
-            <div className="flex-1 overflow-x-auto">
+            <div className="flex-1 overflow-x-auto max-h-[640px] overflow-y-auto custom-scroll">
               <table className="w-full text-left border-collapse text-xs">
-                <thead>
-                  <tr className="border-b border-slate-800 bg-[#090C14]/70 text-slate-400 font-mono text-[11px] uppercase tracking-wider">
+                <thead className="sticky top-0 bg-[#090C14] z-10 shadow-sm shadow-slate-900">
+                  <tr className="border-b border-slate-800 bg-[#090C14] text-slate-400 font-mono text-[11px] uppercase tracking-wider">
                     <th className="py-2.5 px-3">Timestamp</th>
                     <th className="py-2.5 px-3">Target VPS Site</th>
                     <th className="py-2.5 px-3">Caller IP</th>
@@ -943,104 +980,220 @@ export default function MasterStatusDashboard({ onBack, onNavigateWhitelist }) {
             </div>
           )}
 
-          {/* TAB 2: ORIGIN & DOMAIN INTELLIGENCE */}
+          {/* TAB 1: ORIGIN & THREAT INTELLIGENCE MATRIX (PRIMARY VIEW) */}
           {activeTab === 'origins' && (
-            <div className="p-4 flex-1 flex flex-col gap-4">
-              <div className="text-xs text-slate-400">
-                Summary of all caller domains and origins communicating with this VPS. You can block any unauthorized origin or set a customized takeover warning with 1 click.
+            <div className="p-4 flex-1 flex flex-col gap-4 overflow-y-auto">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
+                <div>
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Globe className="w-4 h-4 text-emerald-400" />
+                    <span>Origin & Caller Intelligence Matrix</span>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+                      {origins.length} Active Origins Detected
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Live breakdown of all caller domains & direct bot IPs hitting this VPS. Shows exact hits, resource breakdown ("kis kis cheez ka request hai"), bypass detection status, and 1-click countermeasure controls.
+                  </p>
+                </div>
               </div>
 
-              <div className="overflow-x-auto">
-                <table className="w-full text-left border-collapse text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-800 bg-[#090C14]/70 text-slate-400 font-mono text-[11px] uppercase tracking-wider">
-                      <th className="py-2.5 px-3">Origin / Domain</th>
-                      <th className="py-2.5 px-3">Guard Status</th>
-                      <th className="py-2.5 px-3">Requests Volume</th>
-                      <th className="py-2.5 px-3">% of Total Load</th>
-                      <th className="py-2.5 px-3">Allowed vs Blocked</th>
-                      <th className="py-2.5 px-3">Countermeasure Notice</th>
-                      <th className="py-2.5 px-3">Last Seen</th>
-                      <th className="py-2.5 px-3 text-right">Countermeasure Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800/60 font-mono text-xs">
-                    {origins.length === 0 ? (
-                      <tr>
-                        <td colSpan={8} className="py-12 text-center text-slate-500 font-sans">
-                          No origin telemetry recorded yet.
-                        </td>
-                      </tr>
-                    ) : (
-                      origins.map((o) => (
-                        <tr key={o.rawKey} className="hover:bg-slate-800/30 transition">
-                          <td className="py-3 px-3">
-                            <span className="font-bold text-white text-sm">{o.origin}</span>
-                          </td>
-                          <td className="py-3 px-3">
+              {origins.length === 0 ? (
+                <div className="py-16 text-center text-slate-500 font-sans">
+                  No active caller origins recorded yet. Waiting for incoming traffic...
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-3.5">
+                  {origins.map((o) => {
+                    const hasBypass = o.bypassAttempts > 0;
+                    return (
+                      <div
+                        key={o.rawKey}
+                        className={`rounded-xl border p-4 transition-all duration-200 ${
+                          o.isBlocked
+                            ? 'bg-rose-950/20 border-rose-800/60 shadow-lg shadow-rose-950/20'
+                            : hasBypass
+                            ? 'bg-amber-950/20 border-amber-800/60 shadow-lg shadow-amber-950/20'
+                            : o.isWhitelisted
+                            ? 'bg-[#0B101D] border-emerald-800/40 shadow-lg shadow-emerald-950/10'
+                            : 'bg-[#0B101D] border-slate-800'
+                        }`}
+                      >
+                        {/* Top Line: Origin Name, Badges, Total Hits & % Load */}
+                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-2 pb-3 border-b border-slate-800/80">
+                          <div className="flex items-center gap-2.5 flex-wrap">
+                            <span className="font-bold text-white text-base font-mono tracking-tight flex items-center gap-1.5">
+                              {o.origin.startsWith('Direct') ? (
+                                <Server className="w-4 h-4 text-amber-400" />
+                              ) : (
+                                <Globe className="w-4 h-4 text-cyan-400" />
+                              )}
+                              <span>{o.origin}</span>
+                            </span>
+
+                            {/* Guard Status Badge */}
                             {o.isBlocked ? (
-                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30">
-                                ⛔ BLOCKED
+                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                                ⛔ ACCESS BLOCKED
                               </span>
                             ) : o.isWhitelisted ? (
-                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
-                                ✅ WHITELISTED
+                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                                ✅ WHITELISTED PARTNER
                               </span>
                             ) : (
-                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">
-                                ⚠️ UNLISTED
+                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                                ⚠️ UNLISTED ORIGIN
                               </span>
                             )}
-                          </td>
-                          <td className="py-3 px-3 font-bold text-white">{o.count.toLocaleString()}</td>
-                          <td className="py-3 px-3 text-cyan-300 font-semibold">{o.percent}%</td>
-                          <td className="py-3 px-3">
-                            <span className="text-emerald-400 font-semibold">{o.allowed}</span>
-                            <span className="text-slate-500 mx-1">/</span>
-                            <span className="text-rose-400 font-semibold">{o.blocked}</span>
-                          </td>
-                          <td className="py-3 px-3">
-                            {o.hasCustomMessage ? (
-                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                                💬 ACTIVE NOTICE
+
+                            {/* Bypass / Anti-Theft Status Badge */}
+                            {hasBypass ? (
+                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-rose-900/40 text-rose-300 border border-rose-700 animate-pulse flex items-center gap-1">
+                                <AlertOctagon className="w-3 h-3 text-rose-400" />
+                                <span>🚨 {o.bypassAttempts} BYPASS ATTEMPTS ({o.lastBypassReason || 'Direct Stream / Bot Hit'})</span>
                               </span>
                             ) : (
-                              <span className="text-slate-500 text-[11px]">Standard Guard</span>
+                              <span className="px-2.5 py-0.5 rounded text-[11px] font-medium bg-emerald-950/30 text-emerald-400 border border-emerald-800/50 flex items-center gap-1">
+                                <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                                <span>Zero Security Bypass</span>
+                              </span>
                             )}
-                          </td>
-                          <td className="py-3 px-3 text-slate-400 text-[11px]">
-                            {o.lastSeen ? o.lastSeen.split('T')[1].slice(0, 8) : '-'}
-                          </td>
-                          <td className="py-3 px-3 text-right">
-                            <div className="flex items-center justify-end gap-2 font-sans">
-                              {o.origin && !o.origin.includes('Direct') && (
-                                <>
-                                  <button
-                                    onClick={() => handleToggleBlock(o.origin)}
-                                    className={`px-2.5 py-1 rounded text-xs font-semibold transition ${
-                                      o.isBlocked
-                                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
-                                        : 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30'
-                                    }`}
+
+                            {/* Active Custom Takeover Notice Badge */}
+                            {o.hasCustomMessage && (
+                              <span className="px-2.5 py-0.5 rounded text-[11px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/40 flex items-center gap-1">
+                                <MessageSquare className="w-3 h-3 text-purple-400" />
+                                <span>💬 SCREEN TAKEOVER ACTIVE</span>
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Hit Volume & Traffic Share */}
+                          <div className="flex items-center gap-3">
+                            <div className="text-right">
+                              <div className="text-sm font-bold font-mono text-white">
+                                {o.count.toLocaleString()} <span className="text-xs font-normal text-slate-400">Total Hits</span>
+                              </div>
+                              <div className="text-[11px] font-mono text-cyan-400">
+                                {o.percent}% of VPS Server Load
+                              </div>
+                            </div>
+
+                            <div className="flex flex-col text-right text-[11px] font-mono pl-3 border-l border-slate-800">
+                              <span className="text-emerald-400 font-bold">{o.allowed} Allowed</span>
+                              <span className="text-rose-400 font-bold">{o.blocked} Blocked</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Middle Line: "Kis Kis Cheez Ka Request Aa Raha Hai" (Resource Intents Breakdown) */}
+                        <div className="mt-3 pt-1 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                          {/* Left: Resource Intents Breakdown */}
+                          <div className="bg-[#07090E] p-2.5 rounded-lg border border-slate-800/80">
+                            <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5 font-mono">
+                              <Activity className="w-3.5 h-3.5 text-emerald-400" />
+                              <span>Kis Kis Cheez Ka Request Aa Raha Hai (Resource Breakdown):</span>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {o.intentsBreakdown && o.intentsBreakdown.length > 0 ? (
+                                o.intentsBreakdown.map((item, idx) => (
+                                  <span
+                                    key={idx}
+                                    className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-slate-800/90 text-slate-200 border border-slate-700/80 flex items-center gap-1.5"
                                   >
-                                    {o.isBlocked ? 'Unlock' : 'Block Origin'}
-                                  </button>
-                                  <button
-                                    onClick={() => openCustomMsgModal(o.origin)}
-                                    className="px-2.5 py-1 rounded bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs font-semibold transition"
-                                  >
-                                    Set Custom Msg
-                                  </button>
-                                </>
+                                    <span className="text-emerald-400 font-bold">⚡ {item.name}:</span>
+                                    <span className="text-white font-bold">{item.count}</span>
+                                  </span>
+                                ))
+                              ) : (
+                                <span className="text-slate-500 font-mono text-[11px]">General API Traffic</span>
                               )}
                             </div>
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
+                          </div>
+
+                          {/* Right: Target VPS Sites & Caller IPs */}
+                          <div className="bg-[#07090E] p-2.5 rounded-lg border border-slate-800/80 flex flex-col justify-between">
+                            <div>
+                              <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1.5 flex items-center gap-1.5 font-mono">
+                                <Cpu className="w-3.5 h-3.5 text-cyan-400" />
+                                <span>Target VPS Site(s) Hit:</span>
+                              </div>
+                              <div className="flex flex-wrap gap-1.5 mb-2">
+                                {o.projectsBreakdown && o.projectsBreakdown.length > 0 ? (
+                                  o.projectsBreakdown.map((item, idx) => (
+                                    <span
+                                      key={idx}
+                                      className="px-2 py-0.5 rounded text-[11px] font-mono font-semibold bg-cyan-950/30 text-cyan-300 border border-cyan-800/50 flex items-center gap-1.5"
+                                    >
+                                      <span>🎯 {item.name}:</span>
+                                      <span className="font-bold text-white">{item.count}</span>
+                                    </span>
+                                  ))
+                                ) : (
+                                  <span className="text-slate-500 font-mono text-[11px]">cstv.chimneysolutions.info</span>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Caller IPs */}
+                            {o.ips && o.ips.length > 0 && (
+                              <div className="text-[11px] font-mono text-slate-400 flex items-center gap-1.5 pt-1.5 border-t border-slate-800/60 truncate">
+                                <span className="text-slate-500 font-bold">Caller IPs:</span>
+                                <span className="text-slate-300 truncate">{o.ips.join(', ')}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Bottom Line: 1-Click Action Bar */}
+                        <div className="mt-3 pt-2.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2">
+                          <div className="text-[11px] font-mono text-slate-400 flex items-center gap-2">
+                            <span>Last Active:</span>
+                            <span className="text-white font-bold">
+                              {o.lastSeen ? o.lastSeen.split('T')[1].slice(0, 8) : 'Live Now'}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            {/* Block / Unlock Toggle Button */}
+                            <button
+                              onClick={() => handleToggleBlock(o.origin)}
+                              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition ${
+                                o.isBlocked
+                                  ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-md shadow-emerald-950/40'
+                                  : 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                              }`}
+                            >
+                              <Ban className="w-3.5 h-3.5" />
+                              <span>{o.isBlocked ? 'Unlock & Allow Origin' : 'Block This Origin'}</span>
+                            </button>
+
+                            {/* Set Custom Screen Takeover Message Button */}
+                            <button
+                              onClick={() => openCustomMsgModal(o.origin)}
+                              className="px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs font-semibold flex items-center gap-1.5 transition"
+                            >
+                              <MessageSquare className="w-3.5 h-3.5" />
+                              <span>Set Screen Takeover Message</span>
+                            </button>
+
+                            {/* Whitelist Origin Button */}
+                            {!o.isWhitelisted && !o.isBlocked && (
+                              <button
+                                onClick={() => handleQuickWhitelist(o.origin)}
+                                className="px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-xs font-semibold flex items-center gap-1.5 transition"
+                              >
+                                <ShieldCheck className="w-3.5 h-3.5" />
+                                <span>Whitelist</span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           )}
 

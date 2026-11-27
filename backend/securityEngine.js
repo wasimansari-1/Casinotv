@@ -901,6 +901,203 @@ function scanVpsProjects() {
   });
 }
 
+function resolveProjectForRequest(pathStr, projectLabel, hostHeader) {
+  if (hostHeader && typeof hostHeader === 'string') {
+    const cleanHost = hostHeader.split(':')[0].trim().toLowerCase();
+    if (cleanHost && cleanHost !== 'localhost' && cleanHost !== '127.0.0.1') {
+      return cleanHost;
+    }
+  }
+  if (projectLabel && typeof projectLabel === 'string' && projectLabel !== 'access' && projectLabel !== 'vps') {
+    return projectLabel;
+  }
+  if (!pathStr || typeof pathStr !== 'string') return 'cstv.chimneysolutions.info';
+  if (pathStr.startsWith('/api/stream/sports') || pathStr.startsWith('/api/stream/player') || pathStr.startsWith('/api/stream/tables') || pathStr.startsWith('/api/stream/ws')) {
+    return 'cstv.chimneysolutions.info';
+  }
+  if (pathStr.startsWith('/api/sports/live-rates') || pathStr.startsWith('/api/sports/market-results') || pathStr.startsWith('/api/sports/') || pathStr.startsWith('/api/exchange/')) {
+    return 'diamondapi.cc';
+  }
+  if (pathStr.startsWith('/api/stream')) {
+    return 'cstv.chimneysolutions.info';
+  }
+  return 'cstv.chimneysolutions.info';
+}
+
+function classifyRequestIntent(pathname) {
+  if (!pathname || typeof pathname !== 'string') return 'Unknown API Request';
+  if (pathname.startsWith('/api/stream/sports/player/')) return 'Sports TV Video Stream';
+  if (pathname.startsWith('/api/stream/player/')) return 'Casino TV Video Stream';
+  if (pathname.startsWith('/api/stream/sports/events') || pathname === '/api/sports/events') return 'Sports Matches List';
+  if (pathname.startsWith('/api/stream/tables')) return 'Casino Tables List';
+  if (pathname.startsWith('/api/sports/live-rates')) return 'Live Sports Rates & Scores';
+  if (pathname.startsWith('/api/sports/market-results')) return 'Market Results & Settlement';
+  if (pathname.startsWith('/api/exchange/')) return 'Betfair Exchange Rates';
+  if (pathname.includes('/ping') || pathname.includes('/proxy-ping')) return 'Token Pre-Warm & Ping';
+  if (pathname.startsWith('/api/stream/ws') || pathname.startsWith('/ws')) return 'WebRTC WebSocket Tunnel';
+  if (pathname.startsWith('/api/stream/sports/hls/')) return 'Sports HLS Video Feed';
+  if (pathname.startsWith('/api/master/')) return 'Master Security Admin API';
+  if (pathname === '/master' || pathname === '/status' || pathname === '/master/status') return 'Master Dashboard Portal';
+  if (pathname.endsWith('.js') || pathname.endsWith('.css') || pathname.endsWith('.png') || pathname.endsWith('.svg') || pathname.endsWith('.ico') || pathname.endsWith('.jpg') || pathname.endsWith('.woff2')) return 'Static Web Assets';
+  if (pathname.startsWith('/api/stream/')) return 'Casino & Sports Stream Engine';
+  if (pathname.startsWith('/api/sports/')) return 'Sports Exchange API';
+  if (pathname === '/' || pathname.endsWith('.html')) return 'Frontend Web UI';
+  return 'General API Request';
+}
+
+// Universal Telemetry Record Processor (Handles both live Express requests & Nginx logs)
+function processTelemetryRecord({
+  ip,
+  domain,
+  referer,
+  pathStr,
+  method = 'GET',
+  statusCode = 200,
+  durationMs = 0,
+  hostHeader = '',
+  projectLabel = '',
+  ua = ''
+}) {
+  const now = Date.now();
+  const isBlocked = statusCode === 403 || statusCode === 401;
+  const clientIp = ip || 'Unknown';
+  const resolvedProject = resolveProjectForRequest(pathStr, projectLabel, hostHeader);
+  const intent = classifyRequestIntent(pathStr);
+
+  telemetryState.totalRequests++;
+  if (isBlocked) telemetryState.blockedRequests++;
+  else telemetryState.allowedRequests++;
+
+  // Update rolling req/sec rate tracker (last 60s window)
+  const sec = Math.floor(now / 1000);
+  const samples = telemetryState.rateTracker.samples;
+  if (samples.length > 0 && samples[samples.length - 1].sec === sec) {
+    samples[samples.length - 1].count++;
+  } else {
+    samples.push({ sec, count: 1 });
+    while (samples.length > 60) samples.shift();
+  }
+
+  // Determine bypass/theft attempt
+  const isPostmanOrCurl = ua.includes('Postman') || ua.includes('curl/') || ua.includes('python-requests') || ua.includes('Go-http-client');
+  const isCompetitor = (domain && (domain.includes('series444') || domain.includes('baji8dot') || domain.includes('oddsdata')));
+  const isDirectStreamBypass = (!domain || domain === 'Direct') && clientIp !== '127.0.0.1' && (pathStr.startsWith('/api/stream/player/') || pathStr.startsWith('/api/stream/sports/player/'));
+
+  let bypassReason = '';
+  if (isCompetitor) bypassReason = 'Hostile competitor scraper blocked';
+  else if (isPostmanOrCurl) bypassReason = 'Automated scraping bot / Postman bypass attempt';
+  else if (isDirectStreamBypass && !allowDirectAccess) bypassReason = 'Direct address bar / new tab stream bypass attempt';
+  else if (isBlocked && domain) bypassReason = `Unauthorized domain "${domain}" framing attempt`;
+  else if (isBlocked) bypassReason = 'Unauthorized request blocked by whitelist guard';
+
+  const isBypassAttempt = Boolean(bypassReason);
+
+  // Origin resolution & aggregation
+  let originLabel = domain;
+  let originCleanKey = domain;
+  if (!domain || domain === 'Direct' || domain.includes('Direct')) {
+    originCleanKey = clientIp !== '127.0.0.1' && clientIp !== 'Unknown' ? `direct_${clientIp}` : 'direct_unknown';
+    originLabel = clientIp !== '127.0.0.1' && clientIp !== 'Unknown' ? `Direct: ${clientIp}` : 'Direct (No Referer)';
+  }
+
+  const entry = whitelistMap.get(domain || originCleanKey);
+  let oStat = telemetryState.originStatsMap.get(originCleanKey);
+  if (!oStat) {
+    oStat = {
+      origin: originLabel,
+      rawKey: originCleanKey,
+      domain: domain && !domain.includes('Direct') ? domain : '',
+      primaryIp: clientIp,
+      ips: new Set(),
+      count: 0,
+      allowed: 0,
+      blocked: 0,
+      intents: {},
+      projects: {},
+      bypassAttempts: 0,
+      lastBypassReason: '',
+      lastSeen: new Date().toISOString(),
+      isWhitelisted: Boolean(entry && entry.status === 'active'),
+      isBlocked: Boolean(entry && entry.status === 'blocked'),
+      hasCustomMessage: Boolean(getCustomMessageForDomain(domain))
+    };
+    telemetryState.originStatsMap.set(originCleanKey, oStat);
+  }
+
+  oStat.count++;
+  if (isBlocked) oStat.blocked++;
+  else oStat.allowed++;
+  if (clientIp && clientIp !== 'Unknown') oStat.ips.add(clientIp);
+  oStat.intents[intent] = (oStat.intents[intent] || 0) + 1;
+  oStat.projects[resolvedProject] = (oStat.projects[resolvedProject] || 0) + 1;
+  if (isBypassAttempt) {
+    oStat.bypassAttempts++;
+    oStat.lastBypassReason = bypassReason;
+  }
+  oStat.lastSeen = new Date().toISOString();
+  oStat.isWhitelisted = Boolean(entry && entry.status === 'active');
+  oStat.isBlocked = Boolean(entry && entry.status === 'blocked');
+  oStat.hasCustomMessage = Boolean(getCustomMessageForDomain(domain));
+
+  // Intent aggregation
+  telemetryState.intentStatsMap.set(intent, (telemetryState.intentStatsMap.get(intent) || 0) + 1);
+
+  // Project stats aggregation
+  let pStat = telemetryState.projectStatsMap.get(resolvedProject);
+  if (!pStat) {
+    pStat = { project: resolvedProject, count: 0, allowed: 0, blocked: 0, lastSeen: new Date().toISOString() };
+    telemetryState.projectStatsMap.set(resolvedProject, pStat);
+  }
+  pStat.count++;
+  if (isBlocked) pStat.blocked++; else pStat.allowed++;
+  pStat.lastSeen = new Date().toISOString();
+
+  // Push to requests ring buffer
+  const record = {
+    id: `req_${now}_${Math.random().toString(36).substr(2, 6)}`,
+    timestamp: new Date().toISOString(),
+    ip: clientIp,
+    project: resolvedProject,
+    origin: originLabel,
+    referer: referer || '-',
+    path: pathStr,
+    method,
+    status: statusCode,
+    intent,
+    durationMs,
+    action: isBlocked ? 'BLOCKED' : 'ALLOWED',
+    isBypassAttempt,
+    reason: bypassReason
+  };
+
+  telemetryState.requestsRingBuffer.unshift(record);
+  if (telemetryState.requestsRingBuffer.length > 500) {
+    telemetryState.requestsRingBuffer.pop();
+  }
+
+  // If bypass attempt, push to dedicated alert queue
+  if (isBypassAttempt) {
+    const alert = {
+      id: `alert_${now}_${Math.random().toString(36).substr(2, 6)}`,
+      timestamp: new Date().toISOString(),
+      project: resolvedProject,
+      origin: originLabel,
+      ip: clientIp,
+      path: pathStr,
+      intent,
+      reason: bypassReason,
+      ua: (ua || '').slice(0, 90),
+      action: 'BLOCKED_BY_GUARD'
+    };
+    telemetryState.bypassAlerts.unshift(alert);
+    if (telemetryState.bypassAlerts.length > 100) {
+      telemetryState.bypassAlerts.pop();
+    }
+  }
+
+  return record;
+}
+
 // 2. Ingest Nginx access logs for all virtual hosts on the VPS
 const nginxLogOffsets = new Map();
 
@@ -943,47 +1140,24 @@ function ingestVpsNginxLogs() {
           if (m) {
             const [_, ip, timeStr, method, pathStr, proto, statusStr, bytes, referer, ua] = m;
             const statusCode = parseInt(statusStr, 10) || 200;
-            const isBlocked = statusCode === 403 || statusCode === 401;
 
-            let origin = 'Direct';
+            let domain = '';
             if (referer && referer !== '-') {
-              try { origin = new URL(referer).hostname; } catch(_) { origin = referer; }
+              try { domain = new URL(referer).hostname; } catch(_) { domain = referer; }
             }
 
-            const intent = classifyRequestIntent(pathStr);
-            const resolvedProject = projectLabel === 'access' ? 'VPS Web Front' : projectLabel;
-
-            const record = {
-              id: `vps_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
-              timestamp: new Date().toISOString(),
+            processTelemetryRecord({
               ip,
-              project: resolvedProject,
-              origin,
-              referer: referer || '-',
-              path: pathStr,
+              domain,
+              referer,
+              pathStr,
               method,
-              status: statusCode,
-              intent,
+              statusCode,
               durationMs: 0,
-              action: isBlocked ? 'BLOCKED' : 'ALLOWED',
-              isBypassAttempt: isBlocked || origin.includes('series444') || (ua && ua.includes('Postman')),
-              reason: isBlocked ? 'Blocked by server rules' : ''
-            };
-
-            telemetryState.requestsRingBuffer.unshift(record);
-            if (telemetryState.requestsRingBuffer.length > 500) {
-              telemetryState.requestsRingBuffer.pop();
-            }
-
-            // Project stats aggregation
-            let pStat = telemetryState.projectStatsMap.get(resolvedProject);
-            if (!pStat) {
-              pStat = { project: resolvedProject, count: 0, allowed: 0, blocked: 0, lastSeen: new Date().toISOString() };
-              telemetryState.projectStatsMap.set(resolvedProject, pStat);
-            }
-            pStat.count++;
-            if (isBlocked) pStat.blocked++; else pStat.allowed++;
-            pStat.lastSeen = new Date().toISOString();
+              hostHeader: '',
+              projectLabel,
+              ua
+            });
           }
         }
       } catch (_) {}
@@ -996,156 +1170,27 @@ if (fs.existsSync('/var/log/nginx')) {
   setInterval(ingestVpsNginxLogs, 3000);
 }
 
-function classifyRequestIntent(pathname) {
-  if (!pathname || typeof pathname !== 'string') return 'Unknown';
-  if (pathname.startsWith('/api/stream/sports/player/')) return 'Sports TV Stream';
-  if (pathname.startsWith('/api/stream/player/')) return 'Casino TV Stream';
-  if (pathname.startsWith('/api/stream/sports/events')) return 'Sports Match List';
-  if (pathname.startsWith('/api/stream/tables')) return 'Casino Tables List';
-  if (pathname.includes('/ping') || pathname.includes('/proxy-ping')) return 'Token Pre-Warm & Ping';
-  if (pathname.startsWith('/api/stream/ws') || pathname.startsWith('/ws')) return 'WebSocket Tunnel';
-  if (pathname.startsWith('/api/stream/sports/hls/')) return 'Sports HLS Chunk';
-  if (pathname.startsWith('/api/master/')) return 'Master Guard Admin API';
-  if (pathname === '/master' || pathname === '/status' || pathname === '/master/status') return 'Master Dashboard';
-  if (pathname === '/' || pathname.endsWith('.html') || pathname.endsWith('.js') || pathname.endsWith('.css')) return 'Frontend Web UI';
-  if (pathname.startsWith('/api/stream/')) return 'Stream API Engine';
-  return 'Other API Request';
-}
-
 function recordRequestTelemetry(req, res, durationMs) {
-  telemetryState.totalRequests++;
-
-  const now = Date.now();
-  const statusCode = res.statusCode || 200;
-  const isBlocked = statusCode === 403 || statusCode === 401;
-
-  if (isBlocked) {
-    telemetryState.blockedRequests++;
-  } else {
-    telemetryState.allowedRequests++;
-  }
-
-  // Update rolling req/sec rate tracker (last 60s window)
-  const sec = Math.floor(now / 1000);
-  const samples = telemetryState.rateTracker.samples;
-  if (samples.length > 0 && samples[samples.length - 1].sec === sec) {
-    samples[samples.length - 1].count++;
-  } else {
-    samples.push({ sec, count: 1 });
-    while (samples.length > 60) samples.shift();
-  }
-  const totalInWindow = samples.reduce((acc, s) => acc + s.count, 0);
-  const windowSecs = Math.max(1, samples.length);
-  telemetryState.rateTracker.reqPerSec = Math.round((totalInWindow / windowSecs) * 10) / 10;
-
   const urlObj = new URL(req.originalUrl || req.url, 'http://localhost');
   const pathname = urlObj.pathname;
-  const intent = classifyRequestIntent(pathname);
-
-  // Intent aggregation
-  const currentIntentCount = telemetryState.intentStatsMap.get(intent) || 0;
-  telemetryState.intentStatsMap.set(intent, currentIntentCount + 1);
-
-  // Extract client IP & Domain / Origin
   let clientIp = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket?.remoteAddress || req.ip || '';
   if (clientIp.startsWith('::ffff:')) clientIp = clientIp.replace('::ffff:', '');
   const domain = extractDomain(req);
-  const rawOrigin = req.headers['origin'] || req.headers['referer'] || '';
-
-  // Project label tagging
   const host = req.headers['host'] || 'cstv.chimneysolutions.info';
-  const projectLabel = host.includes('chimneysolutions') || host.includes('5050') ? 'CasinoTV & SportsTV' : host;
-
-  // Project stats aggregation
-  let pStat = telemetryState.projectStatsMap.get(projectLabel);
-  if (!pStat) {
-    pStat = { project: projectLabel, count: 0, allowed: 0, blocked: 0, lastSeen: new Date().toISOString() };
-    telemetryState.projectStatsMap.set(projectLabel, pStat);
-  }
-  pStat.count++;
-  if (isBlocked) pStat.blocked++; else pStat.allowed++;
-  pStat.lastSeen = new Date().toISOString();
-
-  // Origin aggregation
-  const originCleanKey = domain || (clientIp === '127.0.0.1' ? 'localhost' : 'direct_no_origin');
-  const entry = whitelistMap.get(originCleanKey);
-  let oStat = telemetryState.originStatsMap.get(originCleanKey);
-  if (!oStat) {
-    oStat = {
-      origin: domain || (clientIp === '127.0.0.1' ? 'localhost' : 'Direct (No Referer)'),
-      rawKey: originCleanKey,
-      count: 0,
-      allowed: 0,
-      blocked: 0,
-      lastSeen: new Date().toISOString(),
-      isWhitelisted: Boolean(entry && entry.status === 'active'),
-      isBlocked: Boolean(entry && entry.status === 'blocked'),
-      hasCustomMessage: Boolean(getCustomMessageForDomain(domain))
-    };
-    telemetryState.originStatsMap.set(originCleanKey, oStat);
-  }
-  oStat.count++;
-  if (isBlocked) oStat.blocked++;
-  else oStat.allowed++;
-  oStat.lastSeen = new Date().toISOString();
-  oStat.isWhitelisted = Boolean(entry && entry.status === 'active');
-  oStat.isBlocked = Boolean(entry && entry.status === 'blocked');
-  oStat.hasCustomMessage = Boolean(getCustomMessageForDomain(domain));
-
-  // Determine bypass/theft attempt
   const ua = req.headers['user-agent'] || '';
-  const isPostmanOrCurl = ua.includes('Postman') || ua.includes('curl/') || ua.includes('python-requests') || ua.includes('Go-http-client');
-  const isCompetitor = (domain && (domain.includes('series444') || domain.includes('baji8dot') || domain.includes('oddsdata')));
-  const isDirectStreamBypass = !domain && clientIp !== '127.0.0.1' && (pathname.startsWith('/api/stream/player/') || pathname.startsWith('/api/stream/sports/player/'));
 
-  let bypassReason = '';
-  if (isCompetitor) bypassReason = 'Hostile competitor scraper blocked';
-  else if (isPostmanOrCurl) bypassReason = 'Automated scraping bot / Postman bypass attempt';
-  else if (isDirectStreamBypass && !allowDirectAccess) bypassReason = 'Direct address bar / new tab stream bypass attempt';
-  else if (isBlocked && domain) bypassReason = `Unauthorized domain "${domain}" framing attempt`;
-  else if (isBlocked) bypassReason = 'Unauthorized request blocked by whitelist guard';
-
-  const record = {
-    id: `req_${now}_${Math.random().toString(36).substr(2, 6)}`,
-    timestamp: new Date().toISOString(),
-    ip: clientIp || 'Unknown',
-    project: projectLabel,
-    origin: domain || (clientIp === '127.0.0.1' ? 'localhost' : 'Direct (No Referer)'),
+  return processTelemetryRecord({
+    ip: clientIp,
+    domain,
     referer: req.headers['referer'] || req.headers['origin'] || '-',
-    path: pathname,
+    pathStr: pathname,
     method: req.method,
-    status: statusCode,
-    intent,
+    statusCode: res.statusCode || 200,
     durationMs,
-    action: isBlocked ? 'BLOCKED' : 'ALLOWED',
-    isBypassAttempt: Boolean(bypassReason),
-    reason: bypassReason
-  };
-
-  telemetryState.requestsRingBuffer.unshift(record);
-  if (telemetryState.requestsRingBuffer.length > 500) {
-    telemetryState.requestsRingBuffer.pop();
-  }
-
-  // If bypass attempt, push to dedicated alert queue
-  if (bypassReason) {
-    const alert = {
-      id: `alert_${now}_${Math.random().toString(36).substr(2, 6)}`,
-      timestamp: new Date().toISOString(),
-      project: projectLabel,
-      origin: domain || 'Direct (No Referer)',
-      ip: clientIp || 'Unknown',
-      path: pathname,
-      intent,
-      reason: bypassReason,
-      ua: ua.slice(0, 90),
-      action: 'BLOCKED_BY_GUARD'
-    };
-    telemetryState.bypassAlerts.unshift(alert);
-    if (telemetryState.bypassAlerts.length > 100) {
-      telemetryState.bypassAlerts.pop();
-    }
-  }
+    hostHeader: host,
+    projectLabel: '',
+    ua
+  });
 }
 
 function trafficMiddleware(req, res, next) {
@@ -1225,9 +1270,12 @@ router.get('/api/master/telemetry', requireMasterAuth, async (req, res) => {
     if (streamProxy.tableTokenCache) casinoActiveTables = streamProxy.tableTokenCache.size || 17;
   } catch (_) {}
 
-  // Origins list formatted with stats and percentages
+  // Origins list formatted with full breakdown, intents, and percentages
   const origins = Array.from(telemetryState.originStatsMap.values()).map(o => ({
     ...o,
+    ips: Array.isArray(o.ips) ? o.ips : Array.from(o.ips || []).slice(0, 5),
+    intentsBreakdown: Object.entries(o.intents || {}).map(([name, count]) => ({ name, count })).sort((a,b) => b.count - a.count),
+    projectsBreakdown: Object.entries(o.projects || {}).map(([name, count]) => ({ name, count })).sort((a,b) => b.count - a.count),
     percent: telemetryState.totalRequests > 0 ? Math.round((o.count / telemetryState.totalRequests) * 1000) / 10 : 0
   })).sort((a, b) => b.count - a.count);
 
