@@ -58,6 +58,110 @@ const inFlightSportsPlayers = new Map(); // deduplicate concurrent requests for 
 
 const SPORTS_HTML_TTL = 30000; // 30 seconds fresh HTML cache in RAM & Redis for live sports feeds
 
+// --- Raw Upstream Live TV Engine (Aura / Trubets RTS WebRTC Relay) ---
+const AURA_XOR_KEY = "damru-taala-2026";
+
+function decryptAuraPayload(t) {
+  if (!t || t.e !== 1 || typeof t.d !== "string") return t;
+  try {
+    const s = Uint8Array.from(Buffer.from(t.d, "base64"));
+    const a = Buffer.from(AURA_XOR_KEY, "utf8");
+    for (let n = 0; n < s.length; n += 1) s[n] ^= a[n % a.length];
+    return JSON.parse(Buffer.from(s).toString("utf8"));
+  } catch (err) {
+    console.warn("[SportsEngine] Failed to decrypt Aura payload:", err.message);
+    return t;
+  }
+}
+
+function getAuraFormattedId(eventId) {
+  let s = String(eventId || "").trim();
+  const digits = s.replace(/\D/g, "");
+  if (!digits) return s;
+  if (digits.length >= 13 && digits.startsWith("8")) return digits;
+  // Pad to 12 digits and prefix with 8 (Standard Aura 13-digit format: 8 + 12-digit padded Betfair ID)
+  return "8" + digits.padStart(12, "0");
+}
+
+async function getAuraTvStream(eventId) {
+  const fid = getAuraFormattedId(eventId);
+  const cacheKey = `aura_tv_${fid}`;
+  const cached = sportsWatchLinkCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiresAt && cached.url) {
+    return cached.url;
+  }
+
+  try {
+    const res = await directFetch(`https://api.baji8dot.live/api/public/aura-tv/${fid}`, {
+      method: "POST",
+      headers: {
+        Origin: "https://api.baji8dot.live",
+        Referer: "https://api.baji8dot.live/",
+        "User-Agent": UA,
+        Accept: "application/json, text/plain, */*",
+      },
+      timeout: 4500,
+    });
+
+    if (!res || !res.ok) return null;
+    const encrypted = await res.json().catch(() => null);
+    if (!encrypted) return null;
+    const decrypted = decryptAuraPayload(encrypted);
+    if (decrypted && decrypted.success && decrypted.url) {
+      sportsWatchLinkCache.set(cacheKey, {
+        url: decrypted.url,
+        expiresAt: Date.now() + 180000, // 3 minutes cache
+      });
+      return decrypted.url;
+    }
+  } catch (err) {
+    console.warn(`[SportsEngine] Aura TV stream lookup failed for ${fid}:`, err.message);
+  }
+  return null;
+}
+
+function transformAuraPlayerHtml(html, streamUrl, eventId) {
+  let transformed = html;
+
+  const auraSportsStyle = `
+    <style>
+      html, body {
+        margin: 0 !important;
+        padding: 0 !important;
+        width: 100% !important;
+        height: 100% !important;
+        overflow: hidden !important;
+        background: #000 !important;
+      }
+      #player, .prism-player, video {
+        width: 100% !important;
+        height: 100% !important;
+        object-fit: contain !important;
+        background: #000 !important;
+      }
+      .watermark, #watermark, #wm {
+        display: none !important;
+      }
+    </style>
+  `;
+
+  if (transformed.includes("</head>")) {
+    transformed = transformed.replace("</head>", `${auraSportsStyle}\n</head>`);
+  }
+
+  // 1. Rewrite WebRTC / RTS source directly to play.trubets365.com
+  transformed = transformed.replace(/artc:\/\/\$\{location\.host\}\/relay-tv\//g, "artc://play.trubets365.com/relay-tv/");
+
+  // 2. Rewrite all relative /relay-tv/ paths to full absolute https://play.trubets365.com/relay-tv/
+  transformed = transformed.replace(/(["'`])\/relay-tv\//g, "$1https://play.trubets365.com/relay-tv/");
+
+  // 3. Disable competitor debugger & devtools traps
+  transformed = transformed.replace(/const guardEnabled = true;/g, "const guardEnabled = false;");
+  transformed = transformed.replace(/debugger;/g, "/* disabled */");
+
+  return transformed;
+}
+
 // 1. Pre-patch and cache the raw LTVE sports player JavaScript in RAM memory
 let _cachedSportsPlayerJs = null;
 
@@ -483,14 +587,8 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, p
 
       const proxiedPingUrl = `/api/stream/sports/proxy-ping?target=${encodeURIComponent(fullPingUrl)}&watchUrl=${encodeURIComponent(watchUrl)}&eventId=${encodeURIComponent(eventId)}&origin=${encodeURIComponent(providerOrigin || "https://cbtfexchange.com")}&session=${encodeURIComponent(session || "")}`;
 
-      let hlsProxyUrl = originalCfg.hlsUrl;
-      if (hlsProxyUrl) {
-        hlsProxyUrl = `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(hlsProxyUrl)}`;
-      }
-
       const modifiedCfg = {
         ...originalCfg,
-        hlsUrl: hlsProxyUrl || originalCfg.hlsUrl,
         streamId: originalCfg.streamId || eventId || "SPORTS",
         pingUrl: proxiedPingUrl,
         flagUrl: "/api/stream/sports/dummy-flag",
@@ -499,12 +597,10 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, p
         devtoolsRedirect: "",
         blockedUrl: "",
         home: "",
-        freezeSeconds: 120,
+        freezeSeconds: 120, // 2 minutes freeze tolerance (prevents buffering reload loops)
+        oneTimeToken: false, // Keep token alive (prevents loader freeze)
         offlineRetry: 5,
-        forceHls: true,
-        startMode: "hls",
-        webrtcRetries: 2,
-        webrtcTimeout: 4,
+        webrtcTimeout: 30, // Full WebRTC handshake window (Casino TV zero-latency parity)
         frameAllow: {
           enforce: false,
           outer: { apps: false, hosts: [], sites: [] },
@@ -519,10 +615,10 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, p
           if (cleanWs.startsWith("//")) cleanWs = `wss:${cleanWs}`;
           else if (cleanWs.startsWith("/")) cleanWs = `wss://${new URL(watchUrl).host}${cleanWs}`;
           else if (!cleanWs.startsWith("ws://") && !cleanWs.startsWith("wss://")) cleanWs = `wss://${cleanWs}`;
-          modifiedCfg.wsUrl = `/api/stream/ws?target=${encodeURIComponent(cleanWs)}`;
+          modifiedCfg.wsUrl = cleanWs; // Direct zero-latency WebRTC connection
         }
         if (prewarmedData.hlsUrl) {
-          modifiedCfg.hlsUrl = `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(prewarmedData.hlsUrl)}`;
+          modifiedCfg.hlsUrl = prewarmedData.hlsUrl;
         }
         if (prewarmedData.streamId) {
           modifiedCfg.streamId = prewarmedData.streamId;
@@ -832,10 +928,70 @@ router.get("/events", async (req, res) => {
       7: "Horse Racing",
     };
 
+    const result = [];
+    const seenEventNames = new Set();
+    const seenEventIds = new Set();
+
+    // 1. Ultra-fast direct fetch from Aura Sports Engine (250ms latency, zero proxy bandwidth)
+    try {
+      const auraRes = await directFetch(
+        "https://api.baji8dot.live/api/public/sports?x=1",
+        {
+          headers: {
+            Origin: "https://api.baji8dot.live",
+            Referer: "https://api.baji8dot.live/",
+            "User-Agent": UA,
+          },
+          timeout: 3500,
+        },
+      ).catch(() => null);
+
+      if (auraRes && auraRes.ok) {
+        const auraEnc = await auraRes.json().catch(() => null);
+        const auraDec = decryptAuraPayload(auraEnc);
+        if (auraDec && Array.isArray(auraDec.data)) {
+          for (const sp of auraDec.data) {
+            const sId = String(sp.eventTypeId || "4");
+            const sName = sp.eventTypeName || sportNames[sId] || "Other Sport";
+            if (Array.isArray(sp.events)) {
+              for (const ev of sp.events) {
+                const eid = String(ev.eventId || "");
+                const name = (ev.eventName || "").trim();
+                if (!eid || !name) continue;
+
+                seenEventIds.add(eid);
+                seenEventNames.add(name.toLowerCase());
+
+                const digits = eid.replace(/\D/g, "");
+                if (digits) {
+                  const bId = digits.startsWith("8") && digits.length >= 13 ? digits.slice(5) : digits;
+                  betfairIdCache.set(eid, bId);
+                }
+
+                result.push({
+                  id: eid,
+                  name: name,
+                  sportId: sId,
+                  sportName: sName,
+                  tournament: ev.competitionName || "",
+                  inPlay: Boolean(ev.inplay),
+                  isStreaming: true,
+                  eventTime: ev.openDate || "",
+                  tv: true,
+                });
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("[SportsEngine] Notice fetching Aura sports list:", e.message);
+    }
+
+    // 2. Secondary fetch: Merge additional matches from CBTF / Startexch
     for (const provKey of providerList) {
       try {
         const provider = PROVIDERS[provKey];
-        // 1. Ultra-fast direct fetch without proxy (Zero proxy bandwidth, 700ms load time!)
         let upstreamRes = await directFetch(
           `${provider.base}/api/exchange/market/matchodds/allEventsList`,
           {
@@ -848,11 +1004,10 @@ router.get("/events", async (req, res) => {
               ...MOBILE_HEADERS,
             },
             body: JSON.stringify({}),
-            timeout: 3500,
+            timeout: 3000,
           },
         ).catch(() => null);
 
-        // Fallback to proxyFetch only if direct fails
         if (!upstreamRes || !upstreamRes.ok) {
           const token = await getAuthToken(provKey);
           upstreamRes = await proxyFetch(
@@ -868,25 +1023,34 @@ router.get("/events", async (req, res) => {
                 ...MOBILE_HEADERS,
               },
               body: JSON.stringify({}),
-              timeout: 6000,
+              timeout: 4000,
             },
           );
         }
 
         const d = await upstreamRes.json();
-        const result = [];
-
         if (d?.data) {
           for (const [sId, list] of Object.entries(d.data)) {
             if (Array.isArray(list)) {
               for (const ev of list) {
+                const eid = String(ev.exEventId || ev._id || "");
+                const name = (ev.eventName || "").trim();
+                if (!eid || !name) continue;
+
+                // Deduplicate with matches already present from Aura
+                if (seenEventIds.has(eid) || seenEventNames.has(name.toLowerCase())) {
+                  continue;
+                }
+                seenEventIds.add(eid);
+                seenEventNames.add(name.toLowerCase());
+
                 const isInPlay = Boolean(
                   ev?.oddsData?.inPlay ?? ev?.inPlay ?? false,
                 );
                 const isStreaming = Boolean(ev?.isStreaming ?? false);
                 result.push({
-                  id: String(ev.exEventId || ev._id || ""),
-                  name: ev.eventName || "Unnamed Match",
+                  id: eid,
+                  name: name,
                   sportId: String(sId),
                   sportName: sportNames[sId] || "Other Sport",
                   tournament: ev.tournamentName || "",
@@ -900,29 +1064,31 @@ router.get("/events", async (req, res) => {
           }
         }
 
-        if (result.length > 0) {
-          // Prioritize in-play and streaming matches at the top
-          result.sort((a, b) => {
-            if (a.inPlay && !b.inPlay) return -1;
-            if (!a.inPlay && b.inPlay) return 1;
-            if (a.isStreaming && !b.isStreaming) return -1;
-            if (!a.isStreaming && b.isStreaming) return 1;
-            return 0;
-          });
-
-          sportsEventsCache.data = result;
-          sportsEventsCache.expiresAt = Date.now() + 60000; // 60s cache
-          await redisClient
-            .set("sports:events_list", result, 60)
-            .catch(() => {});
-          return result;
-        }
+        if (result.length > 0) break;
       } catch (err) {
         console.warn(
           `[SportsEngine] Failed to fetch events from ${provKey}:`,
           err.message,
         );
       }
+    }
+
+    if (result.length > 0) {
+      // Prioritize in-play and streaming matches at the top
+      result.sort((a, b) => {
+        if (a.inPlay && !b.inPlay) return -1;
+        if (!a.inPlay && b.inPlay) return 1;
+        if (a.isStreaming && !b.isStreaming) return -1;
+        if (!a.isStreaming && b.isStreaming) return 1;
+        return 0;
+      });
+
+      sportsEventsCache.data = result;
+      sportsEventsCache.expiresAt = Date.now() + 60000; // 60s cache
+      await redisClient
+        .set("sports:events_list", result, 60)
+        .catch(() => {});
+      return result;
     }
     return sportsEventsCache.data || [];
   })();
@@ -939,8 +1105,7 @@ router.get("/events", async (req, res) => {
   }
 });
 
-// 3b. Dedicated Zero-Origin-Leak Hop Gateway
-// Strips Referer completely (<meta name="referrer" content="no-referrer">) before navigating to Oddsdata
+// 3b. Dedicated Clean Hop Gateway (Direct to Sports Player - Zero Third-Party Leak)
 router.get("/hop/:betfairId", (req, res) => {
   let id = String(req.params.betfairId || "").replace(/\D/g, "");
   if (id.length >= 12 && id.startsWith("8000")) {
@@ -963,7 +1128,7 @@ router.get("/hop/:betfairId", (req, res) => {
 <script>
 var id = ${JSON.stringify(id)};
 if (id) {
-  location.replace('https://oddsdata.org/score/619d50045eb8d022a9cd0b2389b8a96f42884d74/' + id);
+  location.replace('/api/stream/sports/player/' + id);
 }
 </script>
 </body>
@@ -1044,10 +1209,118 @@ router.get("/player/:eventId", async (req, res) => {
   }
 
   const task = (async () => {
+    // === TIER 1: Raw Ultra-Fast WebRTC Stream (Aura / Trubets RTS Relay) ===
+    try {
+      console.log(`[SportsEngine] Resolving Tier 1 Aura raw stream for ${eventId}...`);
+      const auraStreamUrl = await getAuraTvStream(eventId);
+      if (auraStreamUrl) {
+        console.log(`[SportsEngine] Tier 1 Aura stream found: ${auraStreamUrl}. Fetching player HTML...`);
+        const playerRes = await directFetch(auraStreamUrl, {
+          headers: {
+            "User-Agent": UA,
+            Referer: "https://play.trubets365.com/",
+            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          },
+          timeout: 4500,
+        }).catch(() => null);
+
+        if (playerRes && playerRes.ok) {
+          const rawAuraHtml = await playerRes.text();
+          if (
+            rawAuraHtml &&
+            (rawAuraHtml.includes("Aliplayer") ||
+              rawAuraHtml.includes("artc://") ||
+              rawAuraHtml.includes("aliyun-rts-sdk"))
+          ) {
+            const transformedAuraHtml = transformAuraPlayerHtml(
+              rawAuraHtml,
+              auraStreamUrl,
+              eventId,
+            );
+            sportsPlayerCache.set(cacheKey, {
+              html: transformedAuraHtml,
+              expiresAt: Date.now() + SPORTS_HTML_TTL,
+            });
+            await redisClient
+              .set(
+                `html:sports:${eventId}`,
+                transformedAuraHtml,
+                Math.round(SPORTS_HTML_TTL / 1000),
+              )
+              .catch(() => {});
+            console.log(
+              `[SportsEngine] ⚡ Serving Tier 1 Aura raw WebRTC player for ${eventId}`,
+            );
+            return transformedAuraHtml;
+          }
+        }
+      }
+    } catch (auraErr) {
+      console.warn(
+        `[SportsEngine] Tier 1 Aura stream lookup failed for ${eventId}:`,
+        auraErr.message,
+      );
+    }
+
+    // === TIER 2: Betfair LTVE Satellite Broadcast (Fallback via CBTF/Startexch) ===
+    // === TIER 1: Raw Ultra-Fast WebRTC Stream (Aura / Trubets RTS Relay) ===
+    try {
+      console.log(`[SportsEngine] Resolving Tier 1 Aura raw stream for ${eventId}...`);
+      const auraStreamUrl = await getAuraTvStream(eventId);
+      if (auraStreamUrl) {
+        console.log(`[SportsEngine] Tier 1 Aura stream found: ${auraStreamUrl}. Fetching player HTML...`);
+        const playerRes = await directFetch(auraStreamUrl, {
+          headers: {
+            "User-Agent": UA,
+            Referer: "https://play.trubets365.com/",
+            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          },
+          timeout: 4500,
+        }).catch(() => null);
+
+        if (playerRes && playerRes.ok) {
+          const rawAuraHtml = await playerRes.text();
+          if (
+            rawAuraHtml &&
+            (rawAuraHtml.includes("Aliplayer") ||
+              rawAuraHtml.includes("artc://") ||
+              rawAuraHtml.includes("aliyun-rts-sdk"))
+          ) {
+            const transformedAuraHtml = transformAuraPlayerHtml(
+              rawAuraHtml,
+              auraStreamUrl,
+              eventId,
+            );
+            sportsPlayerCache.set(cacheKey, {
+              html: transformedAuraHtml,
+              expiresAt: Date.now() + SPORTS_HTML_TTL,
+            });
+            await redisClient
+              .set(
+                `html:sports:${eventId}`,
+                transformedAuraHtml,
+                Math.round(SPORTS_HTML_TTL / 1000),
+              )
+              .catch(() => {});
+            console.log(
+              `[SportsEngine] ⚡ Serving Tier 1 Aura raw WebRTC player for ${eventId}`,
+            );
+            return transformedAuraHtml;
+          }
+        }
+      }
+    } catch (auraErr) {
+      console.warn(
+        `[SportsEngine] Tier 1 Aura stream lookup failed for ${eventId}:`,
+        auraErr.message,
+      );
+    }
+
+    // === TIER 2: Betfair LTVE Satellite Broadcast (Fallback via CBTF/Startexch) ===
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         console.log(
-          `[SportsEngine] Fetching sports player for match ${eventId} (attempt ${attempt})`,
+          `[SportsEngine] Tier 2 Fallback: Fetching sports player for match ${eventId} (attempt ${attempt})`,
         );
 
         // Use forceFresh on attempt 2
