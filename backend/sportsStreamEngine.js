@@ -13,6 +13,7 @@ const path = require("path");
 const securityEngine = require("./securityEngine");
 const {
   getAuthToken,
+  invalidateAuthToken,
   proxyFetch,
   directFetch,
   UA,
@@ -318,6 +319,9 @@ async function getSportsWatchUrl(
             return sportsData;
           }
 
+          if (res.status === 401) {
+            await invalidateAuthToken(provKey);
+          }
           if (res.status === 429) {
             providerManager.tripCooldown(
               provKey,
@@ -348,7 +352,7 @@ async function getSportsWatchUrl(
 }
 
 // 4. Transform Sports Player HTML for Zero-Latency Local Playback
-function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
+function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, prewarmedData = null) {
   // YouTube-style buffer spinner & video styling
   const sportsStyle = `
     <style>
@@ -488,6 +492,23 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session) {
           parent: { apps: false, hosts: [], sites: [] },
         },
       };
+
+      if (prewarmedData) {
+        if (prewarmedData.token) modifiedCfg.token = prewarmedData.token;
+        if (prewarmedData.wsUrl) {
+          let cleanWs = String(prewarmedData.wsUrl).trim();
+          if (cleanWs.startsWith("//")) cleanWs = `wss:${cleanWs}`;
+          else if (cleanWs.startsWith("/")) cleanWs = `wss://${new URL(watchUrl).host}${cleanWs}`;
+          else if (!cleanWs.startsWith("ws://") && !cleanWs.startsWith("wss://")) cleanWs = `wss://${cleanWs}`;
+          modifiedCfg.wsUrl = `/api/stream/ws?target=${encodeURIComponent(cleanWs)}`;
+        }
+        if (prewarmedData.hlsUrl) {
+          modifiedCfg.hlsUrl = `/api/stream/sports/hls/live.m3u8?url=${encodeURIComponent(prewarmedData.hlsUrl)}`;
+        }
+        if (prewarmedData.streamId) {
+          modifiedCfg.streamId = prewarmedData.streamId;
+        }
+      }
 
       html = html.replace(
         /<script type="application\/json" id="cfg">[^<]+<\/script>/,
@@ -933,27 +954,7 @@ router.get("/player/:eventId", async (req, res) => {
       );
   }
 
-  // 1. Direct Zero-Origin-Leak Hop Engine (Default: 0 proxy bandwidth, 0ms load, clean visual masking)
-  if (engine !== "proxy") {
-    try {
-      const betfairId = await resolveBetfairEventId(eventId, sportId);
-      if (betfairId) {
-        const directHtml = renderProtectedDirectPlayer(betfairId, eventId, sportId);
-        res.setHeader("Content-Type", "text/html; charset=utf-8");
-        res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-        res.setHeader("Permissions-Policy", "unload=*");
-        res.setHeader(
-          "Content-Security-Policy",
-          securityEngine.getFrameAncestorsCSP(),
-        );
-        return res.send(directHtml);
-      }
-    } catch (e) {
-      console.warn(`[SportsEngine] Direct player resolution fallback to proxy for ${eventId}:`, e.message);
-    }
-  }
-
-  // 2. Multi-Provider Proxy Relay Engine (Fallback)
+  // Dedicated Multi-Provider Sports TV Stream Relay Engine
   const cacheKey = `sports_player_${eventId}`;
 
   // 1. Check local RAM cache (serves in 0ms)
@@ -1068,12 +1069,80 @@ router.get("/player/:eventId", async (req, res) => {
           return renderNoTvHtml();
         }
 
+        // Instant Pre-Warm Ping Handshake: Acquire JWT token and stream info immediately
+        let prewarmedData = null;
+        const cfgMatch = rawHtml.match(
+          /<script type="application\/json" id="cfg">([^<]+)<\/script>/,
+        );
+        if (cfgMatch) {
+          try {
+            const rawCfg = JSON.parse(cfgMatch[1]);
+            const targetPingUrl = rawCfg.pingUrl.startsWith("http")
+              ? rawCfg.pingUrl
+              : new URL(rawCfg.pingUrl, watchUrl).href;
+
+            const pingRes = await proxyFetch(targetPingUrl, {
+              method: "POST",
+              session,
+              headers: {
+                "Content-Type": "application/json",
+                Origin: new URL(targetPingUrl).origin,
+                Referer: watchUrl,
+                "User-Agent": UA,
+                Accept: "*/*",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-origin",
+              },
+              body: JSON.stringify({
+                sid: rawCfg.sid,
+                mode: "connecting",
+                init: true,
+                token: true,
+                page: referer,
+                tz: "Asia/Kolkata",
+                tzo: 330,
+              }),
+              timeout: 6000,
+            }).catch(() => null);
+
+            if (pingRes && pingRes.ok) {
+              const pingJson = await pingRes.json().catch(() => null);
+              if (pingJson && pingJson.token) {
+                prewarmedData = pingJson;
+                const tokenEntry = {
+                  token: pingJson.token,
+                  wsUrl: pingJson.wsUrl,
+                  hlsUrl: pingJson.hlsUrl,
+                  streamId: pingJson.streamId || eventId,
+                  timestamp: Date.now(),
+                  expiresAt: Date.now() + 1800000, // 30 mins
+                };
+                sportsTokenCache.set(eventId, tokenEntry);
+                sportsTokenCache.set(targetPingUrl, tokenEntry);
+                await redisClient
+                  .set(`table_token:sports:${eventId}`, tokenEntry, 1800)
+                  .catch(() => {});
+                console.log(
+                  `[SportsEngine] Pre-warm ping successful! Injected valid token into sports player for ${eventId}`,
+                );
+              }
+            }
+          } catch (e) {
+            console.warn(
+              `[SportsEngine] Pre-warm ping warning for ${eventId}:`,
+              e.message,
+            );
+          }
+        }
+
         const transformedHtml = transformSportsHtml(
           rawHtml,
           watchUrl,
           eventId,
           watchData.origin,
           session,
+          prewarmedData,
         );
 
         // Cache player HTML for 30s in RAM and Redis
