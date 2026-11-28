@@ -21,16 +21,17 @@ const { PROVIDERS, getAuthToken, proxyFetch, UA, MOBILE_HEADERS } = require("../
 
 (async () => {
   console.log("========================================================");
-  console.log("🎰 TESTING SHAN444 (sdemo) CASINO STREAM END-TO-END");
+  console.log("🎰 TESTING SHAN444 (sdemo) CFG & 2-STEP PING");
   console.log("========================================================");
 
   const prov = PROVIDERS.shan444;
-  const token = await getAuthToken("shan444", true);
+  // Use cached auth token (no unnecessary re-login)
+  const token = await getAuthToken("shan444", false);
   if (!token) {
-    console.log("❌ Shan444 login failed! Check endpoint or credentials.");
+    console.log("❌ Shan444 login failed!");
     process.exit(1);
   }
-  console.log(`✅ Shan444 Auth Token Acquired: ${token.slice(0, 24)}...`);
+  console.log(`✅ Shan444 Auth Token Ready (Cached/Active)`);
 
   const watchRes = await proxyFetch(
     `${prov.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`,
@@ -42,7 +43,12 @@ const { PROVIDERS, getAuthToken, proxyFetch, UA, MOBILE_HEADERS } = require("../
         Origin: prov.base,
         Referer: `${prov.base}/`,
         "User-Agent": UA,
-        ...MOBILE_HEADERS,
+        "Sec-Ch-Ua": MOBILE_HEADERS["Sec-Ch-Ua"],
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"Windows"',
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-site",
       },
       body: JSON.stringify({ streamId: "99.0010", timestamp: Date.now() }),
       timeout: 8000,
@@ -68,39 +74,77 @@ const { PROVIDERS, getAuthToken, proxyFetch, UA, MOBILE_HEADERS } = require("../
     timeout: 8000,
   });
 
+  const setCookie = pageRes.headers.get("set-cookie") || "";
   const html = await pageRes.text();
-  console.log(`GET Page Status: ${pageRes.status} | Length: ${html.length} | cfg: ${html.includes("cfg")} | loader.gif: ${html.includes("loader.gif")}`);
+  console.log(`GET Page Status: ${pageRes.status} | Length: ${html.length} | Set-Cookie: ${setCookie ? "YES" : "none"}`);
 
   const cfgMatch = html.match(/<script type="application\/json" id="cfg">([^<]+)<\/script>/);
-  if (cfgMatch) {
-    const cfg = JSON.parse(cfgMatch[1]);
-    console.log("🎉 FOUND CFG! streamId:", cfg.streamId, "| pingUrl:", cfg.pingUrl);
-    const pingUrl = cfg.pingUrl.startsWith("http") ? cfg.pingUrl : new URL(cfg.pingUrl, watchUrl).href;
-    const pingRes = await proxyFetch(pingUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Origin: new URL(pingUrl).origin,
-        Referer: watchUrl,
-        "User-Agent": UA,
-        Accept: "*/*",
-      },
-      body: JSON.stringify({
-        sid: cfg.sid,
-        mode: "connecting",
-        init: true,
-        token: true,
-        page: `${prov.base}/`,
-        tz: "Asia/Kolkata",
-        tzo: 330,
-      }),
-      timeout: 6000,
-    });
-    const pingJson = await pingRes.json().catch(() => null);
-    console.log(`POST /ping Status: ${pingRes.status} | token: ${pingJson?.token ? "YES (" + pingJson.token.slice(0, 20) + "...)" : "NO"} | wsUrl: ${pingJson?.wsUrl}`);
-  } else {
+  if (!cfgMatch) {
     console.log("⚠️ No cfg found. Preview:", html.slice(0, 200));
+    process.exit(1);
   }
+
+  const cfg = JSON.parse(cfgMatch[1]);
+  console.log("📋 CFG DETAILS:", JSON.stringify({
+    sid: cfg.sid,
+    pingUrl: cfg.pingUrl,
+    oneTimeToken: cfg.oneTimeToken,
+    frameAllow: cfg.frameAllow,
+  }, null, 2));
+
+  const pingUrl = cfg.pingUrl.startsWith("http") ? cfg.pingUrl : new URL(cfg.pingUrl, watchUrl).href;
+  const pageOrigin = `${prov.base}/`;
+  const pingHeaders = {
+    "Content-Type": "application/json",
+    Origin: new URL(pingUrl).origin,
+    Referer: watchUrl,
+    "User-Agent": UA,
+    "Sec-Ch-Ua": MOBILE_HEADERS["Sec-Ch-Ua"],
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    Accept: "*/*",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
+  };
+  if (setCookie) pingHeaders["Cookie"] = setCookie.split(";")[0];
+
+  // Step 1: exact player.js init ping (init: true, NO token: true)
+  const res1 = await proxyFetch(pingUrl, {
+    method: "POST",
+    headers: pingHeaders,
+    body: JSON.stringify({
+      sid: cfg.sid,
+      mode: "connecting",
+      init: true,
+      quality: null,
+      diag: [],
+      tz: "Asia/Kolkata",
+      tzo: 330,
+      page: pageOrigin,
+    }),
+    timeout: 6000,
+  });
+  const txt1 = await res1.text();
+  console.log(`\nStep 1 (init: true) -> HTTP ${res1.status}:`, txt1);
+
+  // Step 2: exact player.js playToken ping (init: false, token: true)
+  const res2 = await proxyFetch(pingUrl, {
+    method: "POST",
+    headers: pingHeaders,
+    body: JSON.stringify({
+      sid: cfg.sid,
+      mode: "connecting",
+      init: false,
+      quality: null,
+      diag: [],
+      token: true,
+      page: pageOrigin,
+    }),
+    timeout: 6000,
+  });
+  const txt2 = await res2.text();
+  console.log(`Step 2 (token: true) -> HTTP ${res2.status}:`, txt2);
 
   console.log("========================================================");
   process.exit(0);
