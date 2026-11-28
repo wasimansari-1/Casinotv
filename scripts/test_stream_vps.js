@@ -4,168 +4,114 @@
 const fs = require("fs");
 const path = require("path");
 
-console.log("========================================================");
-console.log("🔍 VPS ENVIRONMENT & PROXY AUDIT REPORT");
-console.log("========================================================");
-
-// 1. Audit .env file directly from disk
 const envPath = path.join(__dirname, "../.env");
-console.log(`Checking .env path: ${envPath}`);
-if (!fs.existsSync(envPath)) {
-  console.log("❌ CRITICAL: .env file DOES NOT EXIST at /root/Casinotv/.env!");
-} else {
-  console.log("✅ .env file EXISTS on disk! Contents:");
-  const envLines = fs.readFileSync(envPath, "utf8").split("\n");
-  for (const line of envLines) {
+if (fs.existsSync(envPath)) {
+  for (const line of fs.readFileSync(envPath, "utf8").split("\n")) {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const idx = trimmed.indexOf("=");
-    if (idx !== -1) {
-      const key = trimmed.slice(0, idx).trim();
-      const val = trimmed.slice(idx + 1).trim();
-      if (!process.env[key]) process.env[key] = val;
-      // Sanitize passwords if any
-      const displayVal = key.toLowerCase().includes("pass") || key.toLowerCase().includes("secret")
-        ? "********"
-        : val;
-      console.log(`   ${key} = ${displayVal}`);
+    if (trimmed && !trimmed.startsWith("#") && trimmed.includes("=")) {
+      const idx = trimmed.indexOf("=");
+      if (!process.env[trimmed.slice(0, idx).trim()]) {
+        process.env[trimmed.slice(0, idx).trim()] = trimmed.slice(idx + 1).trim();
+      }
     }
   }
 }
 
-console.log("\n========================================================");
-console.log("📡 TESTING PROXY CONNECTIVITY & IP LEAK CHECK");
-console.log("========================================================");
-
-const { PROVIDERS, getAuthToken, proxyFetch, directFetch, UA, MOBILE_HEADERS } = require("../backend/streamCore");
+const { PROVIDERS, getAuthToken, proxyFetch, UA, MOBILE_HEADERS } = require("../backend/streamCore");
 
 (async () => {
-  const proxyUrl = process.env.UPSTREAM_PROXY_URL;
-  console.log(`Configured UPSTREAM_PROXY_URL: ${proxyUrl || "NONE"}`);
+  console.log("========================================================");
+  console.log("🔬 DEEP PROBE: Platin WatchLink HTML & Header Reverse-Eng");
+  console.log("========================================================");
 
-  // Test 1: Direct VPS Datacenter IP
-  try {
-    const directIpRes = await directFetch("https://ipinfo.io/json", { timeout: 5000 });
-    const directGeo = await directIpRes.json();
-    console.log(`🖥️  Direct VPS IP: ${directGeo.ip} (${directGeo.org}, ${directGeo.city}, ${directGeo.country})`);
-  } catch (e) {
-    console.log(`🖥️  Direct VPS IP Check: Failed (${e.message})`);
-  }
+  // 1. Get fresh watch link from CBTF
+  const prov = PROVIDERS.cbtf;
+  const token = await getAuthToken("cbtf", true);
+  const watchRes = await proxyFetch(
+    `${prov.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+        Origin: prov.base,
+        Referer: `${prov.base}/`,
+        "User-Agent": UA,
+        ...MOBILE_HEADERS,
+      },
+      body: JSON.stringify({ streamId: "99.0010", timestamp: Date.now() }),
+      timeout: 8000,
+    }
+  );
 
-  // Test 2: Phone Proxy Indian 5G IP
-  if (proxyUrl) {
+  const d = await watchRes.json();
+  const watchUrl = d?.data?.url;
+  console.log("Fresh Watch URL:", watchUrl);
+  if (!watchUrl) return;
+
+  // Test variations of GET on watchUrl
+  const refererTests = [
+    { name: "No Referer", referer: "" },
+    { name: "CBTF Base", referer: "https://cbtfexchange.com/" },
+    { name: "CBTF Casino Base", referer: "https://casino.cbtfexchange.com/" },
+    { name: "CBTF Live Casino", referer: "https://cbtfexchange.com/live-casino/99.0010" },
+    { name: "Platin Self", referer: "https://live.livecdnplatin.com/" },
+    { name: "Nice444", referer: "https://nice444.com/" },
+    { name: "Startexch", referer: "https://startexch99.com/" },
+  ];
+
+  for (const t of refererTests) {
     try {
-      const proxyIpRes = await proxyFetch("https://ipinfo.io/json", { timeout: 6000 });
-      const proxyGeo = await proxyIpRes.json();
-      console.log(`📱 Phone Proxy IP: ${proxyGeo.ip} (${proxyGeo.org}, ${proxyGeo.city}, ${proxyGeo.country})`);
-      if (proxyGeo.org && proxyGeo.org.toLowerCase().includes("jio")) {
-        console.log("✅ PERFECT! Jio 5G Residential IP active through Tailscale!");
-      } else {
-        console.log(`ℹ️ Connected via: ${proxyGeo.org}`);
+      const headers = {
+        "User-Agent": UA,
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": '"macOS"',
+        "Sec-Fetch-Dest": "iframe",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "cross-site",
+        "Upgrade-Insecure-Requests": "1",
+      };
+      if (t.referer) headers["Referer"] = t.referer;
+
+      const res = await proxyFetch(watchUrl, {
+        method: "GET",
+        headers,
+        timeout: 5000,
+      });
+
+      const body = await res.text();
+      const hasCfg = body.includes("cfg");
+      const hasPlayer = body.includes("player.js");
+      const hasLoader = body.includes("loader.gif");
+      console.log(`[${t.name}] -> Status: ${res.status} | Length: ${body.length} | cfg: ${hasCfg} | player.js: ${hasPlayer} | loader.gif: ${hasLoader}`);
+      if (hasCfg || hasPlayer || body.length > 500) {
+        console.log(`🎉🎉🎉 SUCCESS WITH: ${t.name}!`);
+        console.log("Body preview:", body.slice(0, 300));
+        break;
       }
     } catch (e) {
-      console.log(`❌ Phone Proxy Check FAILED: ${e.message}`);
-      console.log("⚠️ Make sure 'Every Proxy' app is turned ON on your Realme phone and Tailscale is CONNECTED.");
+      console.log(`[${t.name}] -> Error: ${e.message}`);
+    }
+  }
+
+  // Also check if Platin's /player/player.js or other files can be fetched directly
+  console.log("\n--- Checking Static Assets from Platin ---");
+  for (const asset of ["player.js", "loader.gif", "index.html"]) {
+    try {
+      const aRes = await proxyFetch(`https://live.livecdnplatin.com/player/${asset}`, {
+        method: "GET",
+        headers: { "User-Agent": UA, Referer: "https://live.livecdnplatin.com/" },
+        timeout: 5000,
+      });
+      console.log(`Asset /player/${asset} -> HTTP ${aRes.status} | Length: ${(await aRes.text()).length}`);
+    } catch (e) {
+      console.log(`Asset /player/${asset} -> Error: ${e.message}`);
     }
   }
 
   console.log("\n========================================================");
-  console.log("🎰 TESTING CASINO EXCHANGE AUTH & WATCHLINK");
-  console.log("========================================================");
-
-  try {
-    const token = await getAuthToken("cbtf", true);
-    console.log(`✅ CBTF Auth Token Acquired: ${token.slice(0, 20)}...`);
-
-    const prov = PROVIDERS.cbtf;
-    const watchRes = await proxyFetch(
-      `${prov.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-          Origin: prov.base,
-          Referer: `${prov.base}/`,
-          "User-Agent": UA,
-          ...MOBILE_HEADERS,
-        },
-        body: JSON.stringify({ streamId: "99.0010", timestamp: Date.now() }),
-        timeout: 8000,
-      }
-    );
-
-    const d = await watchRes.json();
-    const watchUrl = d?.data?.url;
-    console.log(`✅ WatchLink HTTP ${watchRes.status} -> URL: ${watchUrl || JSON.stringify(d)}`);
-
-    if (watchUrl) {
-      console.log("\n--- Testing GET watchUrl via Phone Proxy with Referer ---");
-      const pageRes = await proxyFetch(watchUrl, {
-        method: "GET",
-        headers: {
-          "User-Agent": UA,
-          Referer: "https://cbtfexchange.com/",
-          ...MOBILE_HEADERS,
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Sec-Fetch-Dest": "iframe",
-          "Sec-Fetch-Mode": "navigate",
-          "Sec-Fetch-Site": "cross-site",
-        },
-        timeout: 6000,
-      });
-
-      const html = await pageRes.text();
-      console.log(`GET Page Status: ${pageRes.status} | Length: ${html.length} bytes`);
-      console.log(`HTML Preview: ${html.slice(0, 180)}`);
-
-      // Test Platin WebSocket
-      console.log("\n--- Testing Platin WebSocket Direct Connect ---");
-      const https = require("https");
-      const crypto = require("crypto");
-      const { getProxyAgent } = require("../backend/streamCore");
-      const agent = proxyUrl ? getProxyAgent(proxyUrl) : null;
-
-      const wsHeaders = {
-        Connection: "Upgrade",
-        Upgrade: "websocket",
-        "Sec-WebSocket-Version": "13",
-        "Sec-WebSocket-Key": crypto.randomBytes(16).toString("base64"),
-        Origin: "https://live.livecdnplatin.com",
-        "User-Agent": UA,
-      };
-
-      const req = https.request({
-        hostname: "livecdnplatin.com",
-        port: 443,
-        path: "/UNIVERSE-GE/websocket",
-        method: "GET",
-        headers: wsHeaders,
-        agent: agent,
-        timeout: 8000,
-        rejectUnauthorized: false,
-      });
-
-      req.on("upgrade", (res, socket) => {
-        console.log("🎉 Platin WebSocket HTTP 101 Switching Protocols SUCCESSFUL!");
-        socket.destroy();
-        console.log("\n========================================================");
-        console.log("DIAGNOSTIC SUMMARY:");
-        console.log("1. VPS .env is 100% CORRECT and proxy is ACTIVE.");
-        console.log("2. Exchange auth and watchlink are 100% WORKING.");
-        console.log("3. Platin WebSocket connects with 101 SWITCHING PROTOCOLS.");
-        console.log("========================================================");
-        process.exit(0);
-      });
-
-      req.on("error", (err) => {
-        console.log(`❌ WebSocket Error: ${err.message}`);
-        process.exit(1);
-      });
-
-      req.end();
-    }
-  } catch (e) {
-    console.error("❌ Test error:", e.message);
-  }
+  process.exit(0);
 })();
