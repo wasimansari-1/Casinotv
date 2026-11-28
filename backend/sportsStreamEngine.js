@@ -146,10 +146,10 @@ function getPatchedSportsPlayerJs() {
   }
 
   // High-performance stream optimizations
-  // 1. HLS Buffer & Gap Bridging: low-latency lookahead, 0.5s hole auto-skip, 0.1s instant nudge, multi-threaded worker
+  // 1. HLS Buffer & Gap Bridging: smooth playback, multi-threaded worker, zero buffer starvation
   js = js.replace(
     /liveSyncDurationCount:4,liveMaxLatencyDurationCount:10,maxBufferLength:20,backBufferLength:10/g,
-    "liveSyncDurationCount:3,liveMaxLatencyDurationCount:10,maxBufferLength:25,maxMaxBufferLength:60,backBufferLength:10,maxBufferHole:0.5,nudgeOffset:0.1,nudgeMaxRetry:5,highBufferWatchdogPeriod:1,enableWorker:!0,lowLatencyMode:!1",
+    "liveSyncDurationCount:4,liveMaxLatencyDurationCount:14,maxBufferLength:30,maxMaxBufferLength:60,backBufferLength:15,maxBufferHole:0.5,highBufferWatchdogPeriod:2,enableWorker:!0,lowLatencyMode:!1",
   );
 
   // 2. Hide Connecting status instantly when manifest is parsed or fragment buffered
@@ -158,10 +158,10 @@ function getPatchedSportsPlayerJs() {
     "xp.on(mp.Events.MANIFEST_PARSED,()=>{Tp(``);$.play().catch(()=>{})}),xp.on(mp.Events.FRAG_BUFFERED,()=>{Tp(``)})",
   );
 
-  // 2b. Debounced Buffering Indicator & Instant 0.1s Auto-Unsticker (Eliminates flashing Buffering... text)
+  // 2b. Debounced Buffering Indicator: Clean debounce without artificial frame-nudging micro-stutter
   js = js.replace(
     /\$\.addEventListener\(`waiting`,\(\)=>\{vp===`hls`&&Tp\(`Buffering…`\)\}\)/g,
-    "(()=>{var _b, _l=-1, _s=0; $.addEventListener(`waiting`,()=>{clearTimeout(_b);_b=setTimeout(()=>{if(vp===`hls`&&($.paused||$.readyState<3)){Tp(`Buffering…`)}},1800)}); $.addEventListener(`playing`,()=>{clearTimeout(_b);Tp(``)}); $.addEventListener(`timeupdate`,()=>{if($.currentTime>0&&!$.paused){clearTimeout(_b);if(gp)Tp(``)}}); setInterval(()=>{if(vp===`hls`&&!$.paused&&!$.ended&&$.readyState>=2){if($.currentTime===_l){_s++;if(_s>=2){try{$.currentTime+=0.08}catch(_){}_s=0}}else{_s=0;_l=$.currentTime}}},500)})()",
+    "(()=>{var _b; $.addEventListener(`waiting`,()=>{clearTimeout(_b);_b=setTimeout(()=>{if(vp===`hls`&&($.paused||$.readyState<3)){Tp(`Buffering…`)}},1800)}); $.addEventListener(`playing`,()=>{clearTimeout(_b);Tp(``)}); $.addEventListener(`timeupdate`,()=>{if($.currentTime>0&&!$.paused){clearTimeout(_b);if(gp)Tp(``)}})})()",
   );
 
   // 3. WebRTC Multi-Cloud STUN Redundancy: Google STUN 1 + 2 + Cloudflare STUN for instant 0ms ICE
@@ -659,11 +659,11 @@ function transformSportsHtml(html, watchUrl, eventId, providerOrigin, session, p
         home: "",
         freezeSeconds: 120, // 2 minutes freeze tolerance (prevents buffering reload loops)
         oneTimeToken: false, // Keep token alive (prevents loader freeze & allows HLS fallback)
-        offlineRetry: 3,
+        offlineRetry: 5,
         forceHls: false, // Native zero-latency WebRTC primary (just like Casino TV!)
         startMode: "webrtc",
-        webrtcRetries: 1, // Fast 1 retry (prevents 50s reconnecting loops)
-        webrtcTimeout: 3, // Fast 3s WebRTC handshake (instant failover to HLS in 3s flat!)
+        webrtcRetries: 3, // Full 3 retries (ensures WebRTC locks in without premature drop)
+        webrtcTimeout: 12, // 12s WebRTC handshake (plenty of time for full ICE gathering on mobile 4G/5G)
         frameAllow: {
           enforce: false,
           outer: { apps: false, hosts: [], sites: [] },
@@ -1851,6 +1851,7 @@ router.get("/hls/chunk.ts", async (req, res) => {
     const cached = sportsChunkCache.get(cacheKey);
     if (cached && Date.now() < cached.expiresAt && cached.buffer) {
       res.setHeader("Content-Type", cached.contentType || "video/mp2t");
+      res.setHeader("Content-Length", cached.buffer.length);
       res.setHeader("Access-Control-Allow-Origin", "*");
       res.setHeader("Cache-Control", "public, max-age=86400, immutable");
       return res.send(cached.buffer);
@@ -1862,6 +1863,7 @@ router.get("/hls/chunk.ts", async (req, res) => {
         const result = await inFlightSportsChunks.get(cacheKey);
         if (result && result.buffer) {
           res.setHeader("Content-Type", result.contentType || "video/mp2t");
+          res.setHeader("Content-Length", result.buffer.length);
           res.setHeader("Access-Control-Allow-Origin", "*");
           res.setHeader("Cache-Control", "public, max-age=86400, immutable");
           return res.send(result.buffer);
@@ -1906,6 +1908,9 @@ router.get("/hls/chunk.ts", async (req, res) => {
             const contentType =
               chunkRes.headers["content-type"] || "video/mp2t";
             res.setHeader("Content-Type", contentType);
+            if (chunkRes.headers["content-length"]) {
+              res.setHeader("Content-Length", chunkRes.headers["content-length"]);
+            }
             res.setHeader("Access-Control-Allow-Origin", "*");
             res.setHeader("Cache-Control", "public, max-age=86400, immutable");
 
@@ -1917,18 +1922,18 @@ router.get("/hls/chunk.ts", async (req, res) => {
             chunkRes.on("end", () => {
               try { res.end(); } catch (_) {}
               const fullBuffer = Buffer.concat(chunks);
-              // Cache segment for 60 seconds (video segments never change once created)
-              if (sportsChunkCache.size > 80) {
+              // Cache segment for 120 seconds in RAM (large ring buffer)
+              if (sportsChunkCache.size > 250) {
                 const oldest = sportsChunkCache.keys().next().value;
                 sportsChunkCache.delete(oldest);
               }
               const entry = {
                 buffer: fullBuffer,
                 contentType,
-                expiresAt: Date.now() + 60000,
+                expiresAt: Date.now() + 120000,
               };
               sportsChunkCache.set(cacheKey, entry);
-              resolve({ streamed: true });
+              resolve({ streamed: true, buffer: fullBuffer, contentType });
             });
             chunkRes.on("error", reject);
           },
