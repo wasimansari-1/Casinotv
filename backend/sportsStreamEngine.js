@@ -392,29 +392,13 @@ async function getSportsWatchUrl(
         betfairId,
         async () => {
           const token = await getAuthToken(provKey);
-          // 1. Direct fetch first (0 proxy bandwidth!)
-          let res = await directFetch(
-            `${provider.base}/api/exchange/streaming/exchEventsWatchLink`,
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `Bearer ${token}`,
-                Origin: provider.base,
-                Referer: `${provider.base}/`,
-                "User-Agent": UA,
-                ...MOBILE_HEADERS,
-              },
-              body: JSON.stringify({
-                streamId: betfairId,
-                timestamp: Date.now(),
-              }),
-              timeout: 4000,
-            },
-          ).catch(() => null);
+          const proxyUrl =
+            process.env.UPSTREAM_PROXY_URL ||
+            process.env.HTTPS_PROXY ||
+            process.env.HTTP_PROXY;
 
-          // 2. Fallback to proxyFetch only if direct fetch failed
-          if (!res || !res.ok) {
+          let res = null;
+          if (proxyUrl) {
             res = await proxyFetch(
               `${provider.base}/api/exchange/streaming/exchEventsWatchLink`,
               {
@@ -432,9 +416,29 @@ async function getSportsWatchUrl(
                   streamId: betfairId,
                   timestamp: Date.now(),
                 }),
-                timeout: 7000,
+                timeout: 8000,
               },
             );
+          } else {
+            res = await directFetch(
+              `${provider.base}/api/exchange/streaming/exchEventsWatchLink`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${token}`,
+                  Origin: provider.base,
+                  Referer: `${provider.base}/`,
+                  "User-Agent": UA,
+                  ...MOBILE_HEADERS,
+                },
+                body: JSON.stringify({
+                  streamId: betfairId,
+                  timestamp: Date.now(),
+                }),
+                timeout: 4000,
+              },
+            ).catch(() => null);
           }
 
           const data = await res.json();

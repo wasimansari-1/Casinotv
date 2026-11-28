@@ -158,12 +158,22 @@ function handleWebSocketProxy(clientReq, clientSocket, clientHead) {
       wsHeaders['Sec-WebSocket-Protocol'] = clientReq.headers['sec-websocket-protocol'];
     }
 
+    // When upstream proxy is configured, route WebSocket upgrade through proxy to maintain sticky IP session
+    let wsAgent = null;
+    if (proxyUrl && isSecure) {
+      try {
+        const { getProxyAgent } = require('./streamCore');
+        wsAgent = getProxyAgent(proxyUrl);
+      } catch (_) {}
+    }
+
     const upstreamReq = client.request({
       hostname: parsedTarget.hostname,
       port: port,
       path: parsedTarget.pathname + parsedTarget.search,
       method: 'GET',
       headers: wsHeaders,
+      agent: wsAgent,
       timeout: 15000,
       rejectUnauthorized: false,
       servername: parsedTarget.hostname

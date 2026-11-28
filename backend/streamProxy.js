@@ -270,14 +270,20 @@ async function warmCasinoTable(eventId, forceFresh = false) {
       : "https://nice444.com/";
     const session = watchData.session || null;
 
+    const proxyUrl =
+      process.env.UPSTREAM_PROXY_URL ||
+      process.env.HTTPS_PROXY ||
+      process.env.HTTP_PROXY;
+
     // Fetch player HTML matching the exact session/IP that acquired the ticket
     let pageRes = null;
-    if (session) {
+    if (proxyUrl || session) {
       pageRes = await proxyFetch(watchUrl, {
         session: session,
         headers: {
           "User-Agent": UA,
           Referer: providerOrigin,
+          ...MOBILE_HEADERS,
           Accept:
             "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
           "Accept-Language": "en-US,en;q=0.9",
@@ -1052,14 +1058,20 @@ router.get("/player/:eventId", async (req, res) => {
           : "https://casino.nice444.com/";
         const session = watchData.session || null;
 
+        const proxyUrl =
+          process.env.UPSTREAM_PROXY_URL ||
+          process.env.HTTPS_PROXY ||
+          process.env.HTTP_PROXY;
+
         // Fetch player HTML matching the exact session/IP that acquired the ticket
         let pageRes = null;
-        if (session) {
+        if (proxyUrl || session) {
           pageRes = await proxyFetch(watchUrl, {
             session: session,
             headers: {
               "User-Agent": UA,
               Referer: referer,
+              ...MOBILE_HEADERS,
               Accept:
                 "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
               "Accept-Language": "en-US,en;q=0.9",
@@ -1802,29 +1814,17 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
         }
       }
 
-      // 2. Fetch ping response: For Platin (strictly IP-bound ticket), always route through matching session
+      const proxyUrl =
+        process.env.UPSTREAM_PROXY_URL ||
+        process.env.HTTPS_PROXY ||
+        process.env.HTTP_PROXY;
       const proxySession = req.query.session
         ? parseInt(req.query.session, 10)
         : null;
       const isPlatin = targetUrl.includes("livecdnplatin.com");
 
       let upstreamRes = null;
-      if (!isPlatin) {
-        upstreamRes = await directFetch(targetUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Origin: targetOrigin,
-            Referer: decodedWatchUrl,
-            "User-Agent": UA,
-            Accept: "*/*",
-          },
-          body: JSON.stringify(payload),
-          timeout: 3500,
-        }).catch(() => null);
-      }
-
-      if (!upstreamRes || !upstreamRes.ok) {
+      if (proxyUrl || isPlatin) {
         upstreamRes = await proxyFetch(targetUrl, {
           method: "POST",
           session: proxySession,
@@ -1833,6 +1833,7 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
             Origin: targetOrigin,
             Referer: decodedWatchUrl,
             "User-Agent": UA,
+            ...MOBILE_HEADERS,
             Accept: "*/*",
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
@@ -1840,6 +1841,20 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
           },
           body: JSON.stringify(payload),
           timeout: 6000,
+        }).catch(() => null);
+      } else {
+        upstreamRes = await directFetch(targetUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Origin: targetOrigin,
+            Referer: decodedWatchUrl,
+            "User-Agent": UA,
+            ...MOBILE_HEADERS,
+            Accept: "*/*",
+          },
+          body: JSON.stringify(payload),
+          timeout: 3500,
         }).catch(() => null);
       }
 

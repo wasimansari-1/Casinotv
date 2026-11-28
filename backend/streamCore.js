@@ -455,14 +455,15 @@ function directFetch(urlStr, options = {}, redirectCount = 0) {
 // ============================================================================
 
 const UA =
-  "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36";
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 const MOBILE_HEADERS = {
-  "Sec-CH-UA":
-    '"Chromium";v="130", "Android WebView";v="130", "Not?A_Brand";v="99"',
-  "Sec-CH-UA-Mobile": "?1",
-  "Sec-CH-UA-Platform": '"Android"',
-  "X-Requested-With": "XMLHttpRequest",
+  "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+  "Sec-Ch-Ua-Mobile": "?0",
+  "Sec-Ch-Ua-Platform": '"Windows"',
+  "Sec-Fetch-Site": "cross-site",
+  "Sec-Fetch-Mode": "navigate",
+  "Accept-Language": "en-US,en;q=0.9",
 };
 
 const CLEAN_INDIAN_IPS = [
@@ -1340,19 +1341,13 @@ async function getWatchUrl(eventId, options = {}) {
                     timestamp: Date.now(),
                   });
 
-                  // 1. Direct fetch first (Zero proxy bandwidth, ultra-fast 200ms resolution!)
-                  res = await directFetch(
-                    `${provider.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`,
-                    {
-                      method: "POST",
-                      headers: watchHeaders,
-                      body: watchBody,
-                      timeout: 4000,
-                    },
-                  ).catch(() => null);
+                  const proxyUrl =
+                    process.env.UPSTREAM_PROXY_URL ||
+                    process.env.HTTPS_PROXY ||
+                    process.env.HTTP_PROXY;
 
-                  // 2. Fallback to proxyFetch only if direct fetch failed or was blocked
-                  if (!res || !res.ok) {
+                  // Route through residential proxy if configured to prevent datacenter IP blocking
+                  if (proxyUrl) {
                     res = await proxyFetch(
                       `${provider.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`,
                       {
@@ -1363,6 +1358,16 @@ async function getWatchUrl(eventId, options = {}) {
                         timeout: 8000,
                       },
                     );
+                  } else {
+                    res = await directFetch(
+                      `${provider.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`,
+                      {
+                        method: "POST",
+                        headers: watchHeaders,
+                        body: watchBody,
+                        timeout: 4000,
+                      },
+                    ).catch(() => null);
                   }
 
                   data = await res.json().catch(() => null);
