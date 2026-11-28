@@ -17,81 +17,99 @@ if (fs.existsSync(envPath)) {
   }
 }
 
-const { PROVIDERS, getAuthToken, proxyFetch, UA, MOBILE_HEADERS, GAME_MAP } = require("../backend/streamCore");
+const { PROVIDERS, getAuthToken, proxyFetch, UA, MOBILE_HEADERS } = require("../backend/streamCore");
 
 (async () => {
   console.log("========================================================");
-  console.log("🔍 Scanning Live Casino Tables (Checking for active CFG)");
+  console.log("🔬 Deep Upstream Platin /ping Protocol Reverse-Engineering");
   console.log("========================================================");
-
-  const testTables = [
-    { id: "99.0018", name: "Dragon Tiger" },
-    { id: "99.0030", name: "Lucky 7" },
-    { id: "99.0013", name: "1 Day Teen Patti" },
-    { id: "99.0010", name: "20-20 Teen Patti" }
-  ];
 
   const provKey = "cbtf";
   const prov = PROVIDERS[provKey];
   const token = await getAuthToken(provKey, true);
-  console.log(`Using provider: ${prov.name}`);
 
-  for (const table of testTables) {
-    console.log(`\nTesting [${table.id}] ${table.name}...`);
+  const watchRes = await proxyFetch(
+    `${prov.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+        Origin: prov.base,
+        Referer: `${prov.base}/`,
+        "User-Agent": UA,
+        ...MOBILE_HEADERS,
+      },
+      body: JSON.stringify({ streamId: "99.0010", timestamp: Date.now() }),
+      timeout: 8000,
+    }
+  );
+
+  const d = await watchRes.json();
+  const watchUrl = d?.data?.url;
+  console.log("Fresh Watch URL:", watchUrl);
+  if (!watchUrl) return;
+
+  const urlObj = new URL(watchUrl);
+  const ticketPath = urlObj.pathname; // e.g. /w/XYZ
+
+  const variations = [
+    { name: "/w/TICKET/ping", url: `https://live.livecdnplatin.com${ticketPath}/ping` },
+    { name: "/w/TICKET/ping (page: cbtfexchange.com)", url: `https://live.livecdnplatin.com${ticketPath}/ping`, page: "https://cbtfexchange.com" },
+    { name: "/w/TICKET/ping (page: casino.cbtfexchange.com)", url: `https://live.livecdnplatin.com${ticketPath}/ping`, page: "https://casino.cbtfexchange.com" },
+    { name: "/w/TICKET/ping (page: nice444.com)", url: `https://live.livecdnplatin.com${ticketPath}/ping`, page: "https://nice444.com" },
+    { name: "/w/TICKET/ping (no page)", url: `https://live.livecdnplatin.com${ticketPath}/ping`, page: "" },
+    { name: "/ping (with ticket query)", url: `https://live.livecdnplatin.com/ping?ticket=${encodeURIComponent(ticketPath.replace("/w/", ""))}` },
+    { name: "/ping (with sid)", url: `https://live.livecdnplatin.com/ping` },
+  ];
+
+  for (const v of variations) {
+    const payload = {
+      sid: "test_" + Date.now(),
+      mode: "connecting",
+      init: true,
+      token: true,
+      tz: "Asia/Kolkata",
+      tzo: 330,
+      quality: null,
+      diag: []
+    };
+    if (v.page !== undefined) {
+      if (v.page) payload.page = v.page;
+    } else {
+      payload.page = "https://cbtfexchange.com/";
+    }
+
     try {
-      const res = await proxyFetch(
-        `${prov.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-            Origin: prov.base,
-            Referer: `${prov.base}/`,
-            "User-Agent": UA,
-            ...MOBILE_HEADERS,
-          },
-          body: JSON.stringify({ streamId: table.id, timestamp: Date.now() }),
-          timeout: 8000,
-        }
-      );
-
-      const d = await res.json();
-      const watchUrl = d?.data?.url;
-      if (!watchUrl) {
-        console.log(`WatchLink error:`, d);
-        continue;
-      }
-
-      // Test with referer prov.casinoBase vs prov.base
-      const pageRes = await proxyFetch(watchUrl, {
-        method: "GET",
+      const res = await proxyFetch(v.url, {
+        method: "POST",
         headers: {
+          "Content-Type": "application/json",
+          Origin: "https://live.livecdnplatin.com",
+          Referer: watchUrl,
           "User-Agent": UA,
-          Referer: `${prov.casinoBase}/`,
           ...MOBILE_HEADERS,
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Sec-Fetch-Dest": "iframe",
-          "Sec-Fetch-Mode": "navigate",
-          "Sec-Fetch-Site": "cross-site",
+          Accept: "*/*",
+          "Sec-Fetch-Dest": "empty",
+          "Sec-Fetch-Mode": "cors",
+          "Sec-Fetch-Site": "same-origin"
         },
-        timeout: 6000,
+        body: JSON.stringify(payload),
+        timeout: 5000
       });
 
-      const html = await pageRes.text();
-      console.log(`Status: ${pageRes.status} | HTML Length: ${html.length}`);
-      if (html.includes("cfg")) {
-        console.log(`🎉🎉🎉 SUCCESS! TABLE ${table.name} HAS LIVE STREAM CFG!`);
-        console.log("CFG snippet:", html.match(/<script type="application\/json" id="cfg">([^<]+)<\/script>/)?.[1]);
+      const text = await res.text();
+      console.log(`[${v.name}] -> HTTP ${res.status}:`, text.slice(0, 150));
+      if (text.includes("token")) {
+        console.log(`🎉🎉🎉 SUCCESS WITH: ${v.name}!`);
+        console.log("Full response:", text);
         break;
-      } else {
-        console.log(`Returned 339-byte loader (${html.slice(0, 100)}...)`);
       }
     } catch (e) {
-      console.error(`Error on ${table.name}:`, e.message);
+      console.log(`[${v.name}] -> Error:`, e.message);
     }
   }
 
-  console.log("\n========================================================");
+  console.log("========================================================");
   process.exit(0);
 })();
