@@ -968,24 +968,18 @@ router.get("/player/:eventId", async (req, res) => {
 
         let html = await pageRes.text();
 
-        // VALIDATION: Ensure upstream didn't return an Access Blocked or corrupted page
-        if (
-          html.includes("Access blocked") ||
-          html.includes("copied player") ||
-          html.includes("Stream unavailable") ||
-          !html.includes("cfg")
-        ) {
-          console.warn(
-            `[Casino Player] Upstream returned blocked/invalid player for ${eventId} on attempt ${attempt}. Rotating session & account...`,
+        // If upstream returned a native notice or loader from provider, pass through directly
+        if (!html.includes("cfg")) {
+          html = html.replace(/src=["'](?:\/player\/loader\.gif|loader\.gif)["']/g, 'src="/api/stream/player-assets/loader.gif"');
+          html = html.replace(/href=["'](?:\/player\/loader\.gif|loader\.gif)["']/g, 'href="/api/stream/player-assets/loader.gif"');
+          res.setHeader("Content-Type", "text/html; charset=utf-8");
+          res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+          res.setHeader("Permissions-Policy", "unload=*");
+          res.setHeader(
+            "Content-Security-Policy",
+            securityEngine.getFrameAncestorsCSP(),
           );
-          await invalidateWatchUrl(eventId);
-          rotateTableSession(eventId, "Upstream ticket rejected");
-          rotateTableAccount(eventId);
-          if (attempt < 3) {
-            await new Promise((r) => setTimeout(r, 250));
-            continue;
-          }
-          throw new Error("Upstream rejected player ticket");
+          return res.send(html);
         }
 
         html = transformPlayerHtml(
@@ -1135,10 +1129,10 @@ router.get("/player/:eventId", async (req, res) => {
       return res.send(injectLiveTokenIntoHtml(stale.html, eventId));
     }
 
-    // Clean player fallback: Auto-retrying black screen with centered loader GIF (no synthetic error card)
-    const cleanPlayerHtml = `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;padding:0;width:100%;height:100%;background:#000;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#64748b;font-family:sans-serif}.msg{text-align:center}</style><script>setTimeout(function(){location.reload();}, 3000);</script></head><body><div class="msg"><img src="/api/stream/player-assets/loader.gif" style="width:48px;height:48px;display:block;margin:0 auto 10px;opacity:0.7"><div style="color:#94a3b8;font-size:12px;font-weight:500;">Connecting live stream...</div></div></body></html>`;
+    // Clean player fallback: Auto-retrying native loader matching Universe Studio (no synthetic error card)
+    const nativeLoaderHtml = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Live</title><style>html,body{height:100%;margin:0;background:#000}img{position:fixed;top:50%;left:50%;width:64px;height:64px;margin:-32px 0 0 -32px}</style><script>setTimeout(function(){location.reload();}, 3000);</script></head><body><img src="/api/stream/player-assets/loader.gif" alt=""></body></html>`;
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.status(200).send(cleanPlayerHtml);
+    return res.status(200).send(nativeLoaderHtml);
   } finally {
     inFlightPlayers.delete(eventId);
     await redisClient.releaseLock(clusterLockKey).catch(() => {});
