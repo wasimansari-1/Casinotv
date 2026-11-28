@@ -249,18 +249,6 @@ export default function App() {
               {sportsEvents.length}
             </span>
           </button>
-
-          <button
-            onClick={() => {
-              setMainHub('status');
-              if (window.location.pathname !== '/status') window.history.pushState(null, '', '/status');
-            }}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold text-slate-400 hover:text-emerald-400 transition-all hover:bg-emerald-500/10"
-            title="Master Live Status & VPS Traffic Inspector"
-          >
-            <Activity className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
-            <span className="hidden md:inline">Status</span>
-          </button>
         </div>
 
         {/* Right Search Input */}
