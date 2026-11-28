@@ -1186,10 +1186,9 @@ router.get("/player/:eventId", async (req, res) => {
           );
         }
 
-        // Fast pre-warm initial ping handshake before returning HTML so client gets 0ms ping!
-        const cfgMatch = html.match(
-          /<script type="application\/json" id="cfg">([^<]+)<\/script>/,
-        );
+        // Skip server-side pre-warm ping (sending init+token together triggers Platin 403 / viewer_ip_blocked);
+        // Let the real browser player.js execute its native 2-step ping through /proxy-ping!
+        const cfgMatch = null;
         if (cfgMatch) {
           try {
             const cfg = JSON.parse(cfgMatch[1]);
@@ -1827,7 +1826,7 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
     const payload = {
       ...req.body,
       init: isInit,
-      token: true,
+      ...(req.body?.token ? { token: true } : {}),
       page: pageOrigin,
       tz: req.body?.tz || "Asia/Kolkata",
       tzo: req.body?.tzo !== undefined ? req.body.tzo : 330,

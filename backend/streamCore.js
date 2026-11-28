@@ -499,7 +499,7 @@ const PROVIDERS = {
     base: "https://shan444.com",
     casinoBase: "https://casino.shan444.com",
     accounts: [
-      { user: "sdemo", pass: "Asdf12345", session: Math.floor(Math.random() * 8000) + 1000 },
+      { user: "sdemo", pass: "Asdf12345", session: 1001 },
     ],
   },
   cbtf: {
@@ -695,8 +695,11 @@ async function getAuthToken(providerKey = "cbtf", forceRefresh = false, targetAc
     return mem.token;
   }
 
-  // 2. Check distributed Redis cache
+  // 2. Check distributed Redis cache (wait briefly on cold boot so we never miss cached 300m JWT)
   if (!forceRefresh) {
+    if (redisClient.isReady === false) {
+      await new Promise((r) => setTimeout(r, 400));
+    }
     const cachedToken = await redisClient.get(redisAuthKey);
     if (cachedToken && typeof cachedToken === "string") {
       const expMs = getJwtExpiryMs(cachedToken);
