@@ -3,6 +3,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { execFileSync } = require("child_process");
 
 const envPath = path.join(__dirname, "../.env");
 if (fs.existsSync(envPath)) {
@@ -19,14 +20,8 @@ if (fs.existsSync(envPath)) {
 
 const { PROVIDERS, getAuthToken, proxyFetch, UA, MOBILE_HEADERS } = require("../backend/streamCore");
 
-(async () => {
-  console.log("========================================================");
-  console.log("🔬 DEEP PROBE: Platin WatchLink HTML & Header Reverse-Eng");
-  console.log("========================================================");
-
-  // 1. Get fresh watch link from CBTF
+async function getFreshWatchUrl(token) {
   const prov = PROVIDERS.cbtf;
-  const token = await getAuthToken("cbtf", true);
   const watchRes = await proxyFetch(
     `${prov.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`,
     {
@@ -43,73 +38,52 @@ const { PROVIDERS, getAuthToken, proxyFetch, UA, MOBILE_HEADERS } = require("../
       timeout: 8000,
     }
   );
-
   const d = await watchRes.json();
-  const watchUrl = d?.data?.url;
-  console.log("Fresh Watch URL:", watchUrl);
-  if (!watchUrl) return;
+  return d?.data?.url;
+}
 
-  // Test variations of GET on watchUrl
-  const refererTests = [
-    { name: "No Referer", referer: "" },
-    { name: "CBTF Base", referer: "https://cbtfexchange.com/" },
-    { name: "CBTF Casino Base", referer: "https://casino.cbtfexchange.com/" },
-    { name: "CBTF Live Casino", referer: "https://cbtfexchange.com/live-casino/99.0010" },
-    { name: "Platin Self", referer: "https://live.livecdnplatin.com/" },
-    { name: "Nice444", referer: "https://nice444.com/" },
-    { name: "Startexch", referer: "https://startexch99.com/" },
+function curlTest(url, useProxy) {
+  const args = [
+    "-s",
+    "--http2",
+    "-H", "Referer: https://cbtfexchange.com/",
+    "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "-H", "Accept-Language: en-US,en;q=0.9",
+    "-H", "Sec-Fetch-Dest: iframe",
+    "-H", "Sec-Fetch-Mode: navigate",
+    "-H", "Sec-Fetch-Site: cross-site",
+    "-A", UA,
   ];
+  if (useProxy && process.env.UPSTREAM_PROXY_URL) {
+    args.push("-x", process.env.UPSTREAM_PROXY_URL);
+  }
+  args.push(url);
+  return execFileSync("curl", args, { encoding: "utf8", timeout: 10000 });
+}
 
-  for (const t of refererTests) {
-    try {
-      const headers = {
-        "User-Agent": UA,
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"macOS"',
-        "Sec-Fetch-Dest": "iframe",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "cross-site",
-        "Upgrade-Insecure-Requests": "1",
-      };
-      if (t.referer) headers["Referer"] = t.referer;
+(async () => {
+  console.log("========================================================");
+  console.log("🔬 TLS / IP ISOLATION TEST: curl --http2 (Proxy vs Direct)");
+  console.log("========================================================");
 
-      const res = await proxyFetch(watchUrl, {
-        method: "GET",
-        headers,
-        timeout: 5000,
-      });
+  const token = await getAuthToken("cbtf", true);
 
-      const body = await res.text();
-      const hasCfg = body.includes("cfg");
-      const hasPlayer = body.includes("player.js");
-      const hasLoader = body.includes("loader.gif");
-      console.log(`[${t.name}] -> Status: ${res.status} | Length: ${body.length} | cfg: ${hasCfg} | player.js: ${hasPlayer} | loader.gif: ${hasLoader}`);
-      if (hasCfg || hasPlayer || body.length > 500) {
-        console.log(`🎉🎉🎉 SUCCESS WITH: ${t.name}!`);
-        console.log("Body preview:", body.slice(0, 300));
-        break;
-      }
-    } catch (e) {
-      console.log(`[${t.name}] -> Error: ${e.message}`);
-    }
+  // Test 1: Fresh WatchURL + curl --http2 via Phone Proxy
+  const url1 = await getFreshWatchUrl(token);
+  console.log("\n1. Fresh Watch URL #1:", url1);
+  if (url1) {
+    const html1 = curlTest(url1, true);
+    console.log(`[curl --http2 VIA PHONE PROXY] Length: ${html1.length} | cfg: ${html1.includes("cfg")} | loader.gif: ${html1.includes("loader.gif")}`);
+    if (html1.includes("cfg")) console.log("🎉 PHONE PROXY + CURL HTTP2 UNLOCKED CFG!");
   }
 
-  // Also check if Platin's /player/player.js or other files can be fetched directly
-  console.log("\n--- Checking Static Assets from Platin ---");
-  for (const asset of ["player.js", "loader.gif", "index.html"]) {
-    try {
-      const aRes = await proxyFetch(`https://live.livecdnplatin.com/player/${asset}`, {
-        method: "GET",
-        headers: { "User-Agent": UA, Referer: "https://live.livecdnplatin.com/" },
-        timeout: 5000,
-      });
-      console.log(`Asset /player/${asset} -> HTTP ${aRes.status} | Length: ${(await aRes.text()).length}`);
-    } catch (e) {
-      console.log(`Asset /player/${asset} -> Error: ${e.message}`);
-    }
+  // Test 2: Fresh WatchURL + curl --http2 Direct VPS (no proxy)
+  const url2 = await getFreshWatchUrl(token);
+  console.log("\n2. Fresh Watch URL #2:", url2);
+  if (url2) {
+    const html2 = curlTest(url2, false);
+    console.log(`[curl --http2 DIRECT VPS] Length: ${html2.length} | cfg: ${html2.includes("cfg")} | loader.gif: ${html2.includes("loader.gif")}`);
+    if (html2.includes("cfg")) console.log("🎉 DIRECT VPS + CURL HTTP2 UNLOCKED CFG!");
   }
 
   console.log("\n========================================================");
