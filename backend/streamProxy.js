@@ -569,6 +569,48 @@ router.get("/health", async (req, res) => {
   });
 });
 
+// Diagnostic API to verify phone proxy connectivity from VPS
+router.get("/test-proxy", async (req, res) => {
+  const proxyUrl =
+    process.env.UPSTREAM_PROXY_URL ||
+    process.env.HTTPS_PROXY ||
+    process.env.HTTP_PROXY ||
+    "";
+
+  const result = {
+    configured: Boolean(proxyUrl),
+    proxyUrl: proxyUrl ? proxyUrl.replace(/:\/\/.*@/, "://***:***@") : "NONE",
+    reachable: false,
+    latencyMs: 0,
+    geo: null,
+    error: null,
+  };
+
+  if (!proxyUrl) {
+    return res.json({
+      ...result,
+      message: "No UPSTREAM_PROXY_URL configured in environment.",
+    });
+  }
+
+  const start = Date.now();
+  try {
+    const geoRes = await proxyFetch("https://ipinfo.io/json", { timeout: 6000 });
+    result.latencyMs = Date.now() - start;
+    if (geoRes && geoRes.ok) {
+      result.reachable = true;
+      result.geo = await geoRes.json();
+    } else {
+      result.error = `HTTP ${geoRes?.status}: ${geoRes?.statusText}`;
+    }
+  } catch (err) {
+    result.latencyMs = Date.now() - start;
+    result.error = err.message;
+  }
+
+  res.json(result);
+});
+
 router.get("/metrics", async (req, res) => {
   res.json({
     success: true,
