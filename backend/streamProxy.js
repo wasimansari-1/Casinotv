@@ -176,8 +176,11 @@ function resolveTokenExpiry(token, fallbackMs = 60000) {
 // Strict validity check: Token must be non-empty and unexpired
 function isTokenValid(tokenObj) {
   if (!tokenObj || !tokenObj.token) return false;
-  const expiresAt = Number(tokenObj.expiresAt) || 0;
-  return Date.now() < (expiresAt - 2000);
+  let expiresAt = Number(tokenObj.expiresAt) || 0;
+  if (!expiresAt && typeof tokenObj.token === "string") {
+    expiresAt = resolveTokenExpiry(tokenObj.token);
+  }
+  return Date.now() < (expiresAt - 4000);
 }
 
 // Helper: Return proxied WebSocket URL so browsers never get blocked by upstream Origin 403 checks
@@ -206,25 +209,20 @@ function getProxiedWsUrl(originalWsUrl, defaultHost = "livecdnplatin.com") {
 function injectLiveTokenIntoHtml(html, eventId) {
   let tokenObj = tableTokenCache.get(eventId);
   const valid = isTokenValid(tokenObj);
-  const token = valid ? tokenObj.token : "";
-  const ws = valid ? getProxiedWsUrl(tokenObj.wsUrl) : fallbackWsUrl;
 
-  if (token) {
-    return html.replace(
-      /<script type="application\/json" id="cfg">([^<]+)<\/script>/,
-      (match, p1) => {
-        try {
-          const cfg = JSON.parse(p1);
-          cfg.token = token;
-          cfg.wsUrl = ws;
-          return `<script type="application/json" id="cfg">${JSON.stringify(cfg)}</script>`;
-        } catch (_) {
-          return match;
-        }
-      },
-    );
-  }
-  return html;
+  return html.replace(
+    /<script type="application\/json" id="cfg">([^<]+)<\/script>/,
+    (match, p1) => {
+      try {
+        const cfg = JSON.parse(p1);
+        cfg.token = valid ? tokenObj.token : "";
+        cfg.wsUrl = valid ? getProxiedWsUrl(tokenObj.wsUrl) : fallbackWsUrl;
+        return `<script type="application/json" id="cfg">${JSON.stringify(cfg)}</script>`;
+      } catch (_) {
+        return match;
+      }
+    },
+  );
 }
 
 // Helper: Pre-warm or force-fetch a single casino table in memory/Redis with distributed lock
@@ -788,16 +786,19 @@ router.get("/player/:eventId", async (req, res) => {
     ) {
       // Fast path: Synchronize active table token if present in Redis
       let tokenObj = tableTokenCache.get(eventId);
-      if (!tokenObj || !tokenObj.token) {
+      if (!isTokenValid(tokenObj)) {
         const redisToken = await redisClient
           .get(`table_token:${eventId}`)
           .catch(() => null);
-        if (redisToken && redisToken.token) {
+        if (isTokenValid(redisToken)) {
           tokenObj = redisToken;
           tableTokenCache.set(eventId, tokenObj);
+        } else {
+          tableTokenCache.delete(eventId);
+          tokenObj = null;
         }
       }
-      const finalHtml = tokenObj?.token ? injectLiveTokenIntoHtml(cached.html, eventId) : cached.html;
+      const finalHtml = injectLiveTokenIntoHtml(cached.html, eventId);
 
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
@@ -825,18 +826,21 @@ router.get("/player/:eventId", async (req, res) => {
 
       // Fast path: Synchronize active table token if present in Redis
       let tokenObj = tableTokenCache.get(eventId);
-      if (!tokenObj || !tokenObj.token) {
+      if (!isTokenValid(tokenObj)) {
         const redisToken = await redisClient
           .get(`table_token:${eventId}`)
           .catch(() => null);
-        if (redisToken && redisToken.token) {
+        if (isTokenValid(redisToken)) {
           tokenObj = redisToken;
           tableTokenCache.set(eventId, tokenObj);
+        } else {
+          tableTokenCache.delete(eventId);
+          tokenObj = null;
         }
       }
 
       // Pure Redis-First Serving: Never block or hammer upstream if HTML is already cached!
-      const finalHtml = tokenObj?.token ? injectLiveTokenIntoHtml(redisHtml, eventId) : redisHtml;
+      const finalHtml = injectLiveTokenIntoHtml(redisHtml, eventId);
 
       res.setHeader("Content-Type", "text/html; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
@@ -1627,13 +1631,15 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
       if (
         cachedPing &&
         cachedPing.data &&
-        Date.now() - cachedPing.timestamp < 180000 &&
-        cachedPing.data.token
+        isTokenValid(cachedPing.data) &&
+        Date.now() - cachedPing.timestamp < 60000
       ) {
         return res.status(200).json({
           ...cachedPing.data,
           wsUrl: getProxiedWsUrl(cachedPing.data.wsUrl),
         });
+      } else {
+        pingCache.delete(targetUrl);
       }
     }
 
@@ -1674,23 +1680,27 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
         }
       }
 
-      // 2. Fetch ping response: Direct first (0 proxy overhead!), fallback to matching residential proxy session
+      // 2. Fetch ping response: For Platin (strictly IP-bound ticket), always route through matching session
       const proxySession = req.query.session
         ? parseInt(req.query.session, 10)
         : null;
+      const isPlatin = targetUrl.includes("livecdnplatin.com");
 
-      let upstreamRes = await directFetch(targetUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Origin: targetOrigin,
-          Referer: decodedWatchUrl,
-          "User-Agent": UA,
-          Accept: "*/*",
-        },
-        body: JSON.stringify(payload),
-        timeout: 3500,
-      }).catch(() => null);
+      let upstreamRes = null;
+      if (!isPlatin) {
+        upstreamRes = await directFetch(targetUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Origin: targetOrigin,
+            Referer: decodedWatchUrl,
+            "User-Agent": UA,
+            Accept: "*/*",
+          },
+          body: JSON.stringify(payload),
+          timeout: 3500,
+        }).catch(() => null);
+      }
 
       if (!upstreamRes || !upstreamRes.ok) {
         upstreamRes = await proxyFetch(targetUrl, {
@@ -1787,14 +1797,15 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
       }
     }
 
-    // Fallback if warmCasinoTable couldn't get fresh token - preserve known token
+    // Fallback if warmCasinoTable couldn't get fresh token - preserve known token ONLY if still valid
     const cachedObj = eventId ? (tableTokenCache.get(eventId) || (await redisClient.get(`table_token:${eventId}`).catch(() => null))) : null;
-    const cachedToken = cachedObj?.token || "";
+    const isCachedValid = isTokenValid(cachedObj);
+    const cachedToken = isCachedValid ? cachedObj.token : "";
     const cachedWs = (cachedObj && cachedObj.wsUrl) || fallbackWsUrl;
     return res.status(200).json({
-      ok: true,
-      state: "live",
-      streamId: fallbackStreamId,
+      ok: Boolean(cachedToken),
+      state: cachedToken ? "live" : "connecting",
+      streamId: cachedObj?.streamId || fallbackStreamId,
       wsUrl: getProxiedWsUrl(cachedWs),
       token: cachedToken,
       maintenance: null,
@@ -1802,12 +1813,13 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
     });
   } catch (err) {
     const cachedObj = eventId ? tableTokenCache.get(eventId) : null;
-    const cachedToken = cachedObj?.token || "";
+    const isCachedValid = isTokenValid(cachedObj);
+    const cachedToken = isCachedValid ? cachedObj.token : "";
     const cachedWs = (cachedObj && cachedObj.wsUrl) || fallbackWsUrl;
     return res.status(200).json({
-      ok: true,
-      state: "live",
-      streamId: fallbackStreamId,
+      ok: Boolean(cachedToken),
+      state: cachedToken ? "live" : "connecting",
+      streamId: cachedObj?.streamId || fallbackStreamId,
       wsUrl: getProxiedWsUrl(cachedWs),
       token: cachedToken,
       maintenance: null,
