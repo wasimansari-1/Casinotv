@@ -79,13 +79,8 @@ const { PROVIDERS, getAuthToken, proxyFetch, UA, MOBILE_HEADERS } = require("../
           timeout: 6000,
         });
 
-        const html = await pageRes.text();
-        console.log(`GET Page Status: ${pageRes.status} | Length: ${html.length}`);
-        if (html.includes("cfg")) {
-          console.log("🎉 FOUND EMBEDDED CFG IN HTML!");
-        } else {
-          console.log("HTML Preview:", html.slice(0, 150));
-        }
+        console.log(`GET Page Status: ${pageRes.status} | Length: ${(await pageRes.text()).length}`);
+        console.log("ALL Page Headers:", JSON.stringify(pageRes.headers.raw(), null, 2));
 
         // Test POST /ping
         const targetPingUrl = watchUrl.endsWith("/") ? `${watchUrl}ping` : `${watchUrl}/ping`;
