@@ -4,7 +4,6 @@
 const fs = require("fs");
 const path = require("path");
 
-// Native .env parser with zero external dependencies
 const envPath = path.join(__dirname, "../.env");
 if (fs.existsSync(envPath)) {
   const lines = fs.readFileSync(envPath, "utf8").split("\n");
@@ -19,82 +18,95 @@ if (fs.existsSync(envPath)) {
   }
 }
 
-const { getWatchUrl, proxyFetch, directFetch, UA, MOBILE_HEADERS } = require("../backend/streamCore");
+const { getWatchUrl, proxyFetch, UA, MOBILE_HEADERS } = require("../backend/streamCore");
 
 (async () => {
   console.log("========================================================");
-  console.log("🔍 Live VPS Stream & Platin CDN Diagnostic");
+  console.log("🔍 Testing GET player page first, then POST /ping");
   console.log("========================================================");
 
-  const proxyUrl = process.env.UPSTREAM_PROXY_URL || "NONE";
-  console.log("1. Configured Proxy:", proxyUrl);
+  // 1. Get fresh watch link
+  const watchData = await getWatchUrl("99.0010", { forceFresh: true });
+  console.log("1. Watch URL:", watchData.url);
 
-  // 1. Check IP info via proxy
-  if (proxyUrl !== "NONE") {
-    try {
-      const geoRes = await proxyFetch("https://ipinfo.io/json", { timeout: 5000 });
-      const geo = await geoRes.json();
-      console.log(`✅ Phone Proxy Active! IP: ${geo.ip} | ISP: ${geo.org} | City: ${geo.city}, ${geo.country}`);
-    } catch (e) {
-      console.error("❌ Phone Proxy Check Failed:", e.message);
-    }
+  // 2. Step 1 of real browser: GET /w/TICKET
+  console.log("\n2. Executing Step 1: GET player HTML page...");
+  const pageRes = await proxyFetch(watchData.url, {
+    method: "GET",
+    headers: {
+      "User-Agent": UA,
+      Referer: watchData.origin || "https://nice444.com/",
+      ...MOBILE_HEADERS,
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+      "Sec-Fetch-Dest": "iframe",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Site": "cross-site",
+    },
+    timeout: 8000,
+  });
+
+  console.log("GET Page Status:", pageRes.status);
+  const cookieHeader = pageRes.headers.get("set-cookie") || "";
+  console.log("Set-Cookie:", cookieHeader || "none");
+  const html = await pageRes.text();
+  console.log("HTML length:", html.length);
+  console.log("HTML preview:\n", html.slice(0, 300));
+
+  // Extract embedded cfg if present
+  const cfgMatch = html.match(/<script type="application\/json" id="cfg">([^<]+)<\/script>/);
+  if (cfgMatch) {
+    console.log("Found embedded cfg:", cfgMatch[1]);
   }
 
-  // 2. Fetch fresh WatchLink from nice444
-  console.log("\n2. Fetching fresh WatchLink ticket for 20-20 Teen Patti (99.0010)...");
-  try {
-    const watchData = await getWatchUrl("99.0010", { forceFresh: true });
-    console.log("✅ WatchData received:", {
-      url: watchData.url,
-      origin: watchData.origin,
-      provider: watchData.provider
-    });
+  // 3. Step 2 of real browser: POST /ping with variations of page origin
+  const targetPingUrl = watchData.url.endsWith("/") ? `${watchData.url}ping` : `${watchData.url}/ping`;
+  console.log("\n3. Testing POST /ping...");
 
-    const targetPingUrl = watchData.url.endsWith("/") ? `${watchData.url}ping` : `${watchData.url}/ping`;
-    console.log("\n3. Testing Platin CDN /ping handshake via Phone Proxy...");
-    console.log("Target Ping URL:", targetPingUrl);
+  const pageCandidates = [
+    "https://nice444.com",
+    "https://casino.nice444.com",
+    "https://nice444.com/",
+    "https://cbtfexchange.com",
+    "https://startexch99.com"
+  ];
 
+  for (const pageCandidate of pageCandidates) {
     const pingPayload = {
-      sid: "test_probe_" + Date.now(),
+      sid: "probe_" + Date.now(),
       mode: "connecting",
       init: true,
       token: true,
       tz: "Asia/Kolkata",
       tzo: 330,
-      page: watchData.origin || "https://nice444.com/"
+      page: pageCandidate
     };
+
+    const pingHeaders = {
+      "Content-Type": "application/json",
+      Origin: new URL(targetPingUrl).origin,
+      Referer: watchData.url,
+      "User-Agent": UA,
+      ...MOBILE_HEADERS,
+      Accept: "*/*",
+      "Sec-Fetch-Dest": "empty",
+      "Sec-Fetch-Mode": "cors",
+      "Sec-Fetch-Site": "same-origin",
+    };
+    if (cookieHeader) pingHeaders["Cookie"] = cookieHeader.split(";")[0];
 
     const pingRes = await proxyFetch(targetPingUrl, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Origin: new URL(targetPingUrl).origin,
-        Referer: watchData.url,
-        "User-Agent": UA,
-        ...MOBILE_HEADERS,
-        Accept: "*/*",
-      },
+      headers: pingHeaders,
       body: JSON.stringify(pingPayload),
-      timeout: 8000
+      timeout: 6000
     });
 
-    console.log("HTTP Status:", pingRes.status, pingRes.statusText);
     const pingText = await pingRes.text();
-    console.log("Upstream Platin Response Body:\n", pingText);
-
-    try {
-      const data = JSON.parse(pingText);
-      if (data.token) {
-        console.log("\n🎉 SUCCESS! Platin Token generated successfully!");
-        console.log("WebSocket URL:", data.wsUrl);
-        console.log("Stream ID:", data.streamId);
-      } else if (data.stop || data.code === "B1") {
-        console.log("\n⚠️ Platin Blocked: Upstream returned stop/B1. IP or session mismatch.");
-      }
-    } catch (_) {}
-
-  } catch (err) {
-    console.error("❌ Stream Error:", err.message);
+    console.log(`Page: [${pageCandidate}] -> Status: ${pingRes.status} -> Response:`, pingText);
+    if (pingText.includes("token")) {
+      console.log("🎉 SUCCESS WITH PAGE:", pageCandidate);
+      break;
+    }
   }
 
   console.log("========================================================");
