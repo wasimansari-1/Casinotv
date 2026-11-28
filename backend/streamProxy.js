@@ -303,12 +303,11 @@ async function warmCasinoTable(eventId, forceFresh = false) {
     if (pageRes && pageRes.ok) {
       let html = await pageRes.text();
 
-      // Strict validation: Don't cache blocked or invalid player HTML
+      // Strict validation: Don't cache blocked or unauthorized player HTML
       if (
         html.includes("Access blocked") ||
         html.includes("copied player") ||
-        html.includes("Stream unavailable") ||
-        !html.includes("cfg")
+        html.includes("Stream unavailable")
       ) {
         console.warn(
           `[Stream Warmer] Upstream rejected WatchLink ticket for ${eventId}. Rotating session & account...`,
@@ -319,14 +318,18 @@ async function warmCasinoTable(eventId, forceFresh = false) {
         return false;
       }
 
-      html = transformPlayerHtml(
-        html,
-        watchUrl,
-        false,
-        eventId,
-        providerOrigin,
-        session,
-      );
+      if (html.includes("cfg")) {
+        html = transformPlayerHtml(
+          html,
+          watchUrl,
+          false,
+          eventId,
+          providerOrigin,
+          session,
+        );
+      } else {
+        html = buildNativePlayerHtml(eventId, watchUrl, providerOrigin, session);
+      }
       playerCache.set(`casino_${eventId}`, {
         html,
         expiresAt: Date.now() + CASINO_CACHE_TTL,
@@ -593,6 +596,133 @@ router.get("/sports/events", async (req, res) => {
     res.status(500).json({ success: false, error: err.message, events: [] });
   }
 });
+
+// Build complete, self-healing native Universe Studio player HTML
+function buildNativePlayerHtml(
+  eventId,
+  watchUrl = "",
+  referer = "",
+  session = "",
+  tokenObj = null,
+) {
+  const streamId =
+    (GAME_MAP[eventId] && GAME_MAP[eventId].streamId) || "GAME10";
+  const targetPingUrl = watchUrl
+    ? watchUrl.endsWith("/")
+      ? `${watchUrl}ping`
+      : `${watchUrl}/ping`
+    : "https://live.livecdnplatin.com/ping";
+  const proxiedPingUrl = `/api/stream/proxy-ping?target=${encodeURIComponent(targetPingUrl)}&watchUrl=${encodeURIComponent(watchUrl || "")}&eventId=${encodeURIComponent(eventId)}&origin=${encodeURIComponent(referer || "")}&session=${encodeURIComponent(session || "")}`;
+
+  const token = isTokenValid(tokenObj) ? tokenObj.token : "";
+  const wsUrl =
+    isTokenValid(tokenObj) && tokenObj.wsUrl
+      ? getProxiedWsUrl(tokenObj.wsUrl)
+      : fallbackWsUrl;
+
+  const cfgPayload = {
+    sid: `${eventId}_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+    streamId: streamId,
+    pingUrl: proxiedPingUrl,
+    flagUrl: "/api/stream/dummy-flag",
+    byeUrl: "/api/stream/dummy-bye",
+    devtoolsGuard: false,
+    devtoolsRedirect: "",
+    blockedUrl: "",
+    home: "",
+    token: token,
+    wsUrl: wsUrl,
+    webrtcTimeout: 25,
+    freezeSeconds: 120,
+    oneTimeToken: false,
+    pingEvery: 10,
+    frameAllow: {
+      enforce: false,
+      outer: { apps: false, hosts: [], sites: [] },
+      parent: { apps: false, hosts: [], sites: [] },
+    },
+  };
+
+  const allowedOriginsJson = JSON.stringify(
+    securityEngine.getAllowedDomainsList(),
+  );
+
+  return `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+  <title>Live Casino</title>
+  <style>
+    html,body{height:100%;margin:0;padding:0;background:#000;overflow:hidden;font-family:sans-serif;-webkit-user-select:none;user-select:none;}
+    #videoContainer{position:relative;width:100%;height:100%;display:flex;align-items:center;justify-content:center;}
+    video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000;}
+    #loading{position:fixed;top:50%;left:50%;width:64px;height:64px;margin:-32px 0 0 -32px;z-index:10;}
+    #loading img{width:64px;height:64px;}
+    #loading.fade-out{opacity:0;transition:opacity 0.8s ease;pointer-events:none;}
+    #qualityLoader{position:absolute;bottom:20px;left:50%;transform:translateX(-50%);color:#94a3b8;font-size:12px;background:rgba(0,0,0,0.6);padding:4px 12px;border-radius:12px;display:none;z-index:20;}
+    #status{display:none;}
+    #hint{position:absolute;top:20px;right:20px;color:#fff;font-size:12px;opacity:0;transition:opacity 0.3s;z-index:20;}
+    #hint.on{opacity:1;}
+    #maint{position:absolute;inset:0;background:#0b0e14;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;z-index:30;}
+    #maint[hidden]{display:none!important;}
+  </style>
+</head>
+<body>
+  <div id="videoContainer">
+    <video id="videoPlayer" playsinline autoplay muted></video>
+    <div id="loading"><img src="/api/stream/player-assets/loader.gif" alt=""></div>
+    <div id="qualityLoader"></div>
+    <div id="status"></div>
+    <div id="hint"></div>
+    <div id="maint" hidden>
+      <div id="maintIcon" style="font-size:40px;margin-bottom:12px;">🎲</div>
+      <div id="maintTitle" style="font-size:18px;font-weight:700;margin-bottom:6px;">Table maintenance</div>
+      <div id="maintText" style="font-size:14px;color:#94a3b8;margin-bottom:6px;"></div>
+      <div id="maintEta" style="font-size:12px;color:#64748b;"></div>
+    </div>
+  </div>
+  <script type="application/json" id="cfg">${JSON.stringify(cfgPayload)}</script>
+  <script src="/api/stream/player-assets/player.js?ts=${Date.now()}"></script>
+  <script>
+    (function() {
+      var allowed = ${allowedOriginsJson};
+      try {
+        if (window.location.ancestorOrigins && window.location.ancestorOrigins.length > 0) {
+          for (var i = 0; i < window.location.ancestorOrigins.length; i++) {
+            var aOrigin = window.location.ancestorOrigins[i];
+            var aHost = new URL(aOrigin).hostname.toLowerCase();
+            var ok = false;
+            for (var j = 0; j < allowed.length; j++) {
+              var d = allowed[j].toLowerCase();
+              if (aHost === d || aHost.endsWith('.' + d)) { ok = true; break; }
+            }
+            if (!ok) {
+              document.documentElement.innerHTML = '<div style="background:#090d16;color:#ef4444;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;font-family:sans-serif;font-weight:700;font-size:16px;text-align:center;padding:20px;"><div>UNAUTHORIZED EMBED DETECTED</div><div style="font-size:12px;color:#94a3b8;margin-top:8px;">Domain ' + aHost + ' is not authorized by stream administrator.</div></div>';
+              if (window.stop) window.stop();
+              throw new Error('Framing blocked by anti-theft guard: ' + aHost);
+            }
+          }
+        }
+      } catch(e) {}
+      if (navigator.sendBeacon) navigator.sendBeacon = function() { return true; };
+      window.location.replace = function() { return false; };
+      var _origAddEvent = window.addEventListener;
+      window.addEventListener = function(type, listener, options) {
+        if (type === 'unload') return _origAddEvent.call(this, 'pagehide', listener, options);
+        return _origAddEvent.call(this, type, listener, options);
+      };
+      try {
+        Object.defineProperty(window.location, 'ancestorOrigins', {
+          get: function() { return ['https://casino.nice444.com', 'https://nice444.com', 'https://cbtfexchange.com', 'https://startexch99.com']; },
+          configurable: true
+        });
+      } catch(e) {}
+    })();
+  </script>
+</body>
+</html>`;
+}
 
 // Helper: Transform upstream player HTML with full bypass patches & watermark removal
 function transformPlayerHtml(
@@ -968,28 +1098,26 @@ router.get("/player/:eventId", async (req, res) => {
 
         let html = await pageRes.text();
 
-        // If upstream returned a native notice or loader from provider, pass through directly
-        if (!html.includes("cfg")) {
-          html = html.replace(/src=["'](?:\/player\/loader\.gif|loader\.gif)["']/g, 'src="/api/stream/player-assets/loader.gif"');
-          html = html.replace(/href=["'](?:\/player\/loader\.gif|loader\.gif)["']/g, 'href="/api/stream/player-assets/loader.gif"');
-          res.setHeader("Content-Type", "text/html; charset=utf-8");
-          res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-          res.setHeader("Permissions-Policy", "unload=*");
-          res.setHeader(
-            "Content-Security-Policy",
-            securityEngine.getFrameAncestorsCSP(),
+        // If upstream returned valid cfg HTML, transform it. Otherwise, build our self-contained native player!
+        const tokenObj = tableTokenCache.get(eventId);
+        if (html.includes("cfg")) {
+          html = transformPlayerHtml(
+            html,
+            watchUrl,
+            false,
+            eventId,
+            referer,
+            session,
           );
-          return res.send(html);
+        } else {
+          html = buildNativePlayerHtml(
+            eventId,
+            watchUrl,
+            referer,
+            session,
+            tokenObj,
+          );
         }
-
-        html = transformPlayerHtml(
-          html,
-          watchUrl,
-          false,
-          eventId,
-          referer,
-          session,
-        );
 
         // Cache player HTML for 15 minutes in RAM and distributed Redis
         playerCache.set(`casino_${eventId}`, {
@@ -1720,6 +1848,59 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
         pingResData = await upstreamRes.json();
       } catch (e) {
         pingResData = null;
+      }
+
+      // If upstream rejected the ticket or returned stop/no token, refresh WatchLink on-the-fly!
+      if (!pingResData || pingResData.stop || (!pingResData.token && isInit)) {
+        if (eventId) {
+          console.log(
+            `[Proxy-Ping] Upstream rejected or expired ticket for ${eventId}. Refreshing watch link on-the-fly...`,
+          );
+          try {
+            const freshWatch = await getWatchUrl(eventId, { forceFresh: true });
+            if (freshWatch && freshWatch.url) {
+              const freshTarget = freshWatch.url.endsWith("/")
+                ? `${freshWatch.url}ping`
+                : `${freshWatch.url}/ping`;
+              const freshSession = freshWatch.session || proxySession;
+              const freshRes = await proxyFetch(freshTarget, {
+                method: "POST",
+                session: freshSession,
+                headers: {
+                  "Content-Type": "application/json",
+                  Origin: targetOrigin,
+                  Referer: freshWatch.url,
+                  "User-Agent": UA,
+                  Accept: "*/*",
+                },
+                body: JSON.stringify(payload),
+                timeout: 6000,
+              }).catch(() => null);
+              if (freshRes && freshRes.ok) {
+                const freshData = await freshRes.json().catch(() => null);
+                if (freshData && freshData.token) {
+                  pingResData = freshData;
+                }
+              }
+            }
+          } catch (_) {}
+        }
+      }
+
+      // If upstream still unreachable, fall back to cached active token if still valid
+      if ((!pingResData || !pingResData.token) && eventId) {
+        const cachedToken = tableTokenCache.get(eventId);
+        if (isTokenValid(cachedToken)) {
+          return {
+            ok: true,
+            state: "live",
+            streamId: cachedToken.streamId || fallbackStreamId,
+            wsUrl: getProxiedWsUrl(cachedToken.wsUrl || fallbackWsUrl),
+            token: cachedToken.token,
+            maintenance: null,
+            stop: false,
+          };
+        }
       }
 
       if (

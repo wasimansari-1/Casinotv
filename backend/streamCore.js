@@ -36,28 +36,40 @@ let _cachedProxyUrl = null;
 const _sessionAgentPool = new Map(); // effectiveProxyUrl -> https.Agent with persistent Keep-Alive
 let _currentStickySession = Math.floor(Math.random() * 8000) + 1000;
 
+const _tableSessionMap = new Map();
+
 function getSessionForTable(tableId) {
-  return _currentStickySession;
+  if (!tableId) return _currentStickySession;
+  const tid = String(tableId);
+  if (!_tableSessionMap.has(tid)) {
+    let hash = 0;
+    for (let i = 0; i < tid.length; i++) {
+      hash = (hash << 5) - hash + tid.charCodeAt(i);
+      hash |= 0;
+    }
+    _tableSessionMap.set(tid, (Math.abs(hash) % 8000) + 1000);
+  }
+  return _tableSessionMap.get(tid);
 }
 
 function rotateTableSession(tableId, reason = "") {
-  return rotateStickySession(reason);
+  if (!tableId) return rotateStickySession(reason);
+  const tid = String(tableId);
+  const current = getSessionForTable(tid);
+  const next = ((current + 37) % 8000) + 1000;
+  _tableSessionMap.set(tid, next);
+  console.log(
+    `[StreamCore] 🔄 Rotated sticky session for table ${tid}: #${current} -> #${next} (Reason: ${reason || "table rotation"})`,
+  );
+  return next;
 }
 
 function getEffectiveProxyUrl(proxyUrlStr, sessionOverride = null) {
   if (!proxyUrlStr) return null;
-  const rawSession = sessionOverride || _currentStickySession;
-  // Map any session number deterministically into Webshare's supported 1..100 residential pool
-  const session = (Math.max(1, Math.abs(Number(rawSession) || 1)) % 100) + 1;
+  // Strip invalid/unsupported country or session appendages for Webshare (prevents HTTP 502/400)
   if (proxyUrlStr.includes("webshare.io")) {
-    if (proxyUrlStr.includes("-rotate")) {
-      return proxyUrlStr.replace("-rotate", `-${session}`);
-    }
-    if (proxyUrlStr.includes("bbmraujs-in")) {
-      return proxyUrlStr.replace(
-        /bbmraujs-in(?:-\w+)?/,
-        `bbmraujs-in-${session}`,
-      );
+    if (proxyUrlStr.includes("bbmraujs")) {
+      return proxyUrlStr.replace(/bbmraujs(?:-in)?(?:-rotate)?(?:-\w+)?/, "bbmraujs");
     }
   }
   return proxyUrlStr;
@@ -96,10 +108,6 @@ function rotateStickySession(reason = "") {
   const oldSession = _currentStickySession;
   _currentStickySession = Math.floor(Math.random() * 8000) + 1000;
   resetProxyAgent();
-  for (const k of Object.keys(sessionState)) {
-    sessionState[k].token = null;
-    redisClient.del(`auth:${k}`).catch(() => {});
-  }
   console.log(
     `[StreamCore] 🔄 Rotated sticky residential proxy session from #${oldSession} -> #${_currentStickySession} (Reason: ${reason || "unspecified"})`,
   );
@@ -155,9 +163,6 @@ function getProxyAgent(proxyUrlStr, sessionOverride = null) {
     connectReq.on("connect", (res, socket, head) => {
       if (res.statusCode !== 200) {
         socket.destroy();
-        if (res.statusCode === 502 || res.statusCode === 503) {
-          rotateStickySession("Proxy CONNECT status " + res.statusCode);
-        }
         return done(
           new Error("Proxy CONNECT rejected with status " + res.statusCode),
         );
@@ -260,7 +265,6 @@ function proxyFetch(urlStr, options = {}, redirectCount = 0, retryCount = 0) {
               res.statusCode === 504) &&
             retryCount < 3
           ) {
-            rotateStickySession();
             const delay = 150 * Math.pow(2, retryCount);
             return setTimeout(() => {
               const freshOptions = { ...options };
@@ -318,7 +322,6 @@ function proxyFetch(urlStr, options = {}, redirectCount = 0, retryCount = 0) {
             err.message.includes("ETIMEDOUT") ||
             err.message.includes("socket hang up"));
         if (isTransient && retryCount < 3) {
-          rotateStickySession();
           const delay = 150 * Math.pow(2, retryCount);
           return setTimeout(() => {
             const freshOptions = { ...options };

@@ -1,0 +1,137 @@
+{
+  "settings": {
+    "enforceWhitelist": true,
+    "allowDirectAccess": false
+  },
+  "domains": [
+    {
+      "domain": "punt666.biz",
+      "entryType": "domain",
+      "casino": true,
+      "sports": true,
+      "status": "blocked",
+      "note": "Authorized Entity",
+      "hitCount": 8,
+      "lastAccess": "2026-11-22T13:29:01.052Z",
+      "createdAt": "2026-11-22T10:00:00.000Z"
+    },
+    {
+      "domain": "dream444.fun",
+      "entryType": "domain",
+      "casino": true,
+      "sports": false,
+      "status": "active",
+      "note": "Authorized Entity",
+      "hitCount": 7,
+      "lastAccess": "2026-11-16T14:47:16.342Z",
+      "createdAt": "2026-11-16T19:05:00.000Z"
+    },
+    {
+      "domain": "exchange444.com",
+      "entryType": "domain",
+      "casino": true,
+      "sports": true,
+      "status": "active",
+      "note": "Authorized Entity",
+      "hitCount": 629,
+      "lastAccess": "2026-11-16T14:47:16.334Z",
+      "createdAt": "2026-11-16T19:00:00.000Z"
+    },
+    {
+      "domain": "universeapi.site",
+      "entryType": "domain",
+      "casino": true,
+      "sports": true,
+      "status": "active",
+      "note": "Authorized Entity",
+      "hitCount": 527,
+      "lastAccess": "2026-11-22T13:25:56.522Z",
+      "createdAt": "2026-11-22T10:00:00.000Z"
+    },
+    {
+      "domain": "chimneysolutions.info",
+      "entryType": "domain",
+      "casino": true,
+      "sports": true,
+      "status": "active",
+      "note": "Primary Domain",
+      "hitCount": 8,
+      "lastAccess": null,
+      "createdAt": "2026-11-15T10:00:00.000Z"
+    },
+    {
+      "domain": "cstv.chimneysolutions.info",
+      "entryType": "domain",
+      "casino": true,
+      "sports": true,
+      "status": "active",
+      "note": "Streaming Subdomain",
+      "hitCount": 5,
+      "lastAccess": null,
+      "createdAt": "2026-11-15T10:00:00.000Z"
+    },
+    {
+      "domain": "139.59.162.241",
+      "entryType": "ip",
+      "casino": true,
+      "sports": true,
+      "status": "active",
+      "note": "VPS Host IP (DigitalOcean)",
+      "hitCount": 0,
+      "lastAccess": null,
+      "createdAt": "2026-11-28T10:00:00.000Z"
+    },
+    {
+      "domain": "72.61.172.110",
+      "entryType": "ip",
+      "casino": true,
+      "sports": true,
+      "status": "active",
+      "note": "VPS Host IP",
+      "hitCount": 0,
+      "lastAccess": null,
+      "createdAt": "2026-11-15T10:00:00.000Z"
+    },
+    {
+      "domain": "localhost",
+      "entryType": "domain",
+      "casino": true,
+      "sports": true,
+      "status": "active",
+      "note": "Local Testing",
+      "hitCount": 0,
+      "lastAccess": null,
+      "createdAt": "2026-11-15T10:00:00.000Z"
+    },
+    {
+      "domain": "127.0.0.1",
+      "entryType": "ip",
+      "casino": true,
+      "sports": true,
+      "status": "active",
+      "note": "Loopback IP",
+      "hitCount": 0,
+      "lastAccess": null,
+      "createdAt": "2026-11-15T10:00:00.000Z"
+    },
+    {
+      "domain": "aura.igambli.com",
+      "entryType": "domain",
+      "casino": true,
+      "sports": true,
+      "status": "active",
+      "note": "Client: Aura Igambli",
+      "hitCount": 4,
+      "lastAccess": null,
+      "createdAt": "2026-11-15T10:00:00.000Z"
+    }
+  ],
+  "customMessages": [],
+  "globalCustomMessage": {
+    "heading": "Protected CSTV Broadcast Notice",
+    "message": "This live broadcast is protected by CSTV Master Guard. Unauthorized broadcasting on this domain is strictly prohibited. Contact WhatsApp: +63 945 146 9623",
+    "active": false,
+    "updatedAt": "2026-11-27T13:43:02.210Z"
+  },
+  "updatedAt": "2026-11-28T18:24:57.215Z"
+}

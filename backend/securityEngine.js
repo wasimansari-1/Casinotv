@@ -28,6 +28,7 @@ const DEFAULT_DOMAINS = [
   { domain: 'universeapi.site', entryType: 'domain', casino: true, sports: true, status: 'active', note: 'Authorized Entity' },
   { domain: 'chimneysolutions.info', entryType: 'domain', casino: true, sports: true, status: 'active', note: 'Primary Domain' },
   { domain: 'cstv.chimneysolutions.info', entryType: 'domain', casino: true, sports: true, status: 'active', note: 'Streaming Subdomain' },
+  { domain: '139.59.162.241', entryType: 'ip', casino: true, sports: true, status: 'active', note: 'VPS Host IP (DigitalOcean)' },
   { domain: '72.61.172.110', entryType: 'ip', casino: true, sports: true, status: 'active', note: 'VPS Host IP' },
   { domain: 'localhost', entryType: 'domain', casino: true, sports: true, status: 'active', note: 'Local Testing' },
   { domain: '127.0.0.1', entryType: 'ip', casino: true, sports: true, status: 'active', note: 'Loopback IP' },
@@ -1000,14 +1001,14 @@ function processTelemetryRecord({
   // Determine bypass/theft attempt
   const isPostmanOrCurl = ua.includes('Postman') || ua.includes('curl/') || ua.includes('python-requests') || ua.includes('Go-http-client');
   const isCompetitor = (domain && (domain.includes('series444') || domain.includes('baji8dot') || domain.includes('oddsdata')));
-  const isDirectStreamBypass = (!domain || domain === 'Direct') && clientIp !== '127.0.0.1' && (pathStr.startsWith('/api/stream/player/') || pathStr.startsWith('/api/stream/sports/player/'));
+  const isDirectStreamBypass = (!domain || domain === 'Direct') && clientIp !== '127.0.0.1' && clientIp !== '139.59.162.241' && (pathStr.startsWith('/api/stream/player/') || pathStr.startsWith('/api/stream/sports/player/'));
 
   let bypassReason = '';
   if (isCompetitor) bypassReason = 'Hostile competitor scraper blocked';
   else if (isPostmanOrCurl) bypassReason = 'Automated scraping bot / Postman bypass attempt';
   else if (isDirectStreamBypass && !allowDirectAccess) bypassReason = 'Direct address bar / new tab stream bypass attempt';
   else if (isBlocked && domain) bypassReason = `Unauthorized domain "${domain}" framing attempt`;
-  else if (isBlocked) bypassReason = 'Unauthorized request blocked by whitelist guard';
+  else if (isBlocked && clientIp !== '139.59.162.241' && clientIp !== '127.0.0.1') bypassReason = 'Unauthorized request blocked by whitelist guard';
 
   const isBypassAttempt = Boolean(bypassReason);
 
@@ -1016,7 +1017,11 @@ function processTelemetryRecord({
   let originCleanKey = domain;
   if (!domain || domain === 'Direct' || domain.includes('Direct')) {
     originCleanKey = clientIp !== '127.0.0.1' && clientIp !== 'Unknown' ? `direct_${clientIp}` : 'direct_unknown';
-    originLabel = clientIp !== '127.0.0.1' && clientIp !== 'Unknown' ? `Direct: ${clientIp}` : 'Direct (No Referer)';
+    if (clientIp === '139.59.162.241') {
+      originLabel = 'Direct: 139.59.162.241 (VPS Server)';
+    } else {
+      originLabel = clientIp !== '127.0.0.1' && clientIp !== 'Unknown' ? `Direct: ${clientIp}` : 'Direct (No Referer)';
+    }
   }
 
   // Exact Whitelist & Bypass check using domain and IP matching
