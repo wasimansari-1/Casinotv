@@ -47,7 +47,8 @@ function rotateTableSession(tableId, reason = "") {
 function getEffectiveProxyUrl(proxyUrlStr, sessionOverride = null) {
   if (!proxyUrlStr) return null;
   const rawSession = sessionOverride || _currentStickySession;
-  const session = Math.max(1, Math.abs(Number(rawSession) || 1));
+  // Map any session number deterministically into Webshare's supported 1..100 residential pool
+  const session = (Math.max(1, Math.abs(Number(rawSession) || 1)) % 100) + 1;
   if (proxyUrlStr.includes("webshare.io")) {
     if (proxyUrlStr.includes("-rotate")) {
       return proxyUrlStr.replace("-rotate", `-${session}`);
@@ -546,12 +547,18 @@ function rotateTableAccount(tableId) {
 }
 
 // Failover State Machine & Master Observability
-let _activePrimaryProvider = "cbtf";
+let _activePrimaryProvider = "nice444";
 let _lastFailoverEvent = null;
 
 const providerHealth = {
-  cbtf: {
+  nice444: {
     status: "ACTIVE",
+    lastSuccess: null,
+    lastError: null,
+    failureCount: 0,
+  },
+  cbtf: {
+    status: "STANDBY",
     lastSuccess: null,
     lastError: null,
     failureCount: 0,
@@ -567,12 +574,6 @@ const providerHealth = {
     lastSuccess: null,
     lastError: null,
     failureCount: 0,
-  },
-  nice444: {
-    status: "DISABLED",
-    lastSuccess: null,
-    lastError: "domain_not_whitelisted (upline locked)",
-    failureCount: 1,
   },
 };
 
@@ -1275,10 +1276,10 @@ async function getWatchUrl(eventId, options = {}) {
     }
 
     try {
-      // Sticky Provider Priority: Always prioritize active primary provider (CBTF first)
+      // Sticky Provider Priority: Always prioritize active primary provider (Nice444 first)
       // When primary fails, instant 0.1s autonomous failover to next working provider
       const activeKey = _activePrimaryProvider;
-      const fallbackKeys = ["cbtf", "startexch", "asstarplay"].filter(
+      const fallbackKeys = ["nice444", "cbtf", "startexch", "asstarplay"].filter(
         (k) => k !== activeKey,
       );
       const providerList = [activeKey, ...fallbackKeys];
@@ -1336,17 +1337,30 @@ async function getWatchUrl(eventId, options = {}) {
                     timestamp: Date.now(),
                   });
 
-                  // Fetch through dedicated residential proxy session for this table
-                  res = await proxyFetch(
+                  // 1. Direct fetch first (Zero proxy bandwidth, ultra-fast 200ms resolution!)
+                  res = await directFetch(
                     `${provider.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`,
                     {
                       method: "POST",
-                      session: tableSession,
                       headers: watchHeaders,
                       body: watchBody,
-                      timeout: 8000,
+                      timeout: 4000,
                     },
-                  );
+                  ).catch(() => null);
+
+                  // 2. Fallback to proxyFetch only if direct fetch failed or was blocked
+                  if (!res || !res.ok) {
+                    res = await proxyFetch(
+                      `${provider.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`,
+                      {
+                        method: "POST",
+                        session: tableSession,
+                        headers: watchHeaders,
+                        body: watchBody,
+                        timeout: 8000,
+                      },
+                    );
+                  }
 
                   data = await res.json().catch(() => null);
                   const durationMs = Date.now() - startTime;
@@ -1383,7 +1397,7 @@ async function getWatchUrl(eventId, options = {}) {
                       url: data.data.url,
                       provider: provider.name,
                       provKey: provKey,
-                      origin: provider.base,
+                      origin: provider.casinoBase || provider.base,
                       session: tableSession,
                       account: targetAcc?.user,
                       expiresAt: Date.now() + ttlSec * 1000,

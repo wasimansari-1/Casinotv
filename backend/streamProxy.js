@@ -272,22 +272,35 @@ async function warmCasinoTable(eventId, forceFresh = false) {
       : "https://nice444.com/";
     const session = watchData.session || null;
 
-    // Fetch player HTML via dedicated residential proxy session for this table
-    let pageRes = await proxyFetch(watchUrl, {
-      session: session,
-      headers: {
-        "User-Agent": UA,
-        Referer: providerOrigin,
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Sec-Fetch-Dest": "iframe",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "cross-site",
-        "Upgrade-Insecure-Requests": "1",
-      },
-      timeout: 8000,
-    }).catch(() => null);
+    // Fetch player HTML matching the exact session/IP that acquired the ticket
+    let pageRes = null;
+    if (session) {
+      pageRes = await proxyFetch(watchUrl, {
+        session: session,
+        headers: {
+          "User-Agent": UA,
+          Referer: providerOrigin,
+          Accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
+          "Sec-Fetch-Dest": "iframe",
+          "Sec-Fetch-Mode": "navigate",
+          "Sec-Fetch-Site": "cross-site",
+          "Upgrade-Insecure-Requests": "1",
+        },
+        timeout: 8000,
+      }).catch(() => null);
+    } else {
+      pageRes = await directFetch(watchUrl, {
+        headers: {
+          "User-Agent": UA,
+          Referer: providerOrigin,
+          Accept:
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+        timeout: 4000,
+      }).catch(() => null);
+    }
 
     if (pageRes && pageRes.ok) {
       let html = await pageRes.text();
@@ -353,23 +366,38 @@ async function warmCasinoTable(eventId, forceFresh = false) {
               tzo: 330,
             });
 
-            // Perform CDN ping handshake via matching proxy session to acquire active token
-            pingRes = await proxyFetch(targetUrl, {
-              method: "POST",
-              session: session,
-              headers: {
-                "Content-Type": "application/json",
-                Origin: new URL(targetUrl).origin,
-                Referer: watchUrl,
-                "User-Agent": UA,
-                Accept: "*/*",
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin",
-              },
-              body: pingBody,
-              timeout: 6000,
-            }).catch(() => null);
+            // Perform CDN ping handshake via matching session so IP matches
+            if (session) {
+              pingRes = await proxyFetch(targetUrl, {
+                method: "POST",
+                session: session,
+                headers: {
+                  "Content-Type": "application/json",
+                  Origin: new URL(targetUrl).origin,
+                  Referer: watchUrl,
+                  "User-Agent": UA,
+                  Accept: "*/*",
+                  "Sec-Fetch-Dest": "empty",
+                  "Sec-Fetch-Mode": "cors",
+                  "Sec-Fetch-Site": "same-origin",
+                },
+                body: pingBody,
+                timeout: 6000,
+              }).catch(() => null);
+            } else {
+              pingRes = await directFetch(targetUrl, {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  Origin: new URL(targetUrl).origin,
+                  Referer: watchUrl,
+                  "User-Agent": UA,
+                  Accept: "*/*",
+                },
+                body: pingBody,
+                timeout: 4000,
+              }).catch(() => null);
+            }
             if (pingRes) {
               const pingData = await pingRes.json().catch(() => null);
               if (pingData && pingData.token && pingData.wsUrl) {
@@ -890,22 +918,35 @@ router.get("/player/:eventId", async (req, res) => {
           : "https://casino.nice444.com/";
         const session = watchData.session || null;
 
-        // Fetch player HTML via dedicated residential proxy session for this table
-        let pageRes = await proxyFetch(watchUrl, {
-          session: session,
-          headers: {
-            "User-Agent": UA,
-            Referer: referer,
-            Accept:
-              "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Sec-Fetch-Dest": "iframe",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "cross-site",
-            "Upgrade-Insecure-Requests": "1",
-          },
-          timeout: 8000,
-        }).catch(() => null);
+        // Fetch player HTML matching the exact session/IP that acquired the ticket
+        let pageRes = null;
+        if (session) {
+          pageRes = await proxyFetch(watchUrl, {
+            session: session,
+            headers: {
+              "User-Agent": UA,
+              Referer: referer,
+              Accept:
+                "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+              "Accept-Language": "en-US,en;q=0.9",
+              "Sec-Fetch-Dest": "iframe",
+              "Sec-Fetch-Mode": "navigate",
+              "Sec-Fetch-Site": "cross-site",
+              "Upgrade-Insecure-Requests": "1",
+            },
+            timeout: 8000,
+          }).catch(() => null);
+        } else {
+          pageRes = await directFetch(watchUrl, {
+            headers: {
+              "User-Agent": UA,
+              Referer: referer,
+              Accept:
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+            timeout: 4000,
+          }).catch(() => null);
+        }
 
         if (!pageRes || !pageRes.ok) {
           console.warn(
@@ -1633,26 +1674,42 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
         }
       }
 
-      // 2. Fetch ping response via matching residential proxy session
+      // 2. Fetch ping response: Direct first (0 proxy overhead!), fallback to matching residential proxy session
       const proxySession = req.query.session
         ? parseInt(req.query.session, 10)
         : null;
-      let upstreamRes = await proxyFetch(targetUrl, {
+
+      let upstreamRes = await directFetch(targetUrl, {
         method: "POST",
-        session: proxySession,
         headers: {
           "Content-Type": "application/json",
           Origin: targetOrigin,
           Referer: decodedWatchUrl,
           "User-Agent": UA,
           Accept: "*/*",
-          "Sec-Fetch-Dest": "empty",
-          "Sec-Fetch-Mode": "cors",
-          "Sec-Fetch-Site": "same-origin",
         },
         body: JSON.stringify(payload),
-        timeout: 6000,
+        timeout: 3500,
       }).catch(() => null);
+
+      if (!upstreamRes || !upstreamRes.ok) {
+        upstreamRes = await proxyFetch(targetUrl, {
+          method: "POST",
+          session: proxySession,
+          headers: {
+            "Content-Type": "application/json",
+            Origin: targetOrigin,
+            Referer: decodedWatchUrl,
+            "User-Agent": UA,
+            Accept: "*/*",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+          },
+          body: JSON.stringify(payload),
+          timeout: 6000,
+        }).catch(() => null);
+      }
 
       let pingResData;
       try {

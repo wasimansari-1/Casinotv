@@ -269,8 +269,8 @@ async function resolveBetfairEventId(rawId, sportId = "4") {
     return redisCached;
   }
 
-  // Query CBTF/Startexch getMarketsEventList without `key: '2'` to extract Betfair ID
-  const providerList = ["cbtf", "startexch", "asstarplay"];
+  // Query CBTF/Startexch/Nice444 getMarketsEventList without `key: '2'` to extract Betfair ID
+  const providerList = ["nice444", "cbtf", "startexch", "asstarplay"];
   const session = getSessionForTable(streamId);
 
   for (const provKey of providerList) {
@@ -380,7 +380,7 @@ async function getSportsWatchUrl(
   }
 
   const session = getSessionForTable(betfairId);
-  const providerList = ["cbtf", "startexch", "asstarplay"];
+  const providerList = ["nice444", "cbtf", "startexch", "asstarplay"];
 
   for (const provKey of providerList) {
     const provider = PROVIDERS[provKey];
@@ -392,11 +392,11 @@ async function getSportsWatchUrl(
         betfairId,
         async () => {
           const token = await getAuthToken(provKey);
-          const res = await proxyFetch(
+          // 1. Direct fetch first (0 proxy bandwidth!)
+          let res = await directFetch(
             `${provider.base}/api/exchange/streaming/exchEventsWatchLink`,
             {
               method: "POST",
-              session,
               headers: {
                 "Content-Type": "application/json",
                 Authorization: `Bearer ${token}`,
@@ -409,9 +409,33 @@ async function getSportsWatchUrl(
                 streamId: betfairId,
                 timestamp: Date.now(),
               }),
-              timeout: 7000,
+              timeout: 4000,
             },
-          );
+          ).catch(() => null);
+
+          // 2. Fallback to proxyFetch only if direct fetch failed
+          if (!res || !res.ok) {
+            res = await proxyFetch(
+              `${provider.base}/api/exchange/streaming/exchEventsWatchLink`,
+              {
+                method: "POST",
+                session,
+                headers: {
+                  "Content-Type": "application/json",
+                  Authorization: `Bearer ${token}`,
+                  Origin: provider.base,
+                  Referer: `${provider.base}/`,
+                  "User-Agent": UA,
+                  ...MOBILE_HEADERS,
+                },
+                body: JSON.stringify({
+                  streamId: betfairId,
+                  timestamp: Date.now(),
+                }),
+                timeout: 7000,
+              },
+            );
+          }
 
           const data = await res.json();
           if (data?.data?.url) {
@@ -935,7 +959,7 @@ router.get("/events", async (req, res) => {
       }
     } catch (_) {}
 
-    const providerList = ["cbtf", "startexch", "asstarplay"];
+    const providerList = ["nice444", "cbtf", "startexch", "asstarplay"];
     const sportNames = {
       1: "Soccer",
       2: "Tennis",
@@ -1200,16 +1224,30 @@ router.get("/player/:eventId", async (req, res) => {
           : "https://nice444.com/";
         const session = watchData.session || getSessionForTable(eventId);
 
-        const pageRes = await proxyFetch(watchUrl, {
-          session,
+        // 1. Direct fetch first (0 proxy bandwidth!)
+        let pageRes = await directFetch(watchUrl, {
           headers: {
             "User-Agent": UA,
             Referer: referer,
             Accept:
               "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
           },
-          timeout: 8000,
-        });
+          timeout: 4000,
+        }).catch(() => null);
+
+        // 2. Fallback to proxyFetch only if direct fetch failed
+        if (!pageRes || !pageRes.ok) {
+          pageRes = await proxyFetch(watchUrl, {
+            session,
+            headers: {
+              "User-Agent": UA,
+              Referer: referer,
+              Accept:
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
+            timeout: 8000,
+          });
+        }
 
         if (pageRes.status === 403 || pageRes.status === 404 || !pageRes.ok) {
           console.warn(
@@ -1573,9 +1611,9 @@ router.post("/proxy-ping", async (req, res) => {
       tzo: req.body?.tzo !== undefined ? req.body.tzo : 330,
     };
 
-    const upstreamRes = await proxyFetch(targetUrl, {
+    // 1. Direct fetch first (0 proxy bandwidth!)
+    let upstreamRes = await directFetch(targetUrl, {
       method: "POST",
-      session,
       headers: {
         "Content-Type": "application/json",
         Origin: targetOrigin,
@@ -1583,13 +1621,31 @@ router.post("/proxy-ping", async (req, res) => {
         "User-Agent": UA,
         ...MOBILE_HEADERS,
         Accept: "*/*",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
       },
       body: JSON.stringify(payload),
-      timeout: 6000,
+      timeout: 3500,
     }).catch(() => null);
+
+    // 2. Fallback to proxyFetch only if direct fetch failed
+    if (!upstreamRes || !upstreamRes.ok) {
+      upstreamRes = await proxyFetch(targetUrl, {
+        method: "POST",
+        session,
+        headers: {
+          "Content-Type": "application/json",
+          Origin: targetOrigin,
+          Referer: decodedWatchUrl,
+          "User-Agent": UA,
+          ...MOBILE_HEADERS,
+          Accept: "*/*",
+          "Sec-Fetch-Dest": "empty",
+          "Sec-Fetch-Mode": "cors",
+          "Sec-Fetch-Site": "same-origin",
+        },
+        body: JSON.stringify(payload),
+        timeout: 6000,
+      }).catch(() => null);
+    }
 
     const data = upstreamRes ? await upstreamRes.json().catch(() => null) : null;
 
