@@ -83,7 +83,7 @@ function curlTest(url, useProxy) {
   if (url2) {
     const html2 = curlTest(url2, false);
     console.log(`[curl --http2 DIRECT VPS] Length: ${html2.length} | cfg: ${html2.includes("cfg")} | loader.gif: ${html2.includes("loader.gif")}`);
-    if (html2.includes("cfg")) console.log("🎉 DIRECT VPS + CURL HTTP2 UNLOCKED CFG!");
+    console.log("HTML #2 Preview:\n", html2.slice(0, 1200));
   }
 
   console.log("\n========================================================");
