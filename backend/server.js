@@ -158,9 +158,9 @@ function handleWebSocketProxy(clientReq, clientSocket, clientHead) {
       wsHeaders['Sec-WebSocket-Protocol'] = clientReq.headers['sec-websocket-protocol'];
     }
 
-    // When upstream proxy is configured, route WebSocket upgrade through proxy to maintain sticky IP session
+    // Keep Phone Proxy clean: route 10k WebSockets direct from VPS (only use proxy if WS_USE_PROXY=true)
     let wsAgent = null;
-    if (proxyUrl && isSecure) {
+    if (process.env.WS_USE_PROXY === 'true' && proxyUrl && isSecure) {
       try {
         const { getProxyAgent } = require('./streamCore');
         wsAgent = getProxyAgent(proxyUrl);

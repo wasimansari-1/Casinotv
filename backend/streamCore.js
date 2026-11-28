@@ -13,20 +13,20 @@ const redisClient = require("./redisClient");
 const CONFIG = {
   // Provider concurrency: 1 strictly sequential request to prevent WAF / 422 trigger
   concurrency: Math.max(1, parseInt(process.env.PROVIDER_CONCURRENCY, 10) || 1),
-  // Minimum interval between requests to the same provider (1200ms human pace)
+  // Minimum interval between requests to the same provider (2000ms human pace)
   minIntervalMs: Math.max(
     100,
-    parseInt(process.env.PROVIDER_MIN_INTERVAL_MS, 10) || 1200,
+    parseInt(process.env.PROVIDER_MIN_INTERVAL_MS, 10) || 2000,
   ),
   // Maximum retries for temporary failures
-  maxRetries: Math.max(0, parseInt(process.env.PROVIDER_MAX_RETRIES, 10) || 3),
+  maxRetries: Math.max(0, parseInt(process.env.PROVIDER_MAX_RETRIES, 10) || 2),
   // Exponential backoff delays in ms
   backoffMs: [
-    parseInt(process.env.PROVIDER_BACKOFF_1_MS, 10) || 500,
-    parseInt(process.env.PROVIDER_BACKOFF_2_MS, 10) || 1500,
+    parseInt(process.env.PROVIDER_BACKOFF_1_MS, 10) || 1500,
+    parseInt(process.env.PROVIDER_BACKOFF_2_MS, 10) || 4000,
   ],
-  // Circuit breaker cooldown on HTTP 429 in ms (default: 5000 = 5s)
-  cooldownMs: parseInt(process.env.CIRCUIT_BREAKER_COOLDOWN_MS, 10) || 5000,
+  // Circuit breaker cooldown on HTTP 429 in ms (default: 30000 = 30s human cool-off)
+  cooldownMs: parseInt(process.env.CIRCUIT_BREAKER_COOLDOWN_MS, 10) || 30000,
   // WatchLink default cache TTL in seconds (default: 3600 = 1 Hour Sticky Cache)
   watchlinkTtlSec: parseInt(process.env.WATCHLINK_CACHE_TTL_SEC, 10) || 3600,
 };
@@ -466,6 +466,16 @@ const MOBILE_HEADERS = {
   "Accept-Language": "en-US,en;q=0.9",
 };
 
+const API_HEADERS = {
+  "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+  "Sec-Ch-Ua-Mobile": "?0",
+  "Sec-Ch-Ua-Platform": '"Windows"',
+  "Sec-Fetch-Dest": "empty",
+  "Sec-Fetch-Mode": "cors",
+  "Accept": "application/json, text/plain, */*",
+  "Accept-Language": "en-US,en;q=0.9",
+};
+
 const CLEAN_INDIAN_IPS = [
   "103.21.124.1",
   "49.36.1.1",
@@ -482,8 +492,16 @@ function getCleanIndianIp(key = "") {
   return CLEAN_INDIAN_IPS[hash % CLEAN_INDIAN_IPS.length];
 }
 
-// 4-Provider Multi-Account Redundancy Pool (Prioritized)
+// 5-Provider Multi-Account Redundancy Pool (Prioritized)
 const PROVIDERS = {
+  shan444: {
+    name: "Shan444",
+    base: "https://shan444.com",
+    casinoBase: "https://casino.shan444.com",
+    accounts: [
+      { user: "sdemo", pass: "Asdf12345", session: Math.floor(Math.random() * 8000) + 1000 },
+    ],
+  },
   cbtf: {
     name: "CBTFexchange",
     base: "https://cbtfexchange.com",
@@ -551,12 +569,18 @@ function rotateTableAccount(tableId) {
 }
 
 // Failover State Machine & Master Observability
-let _activePrimaryProvider = "nice444";
+let _activePrimaryProvider = "shan444";
 let _lastFailoverEvent = null;
 
 const providerHealth = {
-  nice444: {
+  shan444: {
     status: "ACTIVE",
+    lastSuccess: null,
+    lastError: null,
+    failureCount: 0,
+  },
+  nice444: {
+    status: "STANDBY",
     lastSuccess: null,
     lastError: null,
     failureCount: 0,
@@ -605,6 +629,7 @@ function getFailoverStatus() {
 
 // Sessions memory state
 const sessionState = {
+  shan444: { token: null, expiresAt: 0, accountIndex: 0, inFlight: null },
   nice444: { token: null, expiresAt: 0, accountIndex: 0, inFlight: null },
   startexch: { token: null, expiresAt: 0, accountIndex: 0, inFlight: null },
   asstarplay: { token: null, expiresAt: 0, accountIndex: 0, inFlight: null },
@@ -705,7 +730,8 @@ async function getAuthToken(providerKey = "cbtf", forceRefresh = false, targetAc
           Origin: provider.base,
           Referer: `${provider.base}/`,
           "User-Agent": UA,
-          ...MOBILE_HEADERS,
+          ...API_HEADERS,
+          "Sec-Fetch-Site": "same-origin",
         },
         body: JSON.stringify(bodyPayload),
       });
@@ -816,6 +842,7 @@ const GAME_MAP = {
 class ProviderManager {
   constructor() {
     this.providers = {
+      shan444: this._createProviderState("shan444", "Shan444"),
       startexch: this._createProviderState("startexch", "Startexch99"),
       nice444: this._createProviderState("nice444", "Nice444"),
       asstarplay: this._createProviderState("asstarplay", "Asstarplay"),
@@ -1283,7 +1310,7 @@ async function getWatchUrl(eventId, options = {}) {
       // Sticky Provider Priority: Always prioritize active primary provider (Nice444 first)
       // When primary fails, instant 0.1s autonomous failover to next working provider
       const activeKey = _activePrimaryProvider;
-      const fallbackKeys = ["nice444", "cbtf", "startexch", "asstarplay"].filter(
+      const fallbackKeys = ["shan444", "nice444", "cbtf", "startexch", "asstarplay"].filter(
         (k) => k !== activeKey,
       );
       const providerList = [activeKey, ...fallbackKeys];
@@ -1334,7 +1361,8 @@ async function getWatchUrl(eventId, options = {}) {
                     Origin: provider.base,
                     Referer: `${provider.base}/`,
                     "User-Agent": UA,
-                    ...MOBILE_HEADERS,
+                    ...API_HEADERS,
+                    "Sec-Fetch-Site": "same-site",
                   };
                   const watchBody = JSON.stringify({
                     streamId: eventId,
@@ -1479,21 +1507,20 @@ async function getWatchUrl(eventId, options = {}) {
                     _accountTokenCache.delete(`${provKey}:${oldUser}`);
                     await redisClient.del(`auth:${provKey}:${oldUser}`).catch(() => {});
 
-                    // Smart Brain: Instant Account Failover & Offset Rotation
+                    // Smart Brain: Only switch if backup account exists; NEVER re-login loop on a single-account provider!
                     rotateTableAccount(eventId);
                     attemptOffset++;
                     const nextAcc = getAccountForTable(eventId, provKey, attemptOffset);
-                    if (nextAcc && nextAcc.user !== oldUser) {
-                      console.warn(`[Smart Brain Failover] ⚡ IP/Viewer blocked on ${oldUser} (session #${oldSession}). Instantly switching table ${eventId} to backup account ${nextAcc.user} (Session #${nextAcc.session})!`);
-                      targetAcc = nextAcc;
-                      tableSession = targetAcc?.session || nextSession;
-                    } else {
-                      tableSession = nextSession;
+                    if (!nextAcc || nextAcc.user === oldUser) {
+                      providerManager.tripCooldown(provKey, 60000, `HTTP ${res?.status || 422} on single account ${oldUser}`);
+                      throw new Error(`Provider ${provider.name} blocked (${res?.status || 422}) — 60s cooldown active to protect ${oldUser}`);
                     }
-
+                    console.warn(`[Smart Brain Failover] ⚡ IP/Viewer blocked on ${oldUser} (session #${oldSession}). Switching table ${eventId} to backup account ${nextAcc.user}!`);
+                    targetAcc = nextAcc;
+                    tableSession = targetAcc?.session || nextSession;
                     token = await getAuthToken(provKey, true, targetAcc);
                     if (attempt < maxRetries) {
-                      await new Promise((r) => setTimeout(r, 200));
+                      await new Promise((r) => setTimeout(r, 1500));
                       continue;
                     }
                     const errMsg = data?.meta?.message || `HTTP ${res?.status || 422} (viewer_ip_blocked across accounts)`;

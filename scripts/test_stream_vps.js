@@ -3,7 +3,6 @@
 
 const fs = require("fs");
 const path = require("path");
-const { execFileSync } = require("child_process");
 
 const envPath = path.join(__dirname, "../.env");
 if (fs.existsSync(envPath)) {
@@ -20,8 +19,19 @@ if (fs.existsSync(envPath)) {
 
 const { PROVIDERS, getAuthToken, proxyFetch, UA, MOBILE_HEADERS } = require("../backend/streamCore");
 
-async function getFreshWatchUrl(token) {
-  const prov = PROVIDERS.cbtf;
+(async () => {
+  console.log("========================================================");
+  console.log("🎰 TESTING SHAN444 (sdemo) CASINO STREAM END-TO-END");
+  console.log("========================================================");
+
+  const prov = PROVIDERS.shan444;
+  const token = await getAuthToken("shan444", true);
+  if (!token) {
+    console.log("❌ Shan444 login failed! Check endpoint or credentials.");
+    process.exit(1);
+  }
+  console.log(`✅ Shan444 Auth Token Acquired: ${token.slice(0, 24)}...`);
+
   const watchRes = await proxyFetch(
     `${prov.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`,
     {
@@ -38,54 +48,60 @@ async function getFreshWatchUrl(token) {
       timeout: 8000,
     }
   );
-  const d = await watchRes.json();
-  return d?.data?.url;
-}
 
-function curlTest(url, useProxy) {
-  const args = [
-    "-s",
-    "--http2",
-    "-H", "Referer: https://cbtfexchange.com/",
-    "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "-H", "Accept-Language: en-US,en;q=0.9",
-    "-H", "Sec-Fetch-Dest: iframe",
-    "-H", "Sec-Fetch-Mode: navigate",
-    "-H", "Sec-Fetch-Site: cross-site",
-    "-A", UA,
-  ];
-  if (useProxy && process.env.UPSTREAM_PROXY_URL) {
-    args.push("-x", process.env.UPSTREAM_PROXY_URL);
+  const d = await watchRes.json().catch(() => null);
+  const watchUrl = d?.data?.url;
+  console.log(`✅ WatchLink HTTP ${watchRes.status} -> URL: ${watchUrl || JSON.stringify(d)}`);
+  if (!watchUrl) process.exit(1);
+
+  const pageRes = await proxyFetch(watchUrl, {
+    method: "GET",
+    headers: {
+      "User-Agent": UA,
+      Referer: `${prov.base}/`,
+      ...MOBILE_HEADERS,
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Sec-Fetch-Dest": "iframe",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Site": "cross-site",
+    },
+    timeout: 8000,
+  });
+
+  const html = await pageRes.text();
+  console.log(`GET Page Status: ${pageRes.status} | Length: ${html.length} | cfg: ${html.includes("cfg")} | loader.gif: ${html.includes("loader.gif")}`);
+
+  const cfgMatch = html.match(/<script type="application\/json" id="cfg">([^<]+)<\/script>/);
+  if (cfgMatch) {
+    const cfg = JSON.parse(cfgMatch[1]);
+    console.log("🎉 FOUND CFG! streamId:", cfg.streamId, "| pingUrl:", cfg.pingUrl);
+    const pingUrl = cfg.pingUrl.startsWith("http") ? cfg.pingUrl : new URL(cfg.pingUrl, watchUrl).href;
+    const pingRes = await proxyFetch(pingUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: new URL(pingUrl).origin,
+        Referer: watchUrl,
+        "User-Agent": UA,
+        Accept: "*/*",
+      },
+      body: JSON.stringify({
+        sid: cfg.sid,
+        mode: "connecting",
+        init: true,
+        token: true,
+        page: `${prov.base}/`,
+        tz: "Asia/Kolkata",
+        tzo: 330,
+      }),
+      timeout: 6000,
+    });
+    const pingJson = await pingRes.json().catch(() => null);
+    console.log(`POST /ping Status: ${pingRes.status} | token: ${pingJson?.token ? "YES (" + pingJson.token.slice(0, 20) + "...)" : "NO"} | wsUrl: ${pingJson?.wsUrl}`);
+  } else {
+    console.log("⚠️ No cfg found. Preview:", html.slice(0, 200));
   }
-  args.push(url);
-  return execFileSync("curl", args, { encoding: "utf8", timeout: 10000 });
-}
 
-(async () => {
   console.log("========================================================");
-  console.log("🔬 TLS / IP ISOLATION TEST: curl --http2 (Proxy vs Direct)");
-  console.log("========================================================");
-
-  const token = await getAuthToken("cbtf", true);
-
-  // Test 1: Fresh WatchURL + curl --http2 via Phone Proxy
-  const url1 = await getFreshWatchUrl(token);
-  console.log("\n1. Fresh Watch URL #1:", url1);
-  if (url1) {
-    const html1 = curlTest(url1, true);
-    console.log(`[curl --http2 VIA PHONE PROXY] Length: ${html1.length} | cfg: ${html1.includes("cfg")} | loader.gif: ${html1.includes("loader.gif")}`);
-    if (html1.includes("cfg")) console.log("🎉 PHONE PROXY + CURL HTTP2 UNLOCKED CFG!");
-  }
-
-  // Test 2: Fresh WatchURL + curl --http2 Direct VPS (no proxy)
-  const url2 = await getFreshWatchUrl(token);
-  console.log("\n2. Fresh Watch URL #2:", url2);
-  if (url2) {
-    const html2 = curlTest(url2, false);
-    console.log(`[curl --http2 DIRECT VPS] Length: ${html2.length} | cfg: ${html2.includes("cfg")} | loader.gif: ${html2.includes("loader.gif")}`);
-    console.log("HTML #2 Preview:\n", html2.slice(0, 1200));
-  }
-
-  console.log("\n========================================================");
   process.exit(0);
 })();

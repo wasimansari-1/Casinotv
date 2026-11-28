@@ -762,7 +762,7 @@ function buildNativePlayerHtml(
       };
       try {
         Object.defineProperty(window.location, 'ancestorOrigins', {
-          get: function() { return ['https://casino.nice444.com', 'https://nice444.com', 'https://cbtfexchange.com', 'https://startexch99.com']; },
+          get: function() { return ['https://shan444.com', 'https://casino.shan444.com', 'https://casino.nice444.com', 'https://nice444.com', 'https://cbtfexchange.com', 'https://startexch99.com']; },
           configurable: true
         });
       } catch(e) {}
@@ -787,6 +787,8 @@ function transformPlayerHtml(
     /#wm\{[^}]*\}/gi,
     "#wm{display:none!important;opacity:0!important;visibility:hidden!important;pointer-events:none!important;height:0!important;width:0!important;}",
   );
+  html = html.replace(/www\.shan444\.com/gi, "");
+  html = html.replace(/shan444\.com/gi, "");
   html = html.replace(/www\.nice444\.com/gi, "");
   html = html.replace(/nice444\.com/gi, "");
   html = html.replace(/startexch99\.com/gi, "");
@@ -949,7 +951,8 @@ router.get("/player/:eventId", async (req, res) => {
       );
   }
 
-  const forceFresh = Boolean(req.query.force || req.query.fresh);
+  // Protect upstream from client ?fresh=1 / ?force=1 reload storms (10k users never bypass Redis cache)
+  const forceFresh = false;
   recordTableTouch(eventId);
 
   // 1. FAST PATH: Check RAM cache first (serves in 0ms)
@@ -1152,9 +1155,10 @@ router.get("/player/:eventId", async (req, res) => {
 
         let html = await pageRes.text();
 
-        // If upstream returned valid cfg HTML, transform it. Otherwise, build our self-contained native player!
+        // If upstream returned valid cfg HTML, transform and cache it. Otherwise, build fallback without poisoning cache!
+        const hasUpstreamCfg = html.includes("cfg");
         const tokenObj = tableTokenCache.get(eventId);
-        if (html.includes("cfg")) {
+        if (hasUpstreamCfg) {
           html = transformPlayerHtml(
             html,
             watchUrl,
@@ -1163,6 +1167,15 @@ router.get("/player/:eventId", async (req, res) => {
             referer,
             session,
           );
+          // Cache valid player HTML for 15 minutes in RAM and distributed Redis
+          playerCache.set(`casino_${eventId}`, {
+            html,
+            expiresAt: Date.now() + CASINO_CACHE_TTL,
+            timestamp: Date.now(),
+          });
+          redisClient
+            .set(`html:${eventId}`, html, 900) // 15 Minutes in Redis - Always fresh
+            .catch(() => {});
         } else {
           html = buildNativePlayerHtml(
             eventId,
@@ -1172,16 +1185,6 @@ router.get("/player/:eventId", async (req, res) => {
             tokenObj,
           );
         }
-
-        // Cache player HTML for 15 minutes in RAM and distributed Redis
-        playerCache.set(`casino_${eventId}`, {
-          html,
-          expiresAt: Date.now() + CASINO_CACHE_TTL,
-          timestamp: Date.now(),
-        });
-        redisClient
-          .set(`html:${eventId}`, html, 900) // 15 Minutes in Redis - Always fresh
-          .catch(() => {});
 
         // Fast pre-warm initial ping handshake before returning HTML so client gets 0ms ping!
         const cfgMatch = html.match(
@@ -1797,9 +1800,11 @@ router.post("/proxy-ping", express.json(), async (req, res) => {
     const targetOrigin = new URL(targetUrl).origin;
     const pageOrigin = origin
       ? decodeURIComponent(origin)
-      : decodedWatchUrl.includes("startexch")
-        ? "https://startexch99.com/"
-        : "https://nice444.com/";
+      : decodedWatchUrl.includes("shan444")
+        ? "https://shan444.com/"
+        : decodedWatchUrl.includes("startexch")
+          ? "https://startexch99.com/"
+          : "https://nice444.com/";
 
     // Check pingCache URL cache (Serves in 0ms for both init and routine heartbeats)
     if (pingCache.has(targetUrl)) {
