@@ -17,101 +17,78 @@ if (fs.existsSync(envPath)) {
   }
 }
 
-const { PROVIDERS, getAuthToken, proxyFetch, UA, MOBILE_HEADERS } = require("../backend/streamCore");
+const { PROVIDERS, getAuthToken, proxyFetch, UA, MOBILE_HEADERS, GAME_MAP } = require("../backend/streamCore");
 
 (async () => {
   console.log("========================================================");
-  console.log("🔍 Testing All Providers (CBTF, Startexch, Nice444)");
+  console.log("🔍 Scanning Live Casino Tables (Checking for active CFG)");
   console.log("========================================================");
 
-  const tableId = "99.0010";
-  const providersToTest = ["cbtf", "startexch", "nice444"];
+  const testTables = [
+    { id: "99.0018", name: "Dragon Tiger" },
+    { id: "99.0030", name: "Lucky 7" },
+    { id: "99.0013", name: "1 Day Teen Patti" },
+    { id: "99.0010", name: "20-20 Teen Patti" }
+  ];
 
-  for (const provKey of providersToTest) {
-    const prov = PROVIDERS[provKey];
-    console.log(`\n--- Testing Provider: ${prov.name} (${provKey}) ---`);
+  const provKey = "cbtf";
+  const prov = PROVIDERS[provKey];
+  const token = await getAuthToken(provKey, true);
+  console.log(`Using provider: ${prov.name}`);
+
+  for (const table of testTables) {
+    console.log(`\nTesting [${table.id}] ${table.name}...`);
     try {
-      const token = await getAuthToken(provKey, true);
-      console.log(`✅ Auth Token acquired for ${prov.name}`);
-
-      const watchHeaders = {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-        Origin: prov.base,
-        Referer: `${prov.base}/`,
-        "User-Agent": UA,
-        ...MOBILE_HEADERS,
-      };
-
-      const watchBody = JSON.stringify({
-        streamId: tableId,
-        timestamp: Date.now(),
-      });
-
       const res = await proxyFetch(
         `${prov.casinoBase}/casinoapp/exchange/users/streaming/casinoGameWatchLink`,
         {
           method: "POST",
-          headers: watchHeaders,
-          body: watchBody,
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+            Origin: prov.base,
+            Referer: `${prov.base}/`,
+            "User-Agent": UA,
+            ...MOBILE_HEADERS,
+          },
+          body: JSON.stringify({ streamId: table.id, timestamp: Date.now() }),
           timeout: 8000,
         }
       );
 
       const d = await res.json();
-      console.log(`WatchLink Status: ${res.status}`);
       const watchUrl = d?.data?.url;
-      console.log(`Watch URL:`, watchUrl || d);
+      if (!watchUrl) {
+        console.log(`WatchLink error:`, d);
+        continue;
+      }
 
-      if (watchUrl) {
-        // Test GET page with provider origin as referer
-        const pageRes = await proxyFetch(watchUrl, {
-          method: "GET",
-          headers: {
-            "User-Agent": UA,
-            Referer: `${prov.base}/`,
-            ...MOBILE_HEADERS,
-            Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Sec-Fetch-Dest": "iframe",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "cross-site",
-          },
-          timeout: 6000,
-        });
+      // Test with referer prov.casinoBase vs prov.base
+      const pageRes = await proxyFetch(watchUrl, {
+        method: "GET",
+        headers: {
+          "User-Agent": UA,
+          Referer: `${prov.casinoBase}/`,
+          ...MOBILE_HEADERS,
+          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Sec-Fetch-Dest": "iframe",
+          "Sec-Fetch-Mode": "navigate",
+          "Sec-Fetch-Site": "cross-site",
+        },
+        timeout: 6000,
+      });
 
-        console.log(`GET Page Status: ${pageRes.status} | Length: ${(await pageRes.text()).length}`);
-        console.log("ALL Page Headers:", JSON.stringify(pageRes.headers.raw(), null, 2));
-
-        // Test POST /ping
-        const targetPingUrl = watchUrl.endsWith("/") ? `${watchUrl}ping` : `${watchUrl}/ping`;
-        const pingRes = await proxyFetch(targetPingUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Origin: new URL(targetPingUrl).origin,
-            Referer: watchUrl,
-            "User-Agent": UA,
-            ...MOBILE_HEADERS,
-            Accept: "*/*",
-          },
-          body: JSON.stringify({
-            sid: "probe_" + Date.now(),
-            mode: "connecting",
-            init: true,
-            token: true,
-            page: `${prov.base}/`,
-          }),
-          timeout: 6000,
-        });
-
-        const pingText = await pingRes.text();
-        console.log(`POST /ping Status: ${pingRes.status} | Response:`, pingText);
-        if (pingText.includes("token")) {
-          console.log(`🎉🎉🎉 SUCCESS WITH ${prov.name}! Token acquired!`);
-        }
+      const html = await pageRes.text();
+      console.log(`Status: ${pageRes.status} | HTML Length: ${html.length}`);
+      if (html.includes("cfg")) {
+        console.log(`🎉🎉🎉 SUCCESS! TABLE ${table.name} HAS LIVE STREAM CFG!`);
+        console.log("CFG snippet:", html.match(/<script type="application\/json" id="cfg">([^<]+)<\/script>/)?.[1]);
+        break;
+      } else {
+        console.log(`Returned 339-byte loader (${html.slice(0, 100)}...)`);
       }
     } catch (e) {
-      console.error(`❌ Error with ${prov.name}:`, e.message);
+      console.error(`Error on ${table.name}:`, e.message);
     }
   }
 
